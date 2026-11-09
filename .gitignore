@@ -4,3 +4,6 @@ CLAUDE.local.md
 
 # 노트는 별도 비공개 저장소(monsterant/onair-notes)로 관리
 my-notes/
+
+# 환경변수 (비밀값)
+.env
