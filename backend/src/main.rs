@@ -28,5 +28,7 @@ async fn main() {
         .await
         .expect("주소에 묶지 못했습니다");
     tracing::info!("onair backend listening on {bind_addr}");
-    axum::serve(listener, app(AppState { db })).await.expect("서버 오류");
+    axum::serve(listener, app(AppState { db }))
+        .await
+        .expect("서버 오류");
 }
