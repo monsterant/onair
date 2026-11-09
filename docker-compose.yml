@@ -21,12 +21,24 @@ services:
     # OvenMediaEngine. 포트는 이미지 v0.21.0 기본 설정(origin_conf/Server.xml)에서 확인한 값이다.
     image: airensoft/ovenmediaengine:v0.21.0
     environment:
-      # 다른 기기(휴대폰 등)가 영상에 붙을 때 쓸 이 PC의 IP. 비우면 OME 기본값(*)을 쓴다. #10에서 확인.
-      OME_HOST_IP: ${OME_HOST_IP:-*}
+      # 브라우저가 영상 통로(ICE)로 붙을 주소. 필수다. `*`(OME 기본값)로 두면 Docker 안쪽 주소를 알려 줘서 연결이 안 된다(#10 시험).
+      # 이 PC만: 127.0.0.1 / 같은 와이파이의 휴대폰: 이 PC의 LAN IP / 배포: 서버의 공인 IP
+      OME_HOST_IP: ${OME_HOST_IP:?.env에 OME_HOST_IP를 넣으세요 (이 PC만 쓰면 127.0.0.1)}
+      # 송출·시청 허락을 물어볼 백엔드 주소와 서명 키 (ome/Server.xml의 AdmissionWebhooks)
+      OME_ADMISSION_URL: ${OME_ADMISSION_URL:-http://host.docker.internal:8080/ome/admission}
+      # 기본값을 두지 않는다. 백엔드와 같은 값이어야 하고, 비어 있으면 OME가 시작하지 않는다.
+      OME_ADMISSION_SECRET: ${OME_ADMISSION_SECRET:?.env에 OME_ADMISSION_SECRET을 넣으세요}
+    volumes:
+      # 기본 설정에 AdmissionWebhooks를 더하고 인증서(TLS) 칸을 뺀 onair용 설정
+      - ./ome/Server.xml:/opt/ovenmediaengine/bin/origin_conf/Server.xml:ro
+    extra_hosts:
+      # 리눅스 서버에서도 컨테이너가 host.docker.internal로 호스트의 백엔드에 닿게 한다
+      - "host.docker.internal:host-gateway"
     ports:
       - "3333:3333"            # WHIP 송출, WebRTC 신호, LL-HLS 시청
-      - "3478:3478"            # WebRTC TCP 중계
+      - "3478:3478"            # WebRTC TCP 중계 (TURN)
       - "10000-10003:10000-10003/udp"  # WebRTC 영상·소리 통로
+      - "10000:10000/tcp"      # WebRTC 직접 TCP 연결 (UDP가 막힌 네트워크용)
 
 volumes:
   db-data:

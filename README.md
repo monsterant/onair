@@ -10,6 +10,9 @@
 ```bash
 # 1. 환경변수 파일 만들기
 cp .env.example .env
+#    .env의 OME_ADMISSION_SECRET을 16글자 이상 임의 값으로 바꾼다.
+#    예시 값(change-me…) 그대로면 백엔드가 시작하지 않는다.
+#    OME_HOST_IP는 이 PC에서만 쓰면 127.0.0.1 그대로 둔다.
 
 # 2. DB와 미디어 서버(OvenMediaEngine) 띄우기
 docker compose up -d
