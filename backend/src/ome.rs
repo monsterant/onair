@@ -54,22 +54,23 @@ pub struct OmeState {
     pub events: EventLog,
 }
 
-/// 저장소에 공개된 예시 키. 이 값으로는 서버를 띄우지 않는다.
-pub const EXAMPLE_SECRETS: &[&str] = &["change-me-local-only", "change-me"];
+/// 저장소에 공개된 예시 키는 모두 이 글자로 시작한다. 이렇게 시작하는 값으로는 서버를 띄우지 않는다.
+pub const EXAMPLE_SECRET_PREFIX: &str = "change-me";
 
-/// 서명 키가 쓸 만한지 본다. 비었거나, 너무 짧거나, 공개된 예시 값이면 거절한다.
-pub fn check_secret(secret: &str) -> Result<(), &'static str> {
+/// 서명 키가 쓸 만한지 보고, 앞뒤 공백을 뗀 값을 돌려준다(서명에도 이 값을 쓴다).
+/// 비었거나, 16글자보다 짧거나, 공개된 예시 값(대소문자 무시)이면 거절한다.
+pub fn check_secret(secret: &str) -> Result<&str, &'static str> {
     let s = secret.trim();
     if s.is_empty() {
         return Err("값이 비어 있습니다. .env에 OME_ADMISSION_SECRET을 넣으세요");
     }
-    if EXAMPLE_SECRETS.contains(&s) {
+    if s.to_ascii_lowercase().starts_with(EXAMPLE_SECRET_PREFIX) {
         return Err("공개된 예시 값입니다. 임의의 긴 값으로 바꾸세요");
     }
-    if s.len() < 16 {
-        return Err("16자보다 짧습니다");
+    if s.chars().count() < 16 {
+        return Err("16글자보다 짧습니다");
     }
-    Ok(())
+    Ok(s)
 }
 
 /// OME 서명 확인. OME 문서: payload를 SecretKey로 HMAC-SHA1 → base64 url-safe.
@@ -105,11 +106,21 @@ pub async fn admission(
         direction = %r.direction, protocol = %r.protocol, status = %r.status, url = %r.url,
         "OME admission"
     );
+    // 답을 먼저 정한다. 모르는 status는 기록하지 않고 거절한다.
+    let reply = match r.status.as_str() {
+        // 닫힘 알림에는 빈 JSON으로 답한다(OME 문서).
+        "closing" => json!({}),
+        // 시험 단계: 열림은 모두 허락. 실제 권한 검사(방송 소유자 확인)는 #4에서 넣는다.
+        "opening" => json!({ "allowed": true, "reason": "spike: allow all" }),
+        // 모르는 값은 허락하지 않는다. 검사를 빠져나가는 길이 되지 않게 하려는 것이다.
+        _ => return Err(StatusCode::BAD_REQUEST),
+    };
+
     if let Ok(mut log) = state.events.0.lock() {
         log.push(AdmissionEvent {
             direction: r.direction,
             protocol: r.protocol,
-            status: r.status.clone(),
+            status: r.status,
             url: r.url,
             time: r.time,
         });
@@ -118,17 +129,7 @@ pub async fn admission(
             log.drain(0..len - 200);
         }
     }
-
-    match r.status.as_str() {
-        // 닫힘 알림에는 빈 JSON으로 답한다(OME 문서).
-        "closing" => Ok(Json(json!({}))),
-        // 시험 단계: 열림은 모두 허락. 실제 권한 검사(방송 소유자 확인)는 #4에서 넣는다.
-        "opening" => Ok(Json(
-            json!({ "allowed": true, "reason": "spike: allow all" }),
-        )),
-        // 모르는 값은 허락하지 않는다. 검사를 빠져나가는 길이 되지 않게 하려는 것이다.
-        _ => Err(StatusCode::BAD_REQUEST),
-    }
+    Ok(Json(reply))
 }
 
 pub async fn events(State(state): State<OmeState>) -> Json<Vec<AdmissionEvent>> {
@@ -155,11 +156,27 @@ mod tests {
 
     #[test]
     fn rejects_empty_short_or_example_secret() {
-        assert!(check_secret("").is_err());
+        assert_eq!(
+            check_secret(""),
+            Err("값이 비어 있습니다. .env에 OME_ADMISSION_SECRET을 넣으세요")
+        );
         assert!(check_secret("   ").is_err());
+        // 공백을 붙인 예시 값도 거절(앞뒤 공백을 떼고 본다)
+        assert!(check_secret("  change-me-local-only  ").is_err());
+        // 공개 예시 값과 그 변형
+        assert!(check_secret("change-me").is_err());
         assert!(check_secret("change-me-local-only").is_err());
-        assert!(check_secret("short").is_err());
-        assert!(check_secret("a-long-random-secret-1234").is_ok());
+        assert!(check_secret("CHANGE-ME-LOCAL-ONLY").is_err());
+        assert!(check_secret("change-me-local-only1").is_err());
+        // 길이 경계: 15글자는 거절, 16글자는 통과. 한글은 바이트가 아니라 글자로 센다.
+        assert!(check_secret("abcdefghijklmno").is_err());
+        assert_eq!(check_secret("abcdefghijklmnop"), Ok("abcdefghijklmnop"));
+        assert!(check_secret("가나다라마바").is_err());
+        // 앞뒤 공백은 떼고 돌려준다(서명에 쓸 값)
+        assert_eq!(
+            check_secret("  a-long-random-secret-1234 \n"),
+            Ok("a-long-random-secret-1234")
+        );
     }
 
     #[test]

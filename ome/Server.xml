@@ -84,7 +84,7 @@
 					<WorkerCount>1</WorkerCount>
 				</Signalling>
 				<IceCandidates>
-					<!-- Set OME_HOST_IP to your public IP (default: * = all local IPs) -->
+					<!-- onair: OME_HOST_IP는 docker-compose에서 필수값이다. `*` 기본값은 Docker 안에서 연결이 안 된다(#10). -->
 					<!-- UDP ICE scales by port count: each port is handled by one thread. The default range spreads load across cores. -->
 					<IceCandidate>${env:OME_HOST_IP:*}:${env:OME_WEBRTC_CANDIDATE_PORT:10000-10003/udp}</IceCandidate>
 					<!-- Direct TCP ICE (RFC 6544) -->
@@ -121,7 +121,7 @@
 					<WorkerCount>1</WorkerCount>
 				</Signalling>
 				<IceCandidates>
-					<!-- Set OME_HOST_IP to your public IP (default: * = all local IPs) -->
+					<!-- onair: OME_HOST_IP는 docker-compose에서 필수값이다. `*` 기본값은 Docker 안에서 연결이 안 된다(#10). -->
 					<!-- UDP ICE scales by port count: each port is handled by one thread. The default range spreads load across cores. -->
 					<IceCandidate>${env:OME_HOST_IP:*}:${env:OME_WEBRTC_CANDIDATE_PORT:10000-10003/udp}</IceCandidate>
 					<!-- Direct TCP ICE (RFC 6544) -->
@@ -171,6 +171,8 @@
 			     백엔드가 allowed:false를 주면 OME가 연결을 거절한다. 서명 키는 환경변수로 받는다(저장소에 비밀값 없음). -->
 			<AdmissionWebhooks>
 				<ControlServerUrl>${env:OME_ADMISSION_URL:http://host.docker.internal:8080/ome/admission}</ControlServerUrl>
+				<!-- 값은 docker-compose에서 필수로 넣는다. 아래 기본값은 compose 밖에서 띄울 때만 쓰이며,
+				     백엔드가 이 예시 값을 거절하므로 그 경우 송출·시청이 모두 막힌다(열리는 쪽이 아니라 막히는 쪽). -->
 				<SecretKey>${env:OME_ADMISSION_SECRET:change-me-local-only}</SecretKey>
 				<Timeout>3000</Timeout>
 				<Enables>

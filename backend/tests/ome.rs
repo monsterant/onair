@@ -134,17 +134,30 @@ async fn signed_but_broken_json_is_400() {
 
 #[tokio::test]
 async fn unknown_status_is_rejected_not_allowed() {
+    let events = EventLog::default();
     for status in ["garbage", "CLOSING", ""] {
         let body = payload(status, 1);
-        let (code, json) = post(
-            router(EventLog::default()),
-            body.clone(),
-            Some(sign(KEY, &body)),
-        )
-        .await;
+        let (code, _) = post(router(events.clone()), body.clone(), Some(sign(KEY, &body))).await;
         assert_eq!(code, StatusCode::BAD_REQUEST, "status={status:?}");
-        assert_ne!(json["allowed"], true);
     }
+    // 거절한 요청은 기록에 남기지 않는다
+    assert_eq!(recorded(&events), 0);
+}
+
+#[tokio::test]
+async fn events_endpoint_lists_recorded_events() {
+    let events = EventLog::default();
+    let body = payload("opening", 7);
+    post(router(events.clone()), body.clone(), Some(sign(KEY, &body))).await;
+    let res = router(events)
+        .oneshot(Request::get("/ome/events").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let bytes = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let list: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(list.as_array().map(Vec::len), Some(1));
+    assert_eq!(list[0]["url"], "ws://h:3333/app/s7");
 }
 
 #[tokio::test]

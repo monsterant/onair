@@ -27,10 +27,11 @@ async fn main() {
     // OME가 보내는 요청의 서명 키. docker-compose의 OME_ADMISSION_SECRET과 같아야 한다.
     // 기본값을 두지 않는다. 키가 비거나 공개된 예시 값이면 누구나 서명을 맞춰 가짜 요청을 보낼 수 있어서,
     // 그런 상태로는 아예 시작하지 않는다.
-    let ome_secret = std::env::var("OME_ADMISSION_SECRET").unwrap_or_default();
-    if let Err(why) = onair_backend::ome::check_secret(&ome_secret) {
-        panic!("OME_ADMISSION_SECRET 확인 실패: {why}");
-    }
+    let raw_secret = std::env::var("OME_ADMISSION_SECRET").unwrap_or_default();
+    let ome_secret = match onair_backend::ome::check_secret(&raw_secret) {
+        Ok(s) => s.to_string(),
+        Err(why) => panic!("OME_ADMISSION_SECRET 확인 실패: {why}"),
+    };
     let ome_state = onair_backend::ome::OmeState {
         secret: ome_secret,
         events: Default::default(),
