@@ -53,6 +53,11 @@
 - 공모 밖 기능은 치지직 스트리머 기능을 참고한다. 넣기 전에 먼저 보고하고 승인받는다.
 - 치지직의 이름, 로고, 화면 디자인, 이미지는 가져오지 않는다. 기능만 참고한다.
 
+## 상황별 규칙
+| 이럴 때 | 먼저 읽을 파일 |
+|---|---|
+| PR을 올리기 전 (구현 끝, 리뷰 시작) | `.claude/rules/review.md` |
+
 ## 노트 (my-notes, 별도 저장소 monsterant/onair-notes)
 - 이슈 사본: `my-notes/issues/<yyyy-MM-dd>-<이슈번호>-이슈-<제목>.md`
 - 계획: `my-notes/plans/`, 보고서·리뷰: `my-notes/reviews/`
