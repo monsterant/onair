@@ -25,18 +25,20 @@ async fn main() {
         .expect("DATABASE_URL 형식이 잘못되었습니다");
 
     // OME가 보내는 요청의 서명 키. docker-compose의 OME_ADMISSION_SECRET과 같아야 한다.
-    let ome_secret =
-        std::env::var("OME_ADMISSION_SECRET").unwrap_or_else(|_| "change-me-local-only".into());
+    // 기본값을 두지 않는다. 키가 비거나 공개된 예시 값이면 누구나 서명을 맞춰 가짜 요청을 보낼 수 있어서,
+    // 그런 상태로는 아예 시작하지 않는다.
+    let ome_secret = std::env::var("OME_ADMISSION_SECRET").unwrap_or_default();
+    if let Err(why) = onair_backend::ome::check_secret(&ome_secret) {
+        panic!("OME_ADMISSION_SECRET 확인 실패: {why}");
+    }
     let ome_state = onair_backend::ome::OmeState {
         secret: ome_secret,
         events: Default::default(),
     };
 
-    // 시험 화면(5173)에서 OME 이벤트 목록을 부를 수 있게 다른 주소 호출(CORS)을 연다. 시험용.
-    let cors = tower_http::cors::CorsLayer::permissive();
-    let router = app(AppState { db })
-        .merge(onair_backend::ome_routes(ome_state))
-        .layer(cors);
+    // CORS(다른 주소에서 오는 호출 허용)는 켜지 않는다. 화면은 vite 프록시(/api)로 같은 주소에서 부르고,
+    // OME 웹훅은 서버끼리 주고받으므로 필요 없다.
+    let router = app(AppState { db }).merge(onair_backend::ome_routes(ome_state));
 
     let listener = tokio::net::TcpListener::bind(&bind_addr)
         .await

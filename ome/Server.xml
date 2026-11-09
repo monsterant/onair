@@ -67,15 +67,8 @@
 			<OVT>
 				<WorkerCount>1</WorkerCount>
 			</OVT>
-			<!-- Push providers -->
-			<RTMP>
-				<Port>${env:OME_RTMP_PROV_PORT:1935}</Port>
-				<WorkerCount>1</WorkerCount>
-			</RTMP>
-			<SRT>
-				<Port>${env:OME_SRT_PROV_PORT:9999}</Port>
-				<WorkerCount>1</WorkerCount>
-			</SRT>
+			<!-- Push providers: onair는 브라우저 WHIP(WebRTC)만 쓴다.
+			     RTMP·SRT는 AdmissionWebhooks 검사를 거치지 않는 송출 입구라서 뺐다(#18). -->
 			<!--
 			<MPEGTS>
 					<- Listen on port 4000
@@ -323,8 +316,6 @@
 								<Url>*</Url>
 							</CrossDomains>
 						</WebRTC>
-						<RTMP />
-						<SRT />
 						<RTSPPull />
 						<Schedule>
 							<MediaRootDir>/opt/ovenmediaengine/media</MediaRootDir>

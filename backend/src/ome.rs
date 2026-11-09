@@ -54,6 +54,24 @@ pub struct OmeState {
     pub events: EventLog,
 }
 
+/// 저장소에 공개된 예시 키. 이 값으로는 서버를 띄우지 않는다.
+pub const EXAMPLE_SECRETS: &[&str] = &["change-me-local-only", "change-me"];
+
+/// 서명 키가 쓸 만한지 본다. 비었거나, 너무 짧거나, 공개된 예시 값이면 거절한다.
+pub fn check_secret(secret: &str) -> Result<(), &'static str> {
+    let s = secret.trim();
+    if s.is_empty() {
+        return Err("값이 비어 있습니다. .env에 OME_ADMISSION_SECRET을 넣으세요");
+    }
+    if EXAMPLE_SECRETS.contains(&s) {
+        return Err("공개된 예시 값입니다. 임의의 긴 값으로 바꾸세요");
+    }
+    if s.len() < 16 {
+        return Err("16자보다 짧습니다");
+    }
+    Ok(())
+}
+
 /// OME 서명 확인. OME 문서: payload를 SecretKey로 HMAC-SHA1 → base64 url-safe.
 /// 패딩(`=`) 유무가 문서에 없어서, 패딩을 떼고 비교한다.
 pub fn signature_ok(secret: &str, body: &[u8], header: &str) -> bool {
@@ -101,13 +119,16 @@ pub async fn admission(
         }
     }
 
-    if r.status == "closing" {
-        return Ok(Json(json!({})));
+    match r.status.as_str() {
+        // 닫힘 알림에는 빈 JSON으로 답한다(OME 문서).
+        "closing" => Ok(Json(json!({}))),
+        // 시험 단계: 열림은 모두 허락. 실제 권한 검사(방송 소유자 확인)는 #4에서 넣는다.
+        "opening" => Ok(Json(
+            json!({ "allowed": true, "reason": "spike: allow all" }),
+        )),
+        // 모르는 값은 허락하지 않는다. 검사를 빠져나가는 길이 되지 않게 하려는 것이다.
+        _ => Err(StatusCode::BAD_REQUEST),
     }
-    // 시험 단계: 모두 허락. 실제 권한 검사(방송 소유자 확인)는 #4에서 넣는다.
-    Ok(Json(
-        json!({ "allowed": true, "reason": "spike: allow all" }),
-    ))
 }
 
 pub async fn events(State(state): State<OmeState>) -> Json<Vec<AdmissionEvent>> {
@@ -130,6 +151,15 @@ mod tests {
         let sig = sign("k", body);
         assert!(signature_ok("k", body, &sig));
         assert!(signature_ok("k", body, &format!("{sig}=")));
+    }
+
+    #[test]
+    fn rejects_empty_short_or_example_secret() {
+        assert!(check_secret("").is_err());
+        assert!(check_secret("   ").is_err());
+        assert!(check_secret("change-me-local-only").is_err());
+        assert!(check_secret("short").is_err());
+        assert!(check_secret("a-long-random-secret-1234").is_ok());
     }
 
     #[test]
