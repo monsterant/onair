@@ -1,0 +1,6 @@
+# 개인 Claude 설정 (이 PC 전용 권한)
+.claude/settings.local.json
+CLAUDE.local.md
+
+# 노트는 별도 비공개 저장소(monsterant/onair-notes)로 관리
+my-notes/
