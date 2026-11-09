@@ -24,11 +24,23 @@ async fn main() {
         .connect_lazy(&database_url)
         .expect("DATABASE_URL 형식이 잘못되었습니다");
 
+    // OME가 보내는 요청의 서명 키. docker-compose의 OME_ADMISSION_SECRET과 같아야 한다.
+    let ome_secret =
+        std::env::var("OME_ADMISSION_SECRET").unwrap_or_else(|_| "change-me-local-only".into());
+    let ome_state = onair_backend::ome::OmeState {
+        secret: ome_secret,
+        events: Default::default(),
+    };
+
+    // 시험 화면(5173)에서 OME 이벤트 목록을 부를 수 있게 다른 주소 호출(CORS)을 연다. 시험용.
+    let cors = tower_http::cors::CorsLayer::permissive();
+    let router = app(AppState { db })
+        .merge(onair_backend::ome_routes(ome_state))
+        .layer(cors);
+
     let listener = tokio::net::TcpListener::bind(&bind_addr)
         .await
         .expect("주소에 묶지 못했습니다");
     tracing::info!("onair backend listening on {bind_addr}");
-    axum::serve(listener, app(AppState { db }))
-        .await
-        .expect("서버 오류");
+    axum::serve(listener, router).await.expect("서버 오류");
 }

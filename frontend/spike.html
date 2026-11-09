@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>onair #10 송출·시청 시험</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 16px; max-width: 900px; }
+      fieldset { margin-bottom: 12px; }
+      button { margin: 4px 4px 4px 0; padding: 8px 12px; }
+      video, #player { width: 100%; max-width: 640px; background: #000; }
+      #log, #events { white-space: pre-wrap; font-family: monospace; font-size: 12px; background: #f4f4f4; padding: 8px; max-height: 220px; overflow: auto; }
+    </style>
+    <!-- 시청 플레이어: OvenPlayer (MIT, https://github.com/AirenSoft/OvenPlayer), LL-HLS용 hls.js (Apache-2.0) -->
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@1.7.4/dist/hls.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/ovenplayer@0.10.55/dist/ovenplayer.js"></script>
+  </head>
+  <body>
+    <h1>#10 송출·시청 시험</h1>
+    <p>시험용 화면이다. main에는 넣지 않는다.</p>
+
+    <fieldset>
+      <legend>방송 이름</legend>
+      <input id="stream" value="test1" />
+      <span id="state">대기</span>
+    </fieldset>
+
+    <fieldset>
+      <legend>송출</legend>
+      <button id="pc">PC: 화면 공유 + 탭·시스템 소리 + 마이크</button>
+      <button id="mobile">모바일: 카메라 + 마이크</button>
+      <button id="stop">송출 종료</button>
+      <video id="preview" muted autoplay playsinline></video>
+    </fieldset>
+
+    <fieldset>
+      <legend>시청</legend>
+      <button id="watch-webrtc">WebRTC로 보기</button>
+      <button id="watch-llhls">LL-HLS로 보기</button>
+      <div id="player"></div>
+    </fieldset>
+
+    <fieldset>
+      <legend>기록</legend>
+      <div id="log"></div>
+      <h3>OME가 백엔드에 보낸 알림 (opening/closing)</h3>
+      <div id="events"></div>
+    </fieldset>
+
+    <script type="module" src="/src/spike.ts"></script>
+  </body>
+</html>

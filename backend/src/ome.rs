@@ -1,0 +1,143 @@
+//! OvenMediaEngine(OME) AdmissionWebhooks 받는 곳 (#10 시험).
+//!
+//! OME는 누가 송출(incoming)하거나 시청(outgoing)을 열고 닫을 때마다 여기로 POST를 보낸다.
+//! - opening: "열어도 되나요?" → `allowed`로 답한다. 시험 단계에서는 모두 허락한다.
+//! - closing: "닫혔어요" 알림 → 빈 JSON으로 답한다. 방송자가 탭을 닫았을 때 서버가 알 수 있는지 여기서 확인한다.
+//!
+//! 요청 본문은 `X-OME-Signature` 헤더로 서명돼 온다(HMAC-SHA1, base64 url-safe).
+//! 서명이 틀리면 누군가 OME인 척 보낸 것이라 거절한다.
+
+use std::sync::{Arc, Mutex};
+
+use axum::{
+    Json,
+    body::Bytes,
+    extract::State,
+    http::{HeaderMap, StatusCode},
+};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use hmac::{Hmac, KeyInit, Mac};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use sha1::Sha1;
+
+/// 시험 화면에서 보려고 최근 이벤트를 메모리에 모아 둔다. 서버를 다시 켜면 사라진다(시험용).
+#[derive(Clone, Default)]
+pub struct EventLog(pub Arc<Mutex<Vec<AdmissionEvent>>>);
+
+#[derive(Clone, Serialize, Debug)]
+pub struct AdmissionEvent {
+    pub direction: String,
+    pub protocol: String,
+    pub status: String,
+    pub url: String,
+    pub time: String,
+}
+
+#[derive(Deserialize)]
+struct Payload {
+    request: RequestPart,
+}
+
+#[derive(Deserialize)]
+struct RequestPart {
+    direction: String,
+    protocol: String,
+    status: String,
+    url: String,
+    time: String,
+}
+
+#[derive(Clone)]
+pub struct OmeState {
+    pub secret: String,
+    pub events: EventLog,
+}
+
+/// OME 서명 확인. OME 문서: payload를 SecretKey로 HMAC-SHA1 → base64 url-safe.
+/// 패딩(`=`) 유무가 문서에 없어서, 패딩을 떼고 비교한다.
+pub fn signature_ok(secret: &str, body: &[u8], header: &str) -> bool {
+    let Ok(expected) = URL_SAFE_NO_PAD.decode(header.trim_end_matches('=')) else {
+        return false;
+    };
+    let Ok(mut mac) = Hmac::<Sha1>::new_from_slice(secret.as_bytes()) else {
+        return false;
+    };
+    mac.update(body);
+    mac.verify_slice(&expected).is_ok()
+}
+
+pub async fn admission(
+    State(state): State<OmeState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<Value>, StatusCode> {
+    let sig = headers
+        .get("x-ome-signature")
+        .and_then(|v| v.to_str().ok())
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    if !signature_ok(&state.secret, &body, sig) {
+        tracing::warn!("OME admission: 서명이 맞지 않아 거절");
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
+    let payload: Payload = serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let r = payload.request;
+    tracing::info!(
+        direction = %r.direction, protocol = %r.protocol, status = %r.status, url = %r.url,
+        "OME admission"
+    );
+    if let Ok(mut log) = state.events.0.lock() {
+        log.push(AdmissionEvent {
+            direction: r.direction,
+            protocol: r.protocol,
+            status: r.status.clone(),
+            url: r.url,
+            time: r.time,
+        });
+        let len = log.len();
+        if len > 200 {
+            log.drain(0..len - 200);
+        }
+    }
+
+    if r.status == "closing" {
+        return Ok(Json(json!({})));
+    }
+    // 시험 단계: 모두 허락. 실제 권한 검사(방송 소유자 확인)는 #4에서 넣는다.
+    Ok(Json(
+        json!({ "allowed": true, "reason": "spike: allow all" }),
+    ))
+}
+
+pub async fn events(State(state): State<OmeState>) -> Json<Vec<AdmissionEvent>> {
+    Json(state.events.0.lock().map(|l| l.clone()).unwrap_or_default())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sign(secret: &str, body: &[u8]) -> String {
+        let mut mac = Hmac::<Sha1>::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(body);
+        URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
+    }
+
+    #[test]
+    fn accepts_correct_signature_with_or_without_padding() {
+        let body = br#"{"request":{}}"#;
+        let sig = sign("k", body);
+        assert!(signature_ok("k", body, &sig));
+        assert!(signature_ok("k", body, &format!("{sig}=")));
+    }
+
+    #[test]
+    fn rejects_wrong_key_or_tampered_body() {
+        let body = br#"{"request":{}}"#;
+        let sig = sign("k", body);
+        assert!(!signature_ok("other", body, &sig));
+        assert!(!signature_ok("k", br#"{"request":{"x":1}}"#, &sig));
+        assert!(!signature_ok("k", body, "not-base64!!"));
+    }
+}

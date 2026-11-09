@@ -2,7 +2,13 @@
 //! main.rs는 설정을 읽고 서버를 띄우기만 하고, 실제 길(라우트)은 여기서 조립한다.
 //! 이렇게 나누면 테스트에서 진짜 서버를 띄우지 않고도 라우터를 바로 불러 시험할 수 있다.
 
-use axum::{Json, Router, extract::State, routing::get};
+pub mod ome;
+
+use axum::{
+    Json, Router,
+    extract::State,
+    routing::{get, post},
+};
 use serde::Serialize;
 use sqlx::PgPool;
 
@@ -15,6 +21,14 @@ pub struct AppState {
 pub fn app(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
+        .with_state(state)
+}
+
+/// OME AdmissionWebhooks 길. 시험(#10)용이라 따로 붙인다.
+pub fn ome_routes(state: ome::OmeState) -> Router {
+    Router::new()
+        .route("/ome/admission", post(ome::admission))
+        .route("/ome/events", get(ome::events))
         .with_state(state)
 }
 
