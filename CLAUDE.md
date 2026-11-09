@@ -56,7 +56,7 @@
 ## 상황별 규칙
 | 이럴 때 | 먼저 읽을 파일 |
 |---|---|
-| PR을 올리기 전 (구현 끝, 리뷰 시작) | `.claude/rules/review.md` |
+| 이슈 구현을 시작할 때 (계획 전), PR을 올리기 전 | `.claude/rules/review.md` |
 
 ## 노트 (my-notes, 별도 저장소 monsterant/onair-notes)
 - 이슈 사본: `my-notes/issues/<yyyy-MM-dd>-<이슈번호>-이슈-<제목>.md`
