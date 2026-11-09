@@ -1,0 +1,32 @@
+# 로컬 개발용: DB와 미디어 서버만 띄운다. 백엔드(cargo run)와 프론트엔드(npm run dev)는 따로 실행한다.
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-onair}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-onair-local-only}
+      POSTGRES_DB: ${POSTGRES_DB:-onair}
+    ports:
+      # 5432는 다른 프로젝트 DB와 겹칠 수 있어서 기본을 55432로 둔다.
+      - "${DB_PORT:-55432}:5432"
+    volumes:
+      # 컨테이너를 지워도 데이터가 남도록 이름 붙은 볼륨에 저장한다 (서버 재시작 후 조회 요구사항).
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-onair}"]
+      interval: 5s
+      retries: 10
+
+  ome:
+    # OvenMediaEngine. 포트는 이미지 v0.21.0 기본 설정(origin_conf/Server.xml)에서 확인한 값이다.
+    image: airensoft/ovenmediaengine:v0.21.0
+    environment:
+      # 다른 기기(휴대폰 등)가 영상에 붙을 때 쓸 이 PC의 IP. 비우면 OME 기본값(*)을 쓴다. #10에서 확인.
+      OME_HOST_IP: ${OME_HOST_IP:-*}
+    ports:
+      - "3333:3333"            # WHIP 송출, WebRTC 신호, LL-HLS 시청
+      - "3478:3478"            # WebRTC TCP 중계
+      - "10000-10003:10000-10003/udp"  # WebRTC 영상·소리 통로
+
+volumes:
+  db-data:
