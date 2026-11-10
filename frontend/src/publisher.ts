@@ -259,9 +259,8 @@ export async function cameraAndMic(register: (t: MediaStreamTrack[]) => void, fa
       audio: { echoCancellation: true, noiseSuppression: true },
     });
   } catch (e) {
-    if (e instanceof DOMException && e.name === 'OverconstrainedError') {
-      throw new PublishError('이 기기에서 고른 카메라를 찾지 못했습니다. 다른 카메라를 골라 보세요');
-    }
+    // facingMode 등은 '바람(ideal)'이라 고른 카메라가 없어도 실패하지 않고 다른 카메라가 켜진다.
+    // 실제로 켜진 카메라는 화면 쪽에서 getSettings()로 보고 알린다(#33 M4).
     throw new PublishError(message(e));
   }
   register(cam.getTracks());
@@ -279,15 +278,28 @@ export function keepScreenOn(): () => void {
   const wl = (navigator as unknown as { wakeLock?: { request: (t: 'screen') => Promise<Sentinel> } }).wakeLock;
   if (!wl) return () => {};
   let sentinel: Sentinel | null = null;
+  let pending = false;
   let active = true;
   const lock = () => {
-    if (!active || document.visibilityState !== 'visible') return;
+    // 이미 잠갔거나 요청 중이면 또 요청하지 않는다(겹치면 하나를 놓쳐 풀지 못한다, #33 M7)
+    if (!active || pending || sentinel || document.visibilityState !== 'visible') return;
+    pending = true;
     wl.request('screen')
       .then((s) => {
-        if (active) sentinel = s;
-        else void s.release();
+        if (!active) {
+          void s.release();
+          return;
+        }
+        sentinel = s;
+        // 탭을 떠나면 브라우저가 잠금을 푼다. 그때 비워 둬야 돌아왔을 때 다시 잠근다.
+        (s as unknown as EventTarget).addEventListener?.('release', () => {
+          if (sentinel === s) sentinel = null;
+        });
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => {
+        pending = false;
+      });
   };
   document.addEventListener('visibilitychange', lock);
   lock();

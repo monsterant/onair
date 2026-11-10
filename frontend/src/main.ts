@@ -308,7 +308,7 @@ function studioPanel(current: () => Broadcast, publisher: Publisher): { el: HTML
   const startScreen = el('button', { type: 'button', className: 'start-screen', textContent: '화면 공유로 방송 시작' });
   const facing = el(
     'select',
-    { className: 'facing', title: '카메라' },
+    { className: 'facing', title: '카메라', ariaLabel: '카메라 고르기' },
     el('option', { value: 'user', textContent: '앞 카메라' }),
     el('option', { value: 'environment', textContent: '뒤 카메라' }),
   );
@@ -317,8 +317,8 @@ function studioPanel(current: () => Broadcast, publisher: Publisher): { el: HTML
   stop.hidden = true;
   const screenSupported = !!navigator.mediaDevices?.getDisplayMedia;
   const cameraSupported = !!navigator.mediaDevices?.getUserMedia;
-  /** 송출하는 동안 화면 꺼짐 막기(휴대폰). 멈추면 푼다. */
-  let releaseScreen: (() => void) | null = null;
+  /** 송출하는 동안만 거는 것들(화면 꺼짐 막기, 카메라 방송의 화면 숨김 감시 등). 멈추면 모두 푼다. */
+  let releases: (() => void)[] = [];
 
   const paint = (s: PublishState, detail?: string) => {
     state.textContent = PUBLISH_LABEL[s];
@@ -327,7 +327,7 @@ function studioPanel(current: () => Broadcast, publisher: Publisher): { el: HTML
     startScreen.disabled = !idle || !screenSupported;
     startCamera.disabled = !idle || !cameraSupported;
     withMic.disabled = !idle;
-    facing.disabled = !idle;
+    facing.disabled = !idle || !cameraSupported;
     stop.hidden = idle;
     // 멈추는 중에는 멈춤을 다시 누를 수 없다(#30 P2)
     stop.disabled = s === 'stopping';
@@ -336,8 +336,8 @@ function studioPanel(current: () => Broadcast, publisher: Publisher): { el: HTML
       preview.srcObject = null;
       preview.classList.remove('mirror');
       warn.textContent = '';
-      releaseScreen?.();
-      releaseScreen = null;
+      releases.forEach((f) => f());
+      releases = [];
       if (detail) note.textContent = detail;
     }
   };
@@ -347,7 +347,7 @@ function studioPanel(current: () => Broadcast, publisher: Publisher): { el: HTML
   const begin = async (
     getTracks: Parameters<Publisher['start']>[0],
     endedReason: string,
-    afterStart: () => void,
+    afterStart: (stream: MediaStream) => void,
   ) => {
     startScreen.disabled = true;
     startCamera.disabled = true;
@@ -357,8 +357,8 @@ function studioPanel(current: () => Broadcast, publisher: Publisher): { el: HTML
       const stream = await publisher.start(getTracks, async () => (await publishInfo(current().id)).whip_path, endedReason);
       preview.srcObject = stream;
       preview.hidden = false;
-      releaseScreen = keepScreenOn();
-      afterStart();
+      releases.push(keepScreenOn());
+      afterStart(stream);
     } catch (e) {
       // 멈춰서 취소된 시도는 조용히 넘긴다(새 시도나 멈춘 이유를 덮지 않게, #30 P7)
       if (e instanceof CancelledError) return;
@@ -389,11 +389,49 @@ function studioPanel(current: () => Broadcast, publisher: Publisher): { el: HTML
   };
   startCamera.onclick = () => {
     const f = facing.value as Facing;
+    let mic: MediaStreamTrack | undefined;
     void begin(
-      (register) => cameraAndMic(register, f),
-      '카메라가 꺼졌습니다(다른 앱으로 가거나 화면이 꺼지면 브라우저가 카메라를 멈춥니다)',
-      // 앞 카메라는 거울처럼 보여야 자연스럽다. 미리보기만 뒤집는다(시청자에게 가는 영상은 그대로).
-      () => preview.classList.toggle('mirror', f === 'user'),
+      async (register) => {
+        const t = await cameraAndMic(register, f);
+        mic = t.audio[0];
+        return t;
+      },
+      '카메라가 꺼져 송출을 멈췄습니다',
+      (stream) => {
+        const video = stream.getVideoTracks()[0];
+        // 실제로 켜진 카메라 방향(브라우저가 알려 줄 때). 고른 카메라가 없으면 브라우저가 다른 카메라를 켠다(#33 M4).
+        const actual = video?.getSettings().facingMode as Facing | undefined;
+        if (actual && actual !== f) {
+          warn.textContent = `고른 ${f === 'user' ? '앞' : '뒤'} 카메라가 없어 다른 카메라로 보냅니다.`;
+        }
+        // 앞 카메라는 거울처럼 보여야 자연스럽다. 미리보기만 뒤집는다(시청자에게 가는 영상은 그대로).
+        preview.classList.toggle('mirror', (actual ?? f) === 'user');
+
+        // 휴대폰은 다른 앱으로 가거나 화면이 꺼질 때 카메라를 끝내지 않고 잠시 멈추기(mute)만 하는 경우가 많다.
+        // 그러면 검은 화면이 나가고 마이크가 계속 갈 수도 있어서, 카메라 방송은 화면이 숨겨지면 송출을 멈춘다(#33 M1).
+        // (PC 화면 공유는 다른 탭으로 가는 게 보통이라 이 처리를 하지 않는다.)
+        const onHidden = () => {
+          if (document.visibilityState === 'hidden' && publisher.state !== 'idle') {
+            void publisher.stop('화면을 떠나 송출을 멈췄습니다. 카메라 방송은 이 화면을 켜 둔 동안만 됩니다');
+          }
+        };
+        document.addEventListener('visibilitychange', onHidden);
+        releases.push(() => document.removeEventListener('visibilitychange', onHidden));
+        if (video) {
+          video.onmute = () => {
+            if (publisher.state !== 'idle') warn.textContent = '카메라 영상이 잠시 멈췄습니다. 이 화면을 켜 두세요.';
+          };
+          video.onunmute = () => {
+            if (warn.textContent?.startsWith('카메라 영상이')) warn.textContent = '';
+          };
+        }
+        // 마이크만 끊기면(전화 등) 소리 없이 계속 가므로 알린다(#33 M6)
+        if (mic) {
+          mic.onended = () => {
+            if (publisher.state !== 'idle') warn.textContent = '마이크가 꺼졌습니다. 지금은 소리 없이 송출 중입니다.';
+          };
+        }
+      },
     );
   };
   stop.onclick = () => void publisher.stop('송출을 멈췄습니다. 다시 시작할 수 있습니다.');
