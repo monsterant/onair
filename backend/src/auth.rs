@@ -138,27 +138,42 @@ fn dummy_hash() -> &'static str {
 /// - 동시에 도는 계산은 2개까지만 허락한다. 나머지는 차례를 기다린다(2GB 서버의 CPU·메모리 보호).
 static HASH_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
+// 허가(slot)는 계산하는 스레드 안으로 옮겨서 계산이 끝날 때 돌려준다.
+// 요청이 중간에 끊기면 async 쪽은 버려지지만 계산은 끝까지 돈다. 허가를 async 쪽에 두면
+// 그 순간 허가가 풀려 동시 계산이 2개를 넘을 수 있다(#24 2바퀴).
+
 async fn hash_password_async(pw: String) -> Result<String, ApiError> {
-    let _slot = HASH_SLOTS.acquire().await.map_err(|_| ApiError::Internal)?;
-    tokio::task::spawn_blocking(move || hash_password(&pw))
-        .await
-        .map_err(|_| ApiError::Internal)?
+    let slot = HASH_SLOTS.acquire().await.map_err(|_| ApiError::Internal)?;
+    tokio::task::spawn_blocking(move || {
+        let _slot = slot;
+        hash_password(&pw)
+    })
+    .await
+    .map_err(|_| ApiError::Internal)?
 }
 
 /// 비밀번호 확인. `stored`가 None이면(아이디가 없을 때) 가짜 해시로 같은 시간만큼 계산하고 false를 돌려준다.
 async fn verify_password_async(pw: String, stored: Option<String>) -> bool {
-    let Ok(_slot) = HASH_SLOTS.acquire().await else {
+    let Ok(slot) = HASH_SLOTS.acquire().await else {
         return false;
     };
-    tokio::task::spawn_blocking(move || match stored {
-        Some(s) => verify_password(&pw, &s),
-        None => {
-            verify_password(&pw, dummy_hash());
-            false
+    tokio::task::spawn_blocking(move || {
+        let _slot = slot;
+        match stored {
+            Some(s) => verify_password(&pw, &s),
+            None => {
+                verify_password(&pw, dummy_hash());
+                false
+            }
         }
     })
     .await
     .unwrap_or(false)
+}
+
+/// 시험용: 지금 비어 있는 해시 허가 수(최대 2)
+pub fn free_hash_slots() -> usize {
+    HASH_SLOTS.available_permits()
 }
 
 /// 32바이트 임의 토큰(쿠키에 넣는 값)과 그 SHA-256(DB에 넣는 값)

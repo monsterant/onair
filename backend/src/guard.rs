@@ -63,6 +63,9 @@ pub async fn reject_cross_site(req: Request, next: Next) -> Response {
 
 // ---------- 2. 횟수 제한 ----------
 
+/// 동시에 기억하는 키(IP)의 최대 수
+const MAX_KEYS: usize = 10_000;
+
 /// 정해진 시간(창) 안에 키 하나당 받을 수 있는 요청 수를 센다.
 #[derive(Clone, Debug)]
 pub struct RateLimiter {
@@ -86,9 +89,12 @@ impl RateLimiter {
         let Ok(mut map) = self.counts.lock() else {
             return true;
         };
-        // 기록이 많이 쌓이면 창이 지난 것을 지운다(메모리가 끝없이 늘지 않게).
-        if map.len() > 10_000 {
+        // 기록이 많이 쌓이면 창이 지난 것을 지운다. 그래도 가득 차 있으면 새 키는 받지 않는다(메모리 상한, #24 2바퀴).
+        if map.len() >= MAX_KEYS && !map.contains_key(key) {
             map.retain(|_, (start, _)| now.duration_since(*start) < self.window);
+            if map.len() >= MAX_KEYS {
+                return false;
+            }
         }
         let entry = map.entry(key.to_string()).or_insert((now, 0));
         if now.duration_since(entry.0) >= self.window {
@@ -208,5 +214,20 @@ mod tests {
             client_key(&h(&[("x-forwarded-for", "9.9.9.9, 2.2.2.2")])),
             "2.2.2.2"
         );
+    }
+}
+
+#[cfg(test)]
+mod cap_tests {
+    use super::*;
+
+    #[test]
+    fn limiter_refuses_new_keys_when_full_but_keeps_known_keys() {
+        let l = RateLimiter::new(5, Duration::from_secs(60));
+        for i in 0..MAX_KEYS {
+            assert!(l.allow(&format!("k{i}")));
+        }
+        assert!(!l.allow("new-key"));
+        assert!(l.allow("k0"));
     }
 }
