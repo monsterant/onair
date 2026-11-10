@@ -3,6 +3,7 @@
 //! 이렇게 나누면 테스트에서 진짜 서버를 띄우지 않고도 라우터를 바로 불러 시험할 수 있다.
 
 pub mod auth;
+pub mod guard;
 pub mod ome;
 
 use axum::{
@@ -21,13 +22,22 @@ pub struct AppState {
 }
 
 pub fn app(state: AppState) -> Router {
-    Router::new()
-        .route("/health", get(health))
+    // 비밀번호를 확인하거나 세션을 새로 만드는 길: 횟수 제한을 건다(#24 A2)
+    let limited = Router::new()
         .route("/auth/signup", post(auth::signup))
         .route("/auth/login", post(auth::login))
+        .route("/auth/demo/{n}", post(auth::demo_login))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            guard::limit_auth,
+        ));
+    Router::new()
+        .route("/health", get(health))
         .route("/auth/logout", post(auth::logout))
         .route("/auth/me", get(auth::me))
-        .route("/auth/demo/{n}", post(auth::demo_login))
+        .merge(limited)
+        // 상태를 바꾸는 요청은 같은 사이트에서 온 것만 받는다(#24 A3). OME 웹훅(ome_routes)에는 걸지 않는다.
+        .layer(axum::middleware::from_fn(guard::reject_cross_site))
         .with_state(state)
 }
 

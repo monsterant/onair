@@ -14,7 +14,10 @@ use tower::ServiceExt;
 fn router(db: PgPool, demo_login: bool) -> Router {
     app(AppState {
         db,
-        auth: AuthConfig { demo_login },
+        auth: AuthConfig {
+            demo_login,
+            ..Default::default()
+        },
     })
 }
 
@@ -411,4 +414,243 @@ async fn demo_login_enabled_two_users_idempotent(db: PgPool) {
         .await
         .unwrap();
     assert_eq!(n, 2);
+}
+
+// ---------- #24 재수정 시험 ----------
+
+/// 헤더를 마음대로 붙여 보내는 요청
+async fn call_h(r: &Router, method: &str, path: &str, headers: &[(&str, &str)]) -> StatusCode {
+    let mut req = Request::builder().method(method).uri(path);
+    for (k, v) in headers {
+        req = req.header(*k, *v);
+    }
+    r.clone()
+        .oneshot(req.body(Body::empty()).unwrap())
+        .await
+        .unwrap()
+        .status()
+}
+
+#[sqlx::test]
+async fn session_cookie_lasts_seven_days(db: PgPool) {
+    let r = router(db, true);
+    let s = call(
+        &r,
+        "POST",
+        "/auth/signup",
+        creds("hana", "password123"),
+        None,
+    )
+    .await;
+    let l = call(
+        &r,
+        "POST",
+        "/auth/login",
+        creds("hana", "password123"),
+        None,
+    )
+    .await;
+    let d = call(&r, "POST", "/auth/demo/1", None, None).await;
+    for res in [s, l, d] {
+        let sc = res.set_cookie.unwrap();
+        assert!(sc.contains("Max-Age=604800"), "{sc}");
+    }
+}
+
+#[sqlx::test]
+async fn relogin_removes_previous_session(db: PgPool) {
+    let r = router(db.clone(), true);
+    let old = call(&r, "POST", "/auth/demo/1", None, None)
+        .await
+        .cookie
+        .unwrap();
+    let new = call(&r, "POST", "/auth/demo/2", None, Some(&old))
+        .await
+        .cookie
+        .unwrap();
+    assert_eq!(
+        call(&r, "GET", "/auth/me", None, Some(&old)).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        call(&r, "GET", "/auth/me", None, Some(&new)).await.json["username"],
+        "demo2"
+    );
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM sessions")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(n, 1);
+}
+
+#[sqlx::test]
+async fn login_clears_expired_sessions_of_that_user(db: PgPool) {
+    let r = router(db.clone(), false);
+    call(
+        &r,
+        "POST",
+        "/auth/signup",
+        creds("ivan", "password123"),
+        None,
+    )
+    .await;
+    sqlx::query("UPDATE sessions SET expires_at = now() - interval '1 second'")
+        .execute(&db)
+        .await
+        .unwrap();
+    call(
+        &r,
+        "POST",
+        "/auth/login",
+        creds("ivan", "password123"),
+        None,
+    )
+    .await;
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM sessions")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(n, 1);
+}
+
+#[sqlx::test]
+async fn each_cookie_maps_to_its_own_user(db: PgPool) {
+    let r = router(db, false);
+    let a = call(
+        &r,
+        "POST",
+        "/auth/signup",
+        creds("user_a", "password123"),
+        None,
+    )
+    .await
+    .cookie
+    .unwrap();
+    let b = call(
+        &r,
+        "POST",
+        "/auth/signup",
+        creds("user_b", "password123"),
+        None,
+    )
+    .await
+    .cookie
+    .unwrap();
+    assert_eq!(
+        call(&r, "GET", "/auth/me", None, Some(&a)).await.json["username"],
+        "user_a"
+    );
+    assert_eq!(
+        call(&r, "GET", "/auth/me", None, Some(&b)).await.json["username"],
+        "user_b"
+    );
+    // 다른 사람의 세션이 살아 있어도, 틀린 쿠키로는 로그인되지 않는다
+    assert_eq!(
+        call(&r, "GET", "/auth/me", None, Some("00ff")).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[sqlx::test]
+async fn overlong_password_login_is_401_without_cookie(db: PgPool) {
+    let r = router(db, false);
+    call(
+        &r,
+        "POST",
+        "/auth/signup",
+        creds("judy", "password123"),
+        None,
+    )
+    .await;
+    let long = "x".repeat(129);
+    let res = call(&r, "POST", "/auth/login", creds("judy", &long), None).await;
+    assert_eq!(res.status, StatusCode::UNAUTHORIZED);
+    assert!(res.cookie.is_none());
+    assert!(onair_backend::auth::login_input_ok(&"x".repeat(128)));
+    assert!(!onair_backend::auth::login_input_ok(&long));
+}
+
+#[sqlx::test]
+async fn cross_site_posts_are_rejected(db: PgPool) {
+    let r = router(db.clone(), true);
+    let evil = [
+        ("host", "onair.example"),
+        ("origin", "https://evil.example"),
+    ];
+    let fetch_cross = [("host", "onair.example"), ("sec-fetch-site", "cross-site")];
+    for path in [
+        "/auth/demo/1",
+        "/auth/logout",
+        "/auth/login",
+        "/auth/signup",
+    ] {
+        assert_eq!(
+            call_h(&r, "POST", path, &evil).await,
+            StatusCode::FORBIDDEN,
+            "{path}"
+        );
+        assert_eq!(
+            call_h(&r, "POST", path, &fetch_cross).await,
+            StatusCode::FORBIDDEN,
+            "{path}"
+        );
+    }
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM sessions")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(n, 0);
+    // 같은 사이트에서 온 요청과 GET은 그대로 된다
+    let same = [
+        ("host", "onair.example"),
+        ("origin", "https://onair.example"),
+        ("sec-fetch-site", "same-origin"),
+    ];
+    assert_eq!(
+        call_h(&r, "POST", "/auth/demo/1", &same).await,
+        StatusCode::OK
+    );
+    assert_eq!(call_h(&r, "GET", "/health", &evil).await, StatusCode::OK);
+}
+
+#[sqlx::test]
+async fn auth_requests_are_rate_limited_per_client(db: PgPool) {
+    let r = app(AppState {
+        db,
+        auth: AuthConfig {
+            demo_login: true,
+            limiter: onair_backend::guard::RateLimiter::new(2, std::time::Duration::from_secs(60)),
+        },
+    });
+    let ip1 = [("x-forwarded-for", "1.1.1.1")];
+    let ip2 = [("x-forwarded-for", "2.2.2.2")];
+    assert_eq!(
+        call_h(&r, "POST", "/auth/demo/1", &ip1).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        call_h(&r, "POST", "/auth/demo/1", &ip1).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        call_h(&r, "POST", "/auth/demo/1", &ip1).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(
+        call_h(&r, "POST", "/auth/login", &ip1).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    // 다른 IP는 따로 센다. 로그인 상태 조회(me)와 로그아웃은 제한하지 않는다.
+    assert_eq!(
+        call_h(&r, "POST", "/auth/demo/2", &ip2).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        call_h(&r, "GET", "/auth/me", &ip1).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        call_h(&r, "POST", "/auth/logout", &ip1).await,
+        StatusCode::NO_CONTENT
+    );
 }

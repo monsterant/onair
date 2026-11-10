@@ -29,6 +29,8 @@ pub const SESSION_DAYS: i64 = 7;
 pub struct AuthConfig {
     /// true면 `/auth/demo/{1,2}`로 데모 사용자에 바로 로그인할 수 있다(심사용 테스트 계정, 공모 6절).
     pub demo_login: bool,
+    /// 로그인·가입·데모 로그인 횟수 제한(IP 하나당). 기본은 1분에 20번.
+    pub limiter: crate::guard::RateLimiter,
 }
 
 /// 데모 사용자 아이디. 일반 가입에서는 `demo`로 시작하는 아이디를 쓸 수 없다.
@@ -41,8 +43,10 @@ pub const DEMO_USERS: [&str; 2] = ["demo1", "demo2"];
 pub enum ApiError {
     BadRequest(&'static str),
     Unauthorized(&'static str),
+    Forbidden(&'static str),
     Conflict(&'static str),
     NotFound,
+    TooManyRequests,
     Internal,
 }
 
@@ -51,8 +55,13 @@ impl IntoResponse for ApiError {
         let (code, msg) = match self {
             ApiError::BadRequest(m) => (StatusCode::BAD_REQUEST, m),
             ApiError::Unauthorized(m) => (StatusCode::UNAUTHORIZED, m),
+            ApiError::Forbidden(m) => (StatusCode::FORBIDDEN, m),
             ApiError::Conflict(m) => (StatusCode::CONFLICT, m),
             ApiError::NotFound => (StatusCode::NOT_FOUND, "찾을 수 없습니다"),
+            ApiError::TooManyRequests => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "요청이 너무 많습니다. 잠시 뒤에 다시 시도하세요",
+            ),
             ApiError::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "서버 오류입니다"),
         };
         (code, Json(json!({ "error": msg }))).into_response()
@@ -96,6 +105,11 @@ pub fn check_password(pw: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
+/// 로그인 때 비밀번호 길이 검사: 128자를 넘으면 해시를 계산하지 않고 바로 실패로 본다.
+pub fn login_input_ok(pw: &str) -> bool {
+    pw.chars().count() <= 128
+}
+
 // ---------- 비밀번호·토큰 ----------
 
 fn hash_password(pw: &str) -> Result<String, ApiError> {
@@ -116,6 +130,35 @@ fn dummy_hash() -> &'static str {
     use std::sync::OnceLock;
     static H: OnceLock<String> = OnceLock::new();
     H.get_or_init(|| hash_password("dummy-password-for-timing").unwrap_or_default())
+}
+
+/// argon2는 한 번에 약 0.3초와 메모리 19MiB를 쓴다(#24 A1).
+/// - 비동기 작업 스레드에서 바로 돌리면 그동안 그 스레드의 다른 요청(OME 웹훅 포함)이 멈춘다.
+///   그래서 따로 떼어 둔 스레드(spawn_blocking)에서 돌린다.
+/// - 동시에 도는 계산은 2개까지만 허락한다. 나머지는 차례를 기다린다(2GB 서버의 CPU·메모리 보호).
+static HASH_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+
+async fn hash_password_async(pw: String) -> Result<String, ApiError> {
+    let _slot = HASH_SLOTS.acquire().await.map_err(|_| ApiError::Internal)?;
+    tokio::task::spawn_blocking(move || hash_password(&pw))
+        .await
+        .map_err(|_| ApiError::Internal)?
+}
+
+/// 비밀번호 확인. `stored`가 None이면(아이디가 없을 때) 가짜 해시로 같은 시간만큼 계산하고 false를 돌려준다.
+async fn verify_password_async(pw: String, stored: Option<String>) -> bool {
+    let Ok(_slot) = HASH_SLOTS.acquire().await else {
+        return false;
+    };
+    tokio::task::spawn_blocking(move || match stored {
+        Some(s) => verify_password(&pw, &s),
+        None => {
+            verify_password(&pw, dummy_hash());
+            false
+        }
+    })
+    .await
+    .unwrap_or(false)
 }
 
 /// 32바이트 임의 토큰(쿠키에 넣는 값)과 그 SHA-256(DB에 넣는 값)
@@ -151,13 +194,21 @@ fn removal_cookie() -> Cookie<'static> {
         .build()
 }
 
-/// 세션을 만들고 쿠키를 붙인다. 이 사용자의 만료된 세션도 함께 지운다.
+/// 세션을 만들고 쿠키를 붙인다.
+/// - 요청에 이미 세션 쿠키가 있으면 그 세션을 먼저 지운다. 다시 로그인했을 때 이전 세션이 서버에 남지 않게 한다(#24 A4).
+/// - 이 사용자의 만료된 세션도 함께 지운다.
 async fn start_session(
     state: &AppState,
     jar: CookieJar,
     user_id: i64,
 ) -> Result<CookieJar, ApiError> {
     let (token, hash) = new_token()?;
+    if let Some(old) = jar.get(SESSION_COOKIE) {
+        sqlx::query("DELETE FROM sessions WHERE token_hash = $1")
+            .bind(token_hash(old.value()))
+            .execute(&state.db)
+            .await?;
+    }
     sqlx::query("DELETE FROM sessions WHERE user_id = $1 AND expires_at <= now()")
         .bind(user_id)
         .execute(&state.db)
@@ -233,7 +284,7 @@ pub async fn signup(
         ));
     }
     check_password(&c.password).map_err(ApiError::BadRequest)?;
-    let hash = hash_password(&c.password)?;
+    let hash = hash_password_async(c.password).await?;
 
     // 같은 아이디가 있으면 아무것도 넣지 않는다. 동시에 두 요청이 와도 UNIQUE 제약 덕분에 하나만 들어간다.
     let id: Option<i64> = sqlx::query_scalar(
@@ -256,26 +307,29 @@ pub async fn login(
     Json(c): Json<Credentials>,
 ) -> Result<(CookieJar, Json<Me>), ApiError> {
     const FAIL: ApiError = ApiError::Unauthorized("아이디 또는 비밀번호가 틀렸습니다");
-    // 형식이 틀린 아이디도 같은 실패 메시지로 돌려준다(어떤 아이디가 있는지 알려 주지 않는다).
-    let Ok(username) = normalize_username(&c.username) else {
-        verify_password(&c.password, dummy_hash());
-        return Err(FAIL);
-    };
-    if c.password.chars().count() > 128 {
+    // 아주 긴 비밀번호로 해시 계산을 오래 시키지 못하게, 계산 전에 먼저 거른다.
+    if !login_input_ok(&c.password) {
         return Err(FAIL);
     }
-    let row: Option<(i64, String)> =
-        sqlx::query_as("SELECT id, password_hash FROM users WHERE username = $1")
-            .bind(&username)
-            .fetch_optional(&state.db)
-            .await?;
-    let Some((id, stored)) = row else {
-        verify_password(&c.password, dummy_hash());
+    // 형식이 틀린 아이디도, 없는 아이디도 같은 시간을 들여 같은 실패 메시지로 돌려준다(어떤 아이디가 있는지 알려 주지 않는다).
+    let row: Option<(i64, String)> = match normalize_username(&c.username) {
+        Ok(username) => {
+            sqlx::query_as("SELECT id, password_hash FROM users WHERE username = $1")
+                .bind(&username)
+                .fetch_optional(&state.db)
+                .await?
+        }
+        Err(_) => None,
+    };
+    let (id, stored) = match row {
+        Some((id, stored)) => (Some(id), Some(stored)),
+        None => (None, None),
+    };
+    let ok = verify_password_async(c.password, stored).await;
+    let (Some(id), true) = (id, ok) else {
         return Err(FAIL);
     };
-    if !verify_password(&c.password, &stored) {
-        return Err(FAIL);
-    }
+    let username = normalize_username(&c.username).map_err(|_| FAIL)?;
     let jar = start_session(&state, jar, id).await?;
     Ok((jar, Json(Me { id, username })))
 }
