@@ -277,3 +277,52 @@ label.check {
   gap: 6px;
   align-items: center;
 }
+
+/* 방송하기: 화면 공유·카메라 두 방식(#2) */
+.studio-mode {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid #2c313c;
+}
+
+.studio-mode h4 {
+  margin: 0;
+}
+
+select {
+  padding: 8px;
+  border-radius: 6px;
+  border: 1px solid #2c313c;
+  background: #0f1115;
+  color: var(--text);
+}
+
+/* 앞 카메라 미리보기는 거울처럼(송출 영상은 그대로) */
+.preview.mirror {
+  transform: scaleX(-1);
+}
+
+/* 휴대폰: 버튼을 손가락으로 누르기 쉽게 */
+@media (max-width: 600px) {
+  .content {
+    margin: 16px auto;
+  }
+
+  button,
+  a.button,
+  select {
+    min-height: 44px;
+  }
+
+  .row > button,
+  .row > select {
+    flex: 1 1 auto;
+  }
+
+  .topbar {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+}

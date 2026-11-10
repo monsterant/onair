@@ -78,6 +78,8 @@ export class Publisher {
   async start(
     getTracks: (register: (t: MediaStreamTrack[]) => void) => Promise<{ video: MediaStreamTrack; audio: MediaStreamTrack[] }>,
     whipUrl: () => Promise<string>,
+    /** 영상 트랙이 끝났을 때 보여 줄 이유(화면 공유 끝남, 카메라 꺼짐 등) */
+    endedReason = '화면 공유가 끝났습니다',
   ): Promise<MediaStream> {
     if (this.state !== 'idle') throw new PublishError('이미 송출 중입니다');
     const a = new Attempt();
@@ -94,10 +96,11 @@ export class Publisher {
       const { video, audio } = await getTracks((t) => a.add(t));
       a.check();
       // 마이크 권한 창이 떠 있는 사이에 화면 공유를 끝냈으면, 이미 끝난 트랙에는 ended가 다시 오지 않는다(#30 2바퀴)
-      if (video.readyState === 'ended') throw new PublishError('화면 공유가 끝났습니다');
+      if (video.readyState === 'ended') throw new PublishError(endedReason);
       // 준비 중에 공유 창의 "공유 중지"를 눌러도 멈춘다(#30 P11)
+      // (휴대폰에서 다른 앱으로 가서 카메라가 꺼진 경우도 같다, #2)
       video.onended = () => {
-        if (this.current === a) void this.stop('화면 공유가 끝났습니다');
+        if (this.current === a) void this.stop(endedReason);
       };
       await a.audioCtx?.resume().catch(() => {});
       const mixed = mix(a, audio);
@@ -240,4 +243,70 @@ export async function screenAndMic(register: (t: MediaStreamTrack[]) => void, wi
     }
   }
   return { video: screen.getVideoTracks()[0], audio, screenAudio: screen.getAudioTracks().length };
+}
+
+export type Facing = 'user' | 'environment';
+
+/** 휴대폰·PC 카메라 + 마이크(#2). 권한 창이 한 번만 뜨도록 영상과 소리를 함께 요청한다. */
+export async function cameraAndMic(register: (t: MediaStreamTrack[]) => void, facing: Facing) {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    throw new PublishError('이 브라우저는 카메라를 쓸 수 없습니다. https 주소인지 확인하세요');
+  }
+  let cam: MediaStream;
+  try {
+    cam = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: facing, width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } },
+      audio: { echoCancellation: true, noiseSuppression: true },
+    });
+  } catch (e) {
+    // facingMode 등은 '바람(ideal)'이라 고른 카메라가 없어도 실패하지 않고 다른 카메라가 켜진다.
+    // 실제로 켜진 카메라는 화면 쪽에서 getSettings()로 보고 알린다(#33 M4).
+    throw new PublishError(message(e));
+  }
+  register(cam.getTracks());
+  const video = cam.getVideoTracks()[0];
+  if (!video) throw new PublishError('카메라 영상을 받지 못했습니다');
+  return { video, audio: cam.getAudioTracks() };
+}
+
+/**
+ * 송출하는 동안 화면이 꺼지지 않게 한다(지원하는 브라우저만). 돌려준 함수를 부르면 푼다.
+ * 탭을 떠났다 돌아오면 브라우저가 잠금을 풀어 버리므로 다시 건다.
+ */
+export function keepScreenOn(): () => void {
+  type Sentinel = { release: () => Promise<void> };
+  const wl = (navigator as unknown as { wakeLock?: { request: (t: 'screen') => Promise<Sentinel> } }).wakeLock;
+  if (!wl) return () => {};
+  let sentinel: Sentinel | null = null;
+  let pending = false;
+  let active = true;
+  const lock = () => {
+    // 이미 잠갔거나 요청 중이면 또 요청하지 않는다(겹치면 하나를 놓쳐 풀지 못한다, #33 M7)
+    if (!active || pending || sentinel || document.visibilityState !== 'visible') return;
+    pending = true;
+    wl.request('screen')
+      .then((s) => {
+        if (!active) {
+          void s.release();
+          return;
+        }
+        sentinel = s;
+        // 탭을 떠나면 브라우저가 잠금을 푼다. 그때 비워 둬야 돌아왔을 때 다시 잠근다.
+        (s as unknown as EventTarget).addEventListener?.('release', () => {
+          if (sentinel === s) sentinel = null;
+        });
+      })
+      .catch(() => {})
+      .finally(() => {
+        pending = false;
+      });
+  };
+  document.addEventListener('visibilitychange', lock);
+  lock();
+  return () => {
+    active = false;
+    document.removeEventListener('visibilitychange', lock);
+    void sentinel?.release().catch(() => {});
+    sentinel = null;
+  };
 }
