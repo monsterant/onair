@@ -83,11 +83,18 @@ export class Publisher {
     const a = new Attempt();
     this.current = a;
     this.set('starting');
-    // 소리 섞기용 AudioContext는 클릭 직후에 만든다. 사파리는 그래야 소리가 난다.
-    a.audioCtx = new AudioContext();
     try {
+      // 소리 섞기용 AudioContext는 클릭 직후에 만든다. 사파리는 그래야 소리가 난다.
+      // 만들 수 없는 브라우저(옛 사파리 등)면 섞지 않고 첫 소리만 보낸다(#30 2바퀴).
+      try {
+        a.audioCtx = new AudioContext();
+      } catch {
+        a.audioCtx = null;
+      }
       const { video, audio } = await getTracks((t) => a.add(t));
       a.check();
+      // 마이크 권한 창이 떠 있는 사이에 화면 공유를 끝냈으면, 이미 끝난 트랙에는 ended가 다시 오지 않는다(#30 2바퀴)
+      if (video.readyState === 'ended') throw new PublishError('화면 공유가 끝났습니다');
       // 준비 중에 공유 창의 "공유 중지"를 눌러도 멈춘다(#30 P11)
       video.onended = () => {
         if (this.current === a) void this.stop('화면 공유가 끝났습니다');
@@ -136,7 +143,9 @@ export class Publisher {
     } catch (e) {
       // 이 시도가 들고 있던 것을 정리한다(이미 멈춰서 정리됐더라도, 그 뒤에 생긴 자원까지)
       await a.close();
-      if (e instanceof CancelledError) throw e;
+      // 멈춰서 취소된 시도에서 난 오류(닫힌 연결에 대한 InvalidStateError 등)는 모두 취소로 본다.
+      // 그래야 멈춘 이유를 영어 오류가 덮지 않는다(#30 2바퀴).
+      if (e instanceof CancelledError || a.cancelled) throw new CancelledError();
       const err = e instanceof PublishError ? e : new PublishError(message(e));
       // 다른 시도가 이미 시작됐으면 상태는 그쪽이 맡는다
       if (this.current === a) {
