@@ -28,6 +28,8 @@ services:
       OME_ADMISSION_URL: ${OME_ADMISSION_URL:-http://host.docker.internal:8080/ome/admission}
       # 기본값을 두지 않는다. 백엔드와 같은 값이어야 하고, 비어 있으면 OME가 시작하지 않는다.
       OME_ADMISSION_SECRET: ${OME_ADMISSION_SECRET:?.env에 OME_ADMISSION_SECRET을 넣으세요}
+      # 관리 API 접근 토큰(#3). 백엔드가 방송 종료 때 스트림을 끊는 데 쓴다. 기본값을 두지 않는다.
+      OME_API_TOKEN: ${OME_API_TOKEN:?.env에 OME_API_TOKEN을 넣으세요}
     volumes:
       # 기본 설정에 AdmissionWebhooks를 더하고 인증서(TLS) 칸을 뺀 onair용 설정
       - ./ome/Server.xml:/opt/ovenmediaengine/bin/origin_conf/Server.xml:ro
@@ -39,6 +41,7 @@ services:
       - "3478:3478"            # WebRTC TCP 중계 (TURN)
       - "10000-10003:10000-10003/udp"  # WebRTC 영상·소리 통로
       - "10000:10000/tcp"      # WebRTC 직접 TCP 연결 (UDP가 막힌 네트워크용)
+      - "127.0.0.1:8081:8081"  # 관리 API(#3). 이 PC 안에서만 열린다(백엔드 cargo run이 씀)
 
 volumes:
   db-data:
