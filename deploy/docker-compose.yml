@@ -10,6 +10,8 @@ services:
   db:
     image: postgres:17-alpine
     restart: unless-stopped
+    # 컨테이너 안의 프로그램이 실행 중에 더 높은 권한을 얻지 못하게 한다(#21 S4)
+    security_opt: ["no-new-privileges:true"]
     environment:
       POSTGRES_USER: onair
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?deploy/.env에 POSTGRES_PASSWORD를 넣으세요}
@@ -24,6 +26,8 @@ services:
   backend:
     build: ../backend
     restart: unless-stopped
+    # 컨테이너 안의 프로그램이 실행 중에 더 높은 권한을 얻지 못하게 한다(#21 S4)
+    security_opt: ["no-new-privileges:true"]
     environment:
       DATABASE_URL: postgres://onair:${POSTGRES_PASSWORD}@db:5432/onair
       BIND_ADDR: 0.0.0.0:8080
@@ -36,6 +40,8 @@ services:
   ome:
     image: airensoft/ovenmediaengine:v0.21.0
     restart: unless-stopped
+    # 컨테이너 안의 프로그램이 실행 중에 더 높은 권한을 얻지 못하게 한다(#21 S4)
+    security_opt: ["no-new-privileges:true"]
     environment:
       # 브라우저가 영상 통로로 붙을 주소 = 서버의 공인 IP(고정 IP)
       OME_HOST_IP: ${OME_HOST_IP:?deploy/.env에 서버 공인 IP를 넣으세요}
@@ -53,6 +59,8 @@ services:
       context: ..
       dockerfile: deploy/web.Dockerfile
     restart: unless-stopped
+    # 컨테이너 안의 프로그램이 실행 중에 더 높은 권한을 얻지 못하게 한다(#21 S4)
+    security_opt: ["no-new-privileges:true"]
     environment:
       DOMAIN: ${DOMAIN:?deploy/.env에 DOMAIN을 넣으세요}
     ports:

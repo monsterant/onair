@@ -3,9 +3,22 @@
 {$DOMAIN} {
 	encode gzip
 
+	# 보안 헤더(#21 S3)
+	# - HSTS: 한 번 들어온 브라우저는 다음부터 http로 시도하지 않고 바로 https로 온다.
+	# - nosniff: 브라우저가 파일 종류를 멋대로 추측하지 않게 한다.
+	# - frame-ancestors 'none': 다른 사이트가 우리 화면을 몰래 겹쳐 띄우고 버튼을 누르게 하는 것(클릭재킹)을 막는다.
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Content-Security-Policy "frame-ancestors 'none'"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
 	# OME 허락 웹훅은 OME와 백엔드끼리만 주고받는다. 인터넷에서는 막는다(#18, #5).
 	# handle 블록은 서로 하나만 실행되고, 경로가 더 긴(구체적인) 쪽이 먼저 고려된다.
-	handle /api/ome/* {
+	# /api/ome(끝에 / 없음)도 막는다(#21 B1).
+	handle /api/ome* {
 		respond 404
 	}
 
@@ -20,9 +33,17 @@
 		reverse_proxy ome:3333
 	}
 
-	# 화면 파일
+	# 빌드된 JS·CSS(이름에 해시가 붙음): 없는 파일은 404로 끝낸다. 오래 캐시해도 된다(#21 C2).
+	handle /assets/* {
+		root * /srv
+		header Cache-Control "public, max-age=31536000, immutable"
+		file_server
+	}
+
+	# 화면(index.html): 매번 새 버전인지 확인하게 한다. 그래야 다시 배포한 뒤 옛 화면이 남지 않는다(#21 C2).
 	handle {
 		root * /srv
+		header Cache-Control "no-cache"
 		try_files {path} /index.html
 		file_server
 	}

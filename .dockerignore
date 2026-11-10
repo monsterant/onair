@@ -1,7 +1,8 @@
 # 웹 이미지 빌드(deploy/web.Dockerfile, 문맥=저장소 맨 위)에 필요 없는 것과 비밀값을 뺀다
 .git
-.env
-deploy/.env
+**/.env
+**/.env.*
+!**/.env.example
 my-notes
 .claude
 backend/target
