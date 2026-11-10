@@ -245,3 +245,35 @@ button:disabled {
 [hidden] {
   display: none !important;
 }
+
+/* 방송하기(#1) */
+.preview {
+  width: 100%;
+  max-height: 360px;
+  background: #000;
+  border-radius: 8px;
+}
+
+.pub-state {
+  align-self: center;
+  color: var(--muted);
+}
+
+.pub-state.live {
+  color: var(--danger);
+}
+
+.warn {
+  color: #ffb74d;
+  margin: 0;
+}
+
+.warn:empty {
+  display: none;
+}
+
+label.check {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
