@@ -15,10 +15,13 @@ async fn health_reports_db_error_when_db_is_down() {
         .connect_lazy("postgres://nobody:nothing@127.0.0.1:1/none")
         .unwrap();
 
-    let res = app(AppState { db })
-        .oneshot(Request::get("/health").body(Body::empty()).unwrap())
-        .await
-        .unwrap();
+    let res = app(AppState {
+        db,
+        auth: Default::default(),
+    })
+    .oneshot(Request::get("/health").body(Body::empty()).unwrap())
+    .await
+    .unwrap();
 
     assert_eq!(res.status(), StatusCode::OK);
     let body = to_bytes(res.into_body(), 1024).await.unwrap();

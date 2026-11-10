@@ -33,6 +33,8 @@ services:
       BIND_ADDR: 0.0.0.0:8080
       RUST_LOG: info
       OME_ADMISSION_SECRET: ${OME_ADMISSION_SECRET:?deploy/.env에 OME_ADMISSION_SECRET을 넣으세요}
+      # 심사용 테스트 계정 로그인(#4). 값이 없으면 꺼진다.
+      DEMO_LOGIN: ${DEMO_LOGIN:-false}
     depends_on:
       db:
         condition: service_healthy

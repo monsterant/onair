@@ -2,6 +2,8 @@
 //! main.rs는 설정을 읽고 서버를 띄우기만 하고, 실제 길(라우트)은 여기서 조립한다.
 //! 이렇게 나누면 테스트에서 진짜 서버를 띄우지 않고도 라우터를 바로 불러 시험할 수 있다.
 
+pub mod auth;
+pub mod guard;
 pub mod ome;
 
 use axum::{
@@ -12,16 +14,36 @@ use axum::{
 use serde::Serialize;
 use sqlx::PgPool;
 
-/// 모든 요청이 함께 쓰는 값. 지금은 DB 연결 풀(미리 열어 둔 DB 연결 묶음)만 있다.
+/// 모든 요청이 함께 쓰는 값: DB 연결 풀(미리 열어 둔 DB 연결 묶음)과 인증 설정
 #[derive(Clone)]
 pub struct AppState {
     pub db: PgPool,
+    pub auth: auth::AuthConfig,
 }
 
 pub fn app(state: AppState) -> Router {
+    // 비밀번호를 확인하거나 세션을 새로 만드는 길: 횟수 제한을 건다(#24 A2)
+    let limited = Router::new()
+        .route("/auth/signup", post(auth::signup))
+        .route("/auth/login", post(auth::login))
+        .route("/auth/demo/{n}", post(auth::demo_login))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            guard::limit_auth,
+        ));
     Router::new()
         .route("/health", get(health))
+        .route("/auth/logout", post(auth::logout))
+        .route("/auth/me", get(auth::me))
+        .merge(limited)
+        // 상태를 바꾸는 요청은 같은 사이트에서 온 것만 받는다(#24 A3). OME 웹훅(ome_routes)에는 걸지 않는다.
+        .layer(axum::middleware::from_fn(guard::reject_cross_site))
         .with_state(state)
+}
+
+/// DB 구조 변경(migrations 폴더)을 적용한다. 이미 적용된 것은 건너뛴다.
+pub async fn migrate(db: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
+    sqlx::migrate!("./migrations").run(db).await
 }
 
 /// OME AdmissionWebhooks 길. DB가 필요 없어서 상태(서명 키)를 따로 받는다.

@@ -7,3 +7,6 @@ my-notes/
 
 # 환경변수 (비밀값)
 .env
+
+# 리뷰 에이전트의 임시 작업 사본(worktree)
+.claude/worktrees/

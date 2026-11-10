@@ -11,6 +11,8 @@ RUN mkdir src && echo "fn main() {}" > src/main.rs && touch src/lib.rs \
     && rm -rf src
 
 # 진짜 소스로 우리 코드만 다시 빌드한다. touch는 빈 파일보다 새 파일임을 cargo에 알려 준다.
+# migrations(DB 표 만들기 SQL)는 빌드할 때 실행 파일 안에 넣는다(sqlx::migrate!). 그래서 함께 복사한다.
+COPY migrations ./migrations
 COPY src ./src
 RUN touch src/main.rs src/lib.rs && cargo build --release --locked
 
