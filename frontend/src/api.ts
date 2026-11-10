@@ -3,6 +3,23 @@
 
 export type User = { id: number; username: string };
 
+export type Status = 'ready' | 'live' | 'ended';
+
+export type Broadcast = {
+  id: number;
+  title: string;
+  description: string;
+  status: Status;
+  stream_name: string;
+  owner_id: number;
+  owner_username: string;
+  started_at: string | null;
+  ended_at: string | null;
+  created_at: string;
+};
+
+export type PublishInfo = { stream_name: string; stream_key: string; whip_path: string };
+
 export class ApiError extends Error {
   constructor(
     public status: number,
@@ -43,3 +60,13 @@ export const login = (username: string, password: string) =>
   api<User>('POST', '/auth/login', { username, password });
 export const logout = () => api<void>('POST', '/auth/logout');
 export const demoLogin = (n: 1 | 2) => api<User>('POST', `/auth/demo/${n}`);
+
+export const listBroadcasts = () => api<Broadcast[]>('GET', '/broadcasts');
+export const getBroadcast = (id: number) => api<Broadcast>('GET', `/broadcasts/${id}`);
+export const createBroadcast = (title: string, description: string) =>
+  api<Broadcast>('POST', '/broadcasts', { title, description });
+export const updateBroadcast = (id: number, title: string, description: string) =>
+  api<Broadcast>('PATCH', `/broadcasts/${id}`, { title, description });
+export const deleteBroadcast = (id: number) => api<void>('DELETE', `/broadcasts/${id}`);
+export const endBroadcast = (id: number) => api<Broadcast>('POST', `/broadcasts/${id}/end`);
+export const publishInfo = (id: number) => api<PublishInfo>('GET', `/broadcasts/${id}/publish`);

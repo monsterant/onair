@@ -1,0 +1,4 @@
+# 줄바꿈 고정 (#15 일부)
+# sqlx는 마이그레이션 SQL 파일의 내용으로 체크섬을 만든다. Windows에서 CRLF로 바뀌면
+# "이미 적용한 마이그레이션이 바뀌었다"며 서버가 시작하지 않으므로 LF로 고정한다.
+backend/migrations/*.sql text eol=lf

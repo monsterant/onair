@@ -50,15 +50,14 @@
 
 	<!-- Settings for the ports to bind -->
 	<Bind>
-		<!-- Enable this configuration if you want to use API Server -->
-		<!--
+		<!-- onair (#3): 관리 API. 백엔드가 방송 종료 때 스트림을 끊고, 15초마다 스트림 목록을 본다.
+		     8081은 Docker 안쪽에서만 쓴다(배포 compose에서 포트를 열지 않는다). 접근 토큰은 아래 Managers에서 받는다. -->
 		<Managers>
 			<API>
 				<Port>${env:OME_API_PORT:8081}</Port>
 				<WorkerCount>1</WorkerCount>
 			</API>
 		</Managers>
-		-->
 		<Providers>
 			<!-- onair는 브라우저 WHIP(WebRTC) 송출만 쓴다.
 			     RTMP·SRT(#18)와 RTSP·OVT 가져오기 입구는 AdmissionWebhooks 검사를 거치지 않아서 뺐다. -->
@@ -124,6 +123,18 @@
 			</WebRTC>
 		</Publishers>
 	</Bind>
+
+	<!-- onair (#3): 관리 API 접근 토큰. 기본값을 두지 않는다(docker-compose에서 필수값). 백엔드의 OME_API_TOKEN과 같아야 한다. -->
+	<Managers>
+		<Host>
+			<Names>
+				<Name>*</Name>
+			</Names>
+		</Host>
+		<API>
+			<AccessToken>${env:OME_API_TOKEN}</AccessToken>
+		</API>
+	</Managers>
 
 	<!-- Default Settings for all Virtual Hosts -->
 	<Defaults>

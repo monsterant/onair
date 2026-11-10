@@ -11,5 +11,9 @@
   "devDependencies": {
     "typescript": "^7.0.2",
     "vite": "^8.3.6"
+  },
+  "dependencies": {
+    "hls.js": "1.7.4",
+    "ovenplayer": "0.10.55"
   }
 }

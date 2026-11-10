@@ -3,8 +3,10 @@
 //! 이렇게 나누면 테스트에서 진짜 서버를 띄우지 않고도 라우터를 바로 불러 시험할 수 있다.
 
 pub mod auth;
+pub mod broadcasts;
 pub mod guard;
 pub mod ome;
+pub mod ome_api;
 
 use axum::{
     Json, Router,
@@ -14,11 +16,13 @@ use axum::{
 use serde::Serialize;
 use sqlx::PgPool;
 
-/// 모든 요청이 함께 쓰는 값: DB 연결 풀(미리 열어 둔 DB 연결 묶음)과 인증 설정
+/// 모든 요청이 함께 쓰는 값: DB 연결 풀(미리 열어 둔 DB 연결 묶음), 인증 설정, OME 관리 API
 #[derive(Clone)]
 pub struct AppState {
     pub db: PgPool,
     pub auth: auth::AuthConfig,
+    /// 설정하지 않으면(Default) OME를 부르지 않는다
+    pub ome: ome_api::OmeApi,
 }
 
 pub fn app(state: AppState) -> Router {
@@ -35,6 +39,18 @@ pub fn app(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/auth/logout", post(auth::logout))
         .route("/auth/me", get(auth::me))
+        .route(
+            "/broadcasts",
+            get(broadcasts::list).post(broadcasts::create),
+        )
+        .route(
+            "/broadcasts/{id}",
+            get(broadcasts::get)
+                .patch(broadcasts::update)
+                .delete(broadcasts::delete),
+        )
+        .route("/broadcasts/{id}/publish", get(broadcasts::publish_info))
+        .route("/broadcasts/{id}/end", post(broadcasts::end))
         .merge(limited)
         // 상태를 바꾸는 요청은 같은 사이트에서 온 것만 받는다(#24 A3). OME 웹훅(ome_routes)에는 걸지 않는다.
         .layer(axum::middleware::from_fn(guard::reject_cross_site))
