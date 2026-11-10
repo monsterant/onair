@@ -25,6 +25,7 @@ import {
 } from './api';
 // 플레이어(OvenPlayer+hls.js, 약 1MB)는 상세 화면에서만 불러온다. 목록 화면을 가볍게 하려는 것이다.
 const player = () => import('./player');
+import { Publisher, type PublishState, screenAndMic } from './publisher';
 
 const app = document.querySelector<HTMLElement>('#app')!;
 let me: User | null = null;
@@ -241,6 +242,8 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
     }
     offAir.textContent = live ? '' : b.status === 'ended' ? '종료된 방송입니다.' : '아직 방송 전입니다. 방송이 시작되면 자동으로 재생됩니다.';
     owner?.update(b);
+    studio?.update(b);
+    studio?.update(b);
   };
 
   main.append(
@@ -250,7 +253,11 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
     offAir,
     descEl,
   );
-  const owner = isOwner ? ownerPanel(b, (nb) => { b = nb; paint(); }) : null;
+  // 이 화면에서 쓰는 송출기(소유자만). 화면을 떠나면 송출을 멈춘다.
+  const publisher = isOwner ? new Publisher() : null;
+  const owner = publisher ? ownerPanel(b, (nb) => { b = nb; paint(); }, publisher) : null;
+  const studio = publisher ? studioPanel(() => b, publisher) : null;
+  if (studio) main.append(studio.el);
   if (owner) main.append(owner.el);
   paint();
 
@@ -274,9 +281,98 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
     }
   }, 5_000);
   cleanup.push(stop);
+  if (publisher) cleanup.push(() => void publisher.stop());
 }
 
-function ownerPanel(b: Broadcast, onChange: (b: Broadcast) => void): { el: HTMLElement; update: (b: Broadcast) => void } {
+// ---------- 방송하기(소유자) ----------
+
+const PUBLISH_LABEL: Record<PublishState, string> = {
+  idle: '송출하지 않음',
+  starting: '송출 준비 중...',
+  live: '송출 중',
+  stopping: '멈추는 중...',
+};
+
+/** PC 화면 공유 + 마이크로 송출하는 칸(#1). 휴대폰 카메라(#2)도 같은 Publisher를 쓴다. */
+function studioPanel(current: () => Broadcast, publisher: Publisher): { el: HTMLElement; update: (b: Broadcast) => void } {
+  const state = el('strong', { className: 'pub-state', textContent: PUBLISH_LABEL.idle });
+  const note = el('p', { className: 'hint', role: 'status' });
+  const warn = el('p', { className: 'warn', role: 'alert' });
+  const preview = el('video', { className: 'preview', muted: true, autoplay: true, playsInline: true });
+  preview.hidden = true;
+  const withMic = el('input', { type: 'checkbox', checked: true, id: 'with-mic' });
+  const start = el('button', { type: 'button', className: 'start-screen', textContent: '화면 공유로 방송 시작' });
+  const stop = el('button', { type: 'button', className: 'danger stop-publish', textContent: '송출 멈춤' });
+  stop.hidden = true;
+  const supported = !!navigator.mediaDevices?.getDisplayMedia;
+
+  const paint = (s: PublishState, detail?: string) => {
+    state.textContent = PUBLISH_LABEL[s];
+    state.className = `pub-state ${s}`;
+    start.disabled = s !== 'idle' || !supported;
+    withMic.disabled = s !== 'idle';
+    stop.hidden = s === 'idle';
+    if (s === 'idle') {
+      preview.hidden = true;
+      preview.srcObject = null;
+      if (detail) note.textContent = detail;
+    }
+  };
+  publisher.onState = paint;
+
+  start.onclick = async () => {
+    warn.textContent = '';
+    note.textContent = '';
+    let screenAudio = 0;
+    try {
+      const info = await publishInfo(current().id);
+      const stream = await publisher.start(async (register) => {
+        const t = await screenAndMic(register, withMic.checked);
+        screenAudio = t.screenAudio;
+        return t;
+      }, info.whip_path);
+      preview.srcObject = stream;
+      preview.hidden = false;
+      if (screenAudio === 0) {
+        warn.textContent = '화면 소리가 함께 가지 않습니다. 공유 창에서 "탭 오디오 공유" 또는 "시스템 오디오 공유"를 켰는지 확인하세요(Chrome·Edge만 됩니다).';
+      }
+    } catch (e) {
+      // 송출 오류(권한 거부, 송출 거절 등)는 publisher가 알아들을 수 있는 문장으로 바꿔 준다
+      note.textContent = e instanceof Error ? e.message : String(e);
+    }
+  };
+  stop.onclick = () => void publisher.stop('송출을 멈췄습니다. 다시 시작할 수 있습니다.');
+
+  // 송출 중에 창을 닫으려 하면 한 번 묻는다
+  const beforeUnload = (ev: BeforeUnloadEvent) => {
+    if (publisher.state !== 'idle') ev.preventDefault();
+  };
+  window.addEventListener('beforeunload', beforeUnload);
+  cleanup.push(() => window.removeEventListener('beforeunload', beforeUnload));
+
+  const panel = el(
+    'section',
+    { className: 'panel studio' },
+    el('h3', { textContent: '방송하기 (PC)' }),
+    el('p', { className: 'hint', textContent: supported
+      ? '화면 공유 창에서 탭을 고르고 "탭 오디오 공유"를 켜면 탭 소리가 함께 갑니다. Windows에서 전체 화면을 고르면 "시스템 오디오 공유"도 고를 수 있습니다.'
+      : '이 브라우저는 화면 공유를 지원하지 않습니다. PC의 Chrome이나 Edge에서 여세요.' }),
+    el('label', { className: 'check' }, withMic, ' 마이크 소리도 함께 보내기'),
+    el('div', { className: 'row' }, start, stop, state),
+    preview,
+    warn,
+    note,
+  );
+  const update = (b: Broadcast) => {
+    // 종료된 방송은 송출할 수 없으니 칸을 숨긴다
+    panel.hidden = b.status === 'ended';
+    if (b.status === 'ended') void publisher.stop();
+  };
+  paint('idle');
+  return { el: panel, update };
+}
+
+function ownerPanel(b: Broadcast, onChange: (b: Broadcast) => void, publisher: Publisher): { el: HTMLElement; update: (b: Broadcast) => void } {
   const error = el('p', { className: 'error', role: 'alert' });
 
   // 수정
@@ -299,6 +395,8 @@ function ownerPanel(b: Broadcast, onChange: (b: Broadcast) => void): { el: HTMLE
   const end = el('button', { type: 'button', className: 'danger', textContent: '방송 종료' });
   end.onclick = action(end, error, async () => {
     if (!confirm('방송을 종료할까요? 종료한 방송은 다시 송출할 수 없습니다.')) return;
+    // 이 브라우저에서 송출 중이면 먼저 멈춘다(서버도 끊지만, 장치를 바로 끄려고)
+    await publisher.stop('방송을 종료했습니다');
     onChange(await endBroadcast(b.id));
   });
   const del = el('button', { type: 'button', className: 'danger', textContent: '삭제' });
