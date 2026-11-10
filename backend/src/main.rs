@@ -32,7 +32,23 @@ async fn main() {
         Ok(s) => s.to_string(),
         Err(why) => panic!("OME_ADMISSION_SECRET 확인 실패: {why}"),
     };
-    let ome_state = onair_backend::ome::OmeState { secret: ome_secret };
+    let ome_state = onair_backend::ome::OmeState {
+        secret: ome_secret,
+        db: db.clone(),
+    };
+
+    // OME 관리 API(스트림 끊기, 목록). 둘 다 있을 때만 쓴다. 토큰은 OME Server.xml의 AccessToken과 같은 값이다.
+    let ome_api = match (std::env::var("OME_API_URL"), std::env::var("OME_API_TOKEN")) {
+        (Ok(url), Ok(token)) if !url.trim().is_empty() && token.trim().len() >= 16 => {
+            onair_backend::ome_api::OmeApi::new(url.trim(), token.trim())
+        }
+        _ => {
+            tracing::warn!(
+                "OME_API_URL/OME_API_TOKEN이 없어 방송 종료 때 송출을 끊지 못합니다(개발용)"
+            );
+            Default::default()
+        }
+    };
 
     // DB 구조 변경을 적용한다. DB가 아직 뜨는 중일 수 있어서 2초 간격으로 30번까지 다시 시도한다.
     // 끝내 실패하면 표가 없는 채로 돌 수 없으므로 멈춘다.
@@ -60,7 +76,26 @@ async fn main() {
 
     // CORS(다른 주소에서 오는 호출 허용)는 켜지 않는다. 화면은 vite 프록시(/api)로 같은 주소에서 부르고,
     // OME 웹훅은 서버끼리 주고받으므로 필요 없다.
-    let router = app(AppState { db, auth }).merge(onair_backend::ome_routes(ome_state));
+    // 15초마다 OME 스트림 목록과 방송 상태를 맞춘다(#10: opening/closing 알림만으로는 상태가 어긋날 수 있다).
+    if ome_api.is_configured() {
+        let (db, api) = (db.clone(), ome_api.clone());
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(15));
+            loop {
+                tick.tick().await;
+                if let Err(e) = onair_backend::ome::reconcile(&db, &api).await {
+                    tracing::warn!(error = %e, "방송 상태 맞춰 보기 실패");
+                }
+            }
+        });
+    }
+
+    let router = app(AppState {
+        db,
+        auth,
+        ome: ome_api,
+    })
+    .merge(onair_backend::ome_routes(ome_state));
 
     let listener = tokio::net::TcpListener::bind(&bind_addr)
         .await
