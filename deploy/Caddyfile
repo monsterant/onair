@@ -1,0 +1,27 @@
+# 배포용 Caddy 설정 (#5). 도메인은 .env의 DOMAIN에서 받는다.
+# Caddy가 Let's Encrypt에서 HTTPS 인증서를 자동으로 받고 갱신한다(80, 443 포트 필요).
+{$DOMAIN} {
+	encode gzip
+
+	# OME 허락 웹훅은 OME와 백엔드끼리만 주고받는다. 인터넷에서는 막는다(#18, #5).
+	@admission path /api/ome/*
+	respond @admission 404
+
+	# 백엔드 API: /api/health -> backend:8080/health
+	handle_path /api/* {
+		reverse_proxy backend:8080
+	}
+
+	# 송출(WHIP), WebRTC 신호(웹소켓), LL-HLS 시청 -> OME. 브라우저는 https/wss로 443에 붙는다.
+	# OME 3333 포트는 인터넷에 열지 않는다.
+	handle /app/* {
+		reverse_proxy ome:3333
+	}
+
+	# 화면 파일
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+}

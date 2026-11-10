@@ -1,0 +1,73 @@
+# 배포 서버용 (#5). 저장소 맨 위에서 실행한다:
+#   docker compose -f deploy/docker-compose.yml --env-file deploy/.env up -d --build
+# 로컬 개발용 docker-compose.yml과 다른 점:
+#   - 백엔드와 웹(Caddy)까지 컨테이너로 띄운다.
+#   - 인터넷에 여는 포트는 80, 443(웹)과 WebRTC 영상 통로뿐이다. DB, 백엔드, OME 3333은 열지 않는다.
+#   - 비밀값(DB 비밀번호, 서명 키)은 기본값 없이 deploy/.env에서만 받는다.
+name: onair
+
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: onair
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?deploy/.env에 POSTGRES_PASSWORD를 넣으세요}
+      POSTGRES_DB: onair
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U onair"]
+      interval: 5s
+      retries: 10
+
+  backend:
+    build: ../backend
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://onair:${POSTGRES_PASSWORD}@db:5432/onair
+      BIND_ADDR: 0.0.0.0:8080
+      RUST_LOG: info
+      OME_ADMISSION_SECRET: ${OME_ADMISSION_SECRET:?deploy/.env에 OME_ADMISSION_SECRET을 넣으세요}
+    depends_on:
+      db:
+        condition: service_healthy
+
+  ome:
+    image: airensoft/ovenmediaengine:v0.21.0
+    restart: unless-stopped
+    environment:
+      # 브라우저가 영상 통로로 붙을 주소 = 서버의 공인 IP(고정 IP)
+      OME_HOST_IP: ${OME_HOST_IP:?deploy/.env에 서버 공인 IP를 넣으세요}
+      OME_ADMISSION_URL: http://backend:8080/ome/admission
+      OME_ADMISSION_SECRET: ${OME_ADMISSION_SECRET}
+    volumes:
+      - ../ome/Server.xml:/opt/ovenmediaengine/bin/origin_conf/Server.xml:ro
+    ports:
+      - "3478:3478"                    # WebRTC TCP 중계 (TURN)
+      - "10000-10003:10000-10003/udp"  # WebRTC 영상·소리 통로
+      - "10000:10000/tcp"              # WebRTC 직접 TCP 연결
+
+  web:
+    build:
+      context: ..
+      dockerfile: deploy/web.Dockerfile
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN:?deploy/.env에 DOMAIN을 넣으세요}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      # 받은 인증서를 보관한다. 지우면 다시 받는데, 너무 자주 받으면 Let's Encrypt가 한동안 막는다.
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - backend
+      - ome
+
+volumes:
+  db-data:
+  caddy-data:
+  caddy-config:
