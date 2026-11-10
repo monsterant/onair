@@ -47,14 +47,33 @@ pub struct OmeState {
 /// OME가 알려 준 주소에서 방송 이름과 송출 키를 꺼낸다.
 /// 예) http://h:3333/app/abc123?direction=whip&key=K → ("abc123", Some("K"))
 ///     https://h/app/abc123/llhls.m3u8 → ("abc123", None)
-/// 이름은 우리가 만든 형식(영문 소문자·숫자 16자)만 받는다. 아니면 None.
+///
+/// 주소는 OME가 받은 그대로의 글자로 자른다(#27 V1).
+/// - URL 라이브러리는 `/app/A/../B`를 `/app/B`로 정리하지만, OME는 정리하지 않고 A로 스트림을 만든다.
+///   그래서 정리된 주소로 검사하면 "B의 키로 A 이름을 차지"할 수 있었다.
+/// - 경로는 정확히 `/app/이름` 또는 `/app/이름/파일`만 받는다. `.`, `..`, `%`, `\`, 빈 칸이 있으면 거절한다.
+/// - 이름은 우리가 만든 형식(16진수 소문자 16자)만 받는다.
+/// - `key`가 두 번 나오면 어느 쪽을 OME가 쓰는지 알 수 없으므로 거절한다.
 pub fn parse_stream(url: &str) -> Option<(String, Option<String>)> {
-    let u = url::Url::parse(url).ok()?;
-    let mut seg = u.path_segments()?;
-    if seg.next()? != "app" {
+    let (_, after_scheme) = url.split_once("://")?;
+    let path_and_query = &after_scheme[after_scheme.find('/')?..];
+    if path_and_query.contains(['#', '\\']) {
         return None;
     }
-    let name = seg.next()?;
+    let (path, query) = match path_and_query.split_once('?') {
+        Some((p, q)) => (p, q),
+        None => (path_and_query, ""),
+    };
+    let segs: Vec<&str> = path[1..].split('/').collect();
+    let ok_seg = |s: &&str| !s.is_empty() && *s != "." && *s != ".." && !s.contains('%');
+    if !segs.iter().all(ok_seg) {
+        return None;
+    }
+    let name = match segs.as_slice() {
+        ["app", name] => *name,
+        ["app", name, file] if is_plain_file(file) => *name,
+        _ => return None,
+    };
     let valid = name.len() == 16
         && name
             .chars()
@@ -62,11 +81,23 @@ pub fn parse_stream(url: &str) -> Option<(String, Option<String>)> {
     if !valid {
         return None;
     }
-    let key = u
-        .query_pairs()
-        .find(|(k, _)| k == "key")
-        .map(|(_, v)| v.into_owned());
+    let keys: Vec<String> = url::form_urlencoded::parse(query.as_bytes())
+        .filter(|(k, _)| k == "key")
+        .map(|(_, v)| v.into_owned())
+        .collect();
+    let key = match keys.len() {
+        0 => None,
+        1 => keys.into_iter().next(),
+        _ => return None,
+    };
     Some((name.to_string(), key))
+}
+
+/// 시청 주소의 파일 이름(예: llhls.m3u8): 영문·숫자·`_`·`-`·`.`만, 점으로 시작하지 않음
+fn is_plain_file(f: &str) -> bool {
+    !f.starts_with('.')
+        && f.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
 }
 
 /// 길이가 같으면 끝까지 다 비교한다(앞 글자가 맞는 만큼 빨리 끝나서 키를 한 글자씩 알아내는 것을 막는다).
@@ -103,12 +134,17 @@ async fn decide_opening(
             let Some((stored, status)) = row else {
                 return Ok(false);
             };
+            // ended 확인은 아래 UPDATE 조건이 맡는다(확인과 갱신 사이에 종료돼도 막히도록 한 곳에서).
             if !same_key(&key, &stored) || status == "ended" {
                 return Ok(false);
             }
             // 종료되지 않은 경우에만 live로 바꾼다. 그 사이 종료됐으면 바뀐 행이 없으니 거절한다.
+            // 이미 live면 시작 시각을 그대로 둔다. 다시 붙을 때마다 바꾸면 맞춰 보기의 20초 유예가 계속 늘어난다(#27 V18).
             let changed = sqlx::query(
-                "UPDATE broadcasts SET status = 'live', started_at = now(), updated_at = now()
+                "UPDATE broadcasts
+                    SET started_at = CASE WHEN status = 'live' AND started_at IS NOT NULL
+                                          THEN started_at ELSE now() END,
+                        status = 'live', updated_at = now()
                   WHERE stream_name = $1 AND status <> 'ended'",
             )
             .bind(&name)
@@ -148,7 +184,9 @@ async fn on_closing(db: &sqlx::PgPool, direction: &str, url: &str) -> Result<(),
 
 /// OME에 실제로 있는 스트림과 DB 상태를 맞춘다(15초마다 main.rs에서 부른다).
 /// - DB는 `live`인데 OME에 스트림이 없으면 `ready`로 돌린다. 막 시작해서 아직 목록에 안 잡힌 것을 위해 20초는 기다린다.
-/// - 종료된 방송인데 OME에 스트림이 남아 있으면 끊는다.
+/// - DB는 `ready`인데 OME에 스트림이 있으면 `live`로 되돌린다. 늦게 온 closing이 다시 붙은 송출을 ready로 만든 경우다(#27 V3).
+/// - OME에 스트림이 있는데 DB에 끝나지 않은 방송이 없으면(종료됨·삭제됨·모르는 이름) 끊는다(#27 V4).
+/// - OME 목록을 받지 못하면(꺼짐, 401, 500 등) 아무것도 바꾸지 않는다.
 pub async fn reconcile(db: &sqlx::PgPool, api: &crate::ome_api::OmeApi) -> Result<(), sqlx::Error> {
     let Some(present) = api.list_streams().await else {
         return Ok(());
@@ -162,13 +200,21 @@ pub async fn reconcile(db: &sqlx::PgPool, api: &crate::ome_api::OmeApi) -> Resul
     .bind(&present)
     .execute(db)
     .await?;
-    let ended: Vec<String> = sqlx::query_scalar(
-        "SELECT stream_name FROM broadcasts WHERE status = 'ended' AND stream_name = ANY($1)",
+    sqlx::query(
+        "UPDATE broadcasts SET status = 'live', started_at = now(), updated_at = now()
+          WHERE status = 'ready' AND stream_name = ANY($1)",
+    )
+    .bind(&present)
+    .execute(db)
+    .await?;
+    let orphans: Vec<String> = sqlx::query_scalar(
+        "SELECT n FROM unnest($1::text[]) AS n
+          WHERE NOT EXISTS (SELECT 1 FROM broadcasts b WHERE b.stream_name = n AND b.status <> 'ended')",
     )
     .bind(&present)
     .fetch_all(db)
     .await?;
-    for name in ended {
+    for name in orphans {
         api.stop_stream(&name).await;
     }
     Ok(())

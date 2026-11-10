@@ -10,12 +10,21 @@ use std::{collections::HashSet, time::Duration};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::Deserialize;
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct OmeApi {
     inner: Option<Inner>,
 }
 
-#[derive(Clone, Debug)]
+/// 로그에 찍혀도 토큰이 보이지 않게 주소만 보여 준다
+impl std::fmt::Debug for OmeApi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OmeApi")
+            .field("base", &self.base())
+            .finish()
+    }
+}
+
+#[derive(Clone)]
 struct Inner {
     base: String,
     auth: String,
@@ -46,6 +55,11 @@ impl OmeApi {
 
     pub fn is_configured(&self) -> bool {
         self.inner.is_some()
+    }
+
+    /// 설정된 OME API 주소(시험·로그용). 토큰은 돌려주지 않는다.
+    pub fn base(&self) -> Option<&str> {
+        self.inner.as_ref().map(|i| i.base.as_str())
     }
 
     fn streams_url(base: &str) -> String {

@@ -38,15 +38,17 @@ async fn main() {
     };
 
     // OME 관리 API(스트림 끊기, 목록). 둘 다 있을 때만 쓴다. 토큰은 OME Server.xml의 AccessToken과 같은 값이다.
-    let ome_api = match (std::env::var("OME_API_URL"), std::env::var("OME_API_TOKEN")) {
-        (Ok(url), Ok(token)) if !url.trim().is_empty() && token.trim().len() >= 16 => {
-            onair_backend::ome_api::OmeApi::new(url.trim(), token.trim())
-        }
-        _ => {
-            tracing::warn!(
-                "OME_API_URL/OME_API_TOKEN이 없어 방송 종료 때 송출을 끊지 못합니다(개발용)"
-            );
-            Default::default()
+    // OME_API_URL을 넣었으면 토큰도 서명 키와 같은 규칙으로 검사하고, 맞지 않으면 시작하지 않는다(#27 V5).
+    // 예전에는 짧은 토큰이면 조용히 꺼져서, 배포에서 "방송 종료 때 송출 끊기"가 몰래 동작하지 않을 수 있었다.
+    let api_url = std::env::var("OME_API_URL").unwrap_or_default();
+    let ome_api = if api_url.trim().is_empty() {
+        tracing::warn!("OME_API_URL이 없어 방송 종료 때 송출을 끊지 못합니다(개발용)");
+        Default::default()
+    } else {
+        let raw_token = std::env::var("OME_API_TOKEN").unwrap_or_default();
+        match onair_backend::ome::check_secret(&raw_token) {
+            Ok(t) => onair_backend::ome_api::OmeApi::new(api_url.trim(), t),
+            Err(why) => panic!("OME_API_TOKEN 확인 실패: {why}"),
         }
     };
 

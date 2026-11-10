@@ -288,3 +288,76 @@ fn parse_stream_examples() {
     assert_eq!(parse_stream(&format!("ws://x/app2/{NAME}")), None);
     assert_eq!(parse_stream(""), None);
 }
+
+// ---------- #27 재수정 ----------
+
+#[test]
+fn parse_stream_rejects_path_tricks_and_bad_names() {
+    let other = "fedcba9876543210";
+    for url in [
+        // OME는 정리하지 않은 원래 경로로 이름을 정한다. `..`·`.`·인코딩·빈 칸은 모두 거절(V1)
+        format!("http://h:3333/app/{other}/../{NAME}?direction=whip&key=k"),
+        format!("http://h:3333/app/./{NAME}?direction=whip&key=k"),
+        format!("http://h:3333/app/{NAME}/..?key=k"),
+        format!("http://h:3333/app/%2e%2e/{NAME}?key=k"),
+        format!("http://h:3333/app/{other}/%2e%2e/{NAME}?key=k"),
+        format!("http://h:3333/app//{NAME}?key=k"),
+        format!("http://h:3333//app/{NAME}?key=k"),
+        format!("http://h:3333/app/{NAME}/?key=k"),
+        format!("http://h:3333/app\\{NAME}?key=k"),
+        format!("http://h:3333/app/{NAME}/a/b?key=k"),
+        format!("http://h:3333/app/{NAME}/.hidden"),
+        // key가 두 번
+        format!("http://h:3333/app/{NAME}?key=a&key=b"),
+        // 이름 형식: 대문자, 17자, 15자
+        "ws://x/app/0123456789ABCDEF".to_string(),
+        "ws://x/app/0123456789abcdef0".to_string(),
+        "ws://x/app/0123456789abcde".to_string(),
+    ] {
+        assert_eq!(parse_stream(&url), None, "{url}");
+    }
+    // 정상
+    assert_eq!(
+        parse_stream(&format!(
+            "https://x/app/{NAME}/chunklist_0_video_llhls.m3u8?_HLS_part=1"
+        )),
+        Some((NAME.to_string(), None))
+    );
+}
+
+#[sqlx::test]
+async fn dot_dot_publish_cannot_take_another_name(db: PgPool) {
+    // 내 방송(NAME)의 키로 남의 이름 앞에 `..`를 붙여도 거절되고, 내 방송 상태도 바뀌지 않는다(V1)
+    seed(&db, "ready").await;
+    let url = format!("http://h:3333/app/fedcba9876543210/../{NAME}?direction=whip&key={SKEY}");
+    let (_, json) = signed(&router(db.clone()), "incoming", "opening", &url).await;
+    assert_eq!(json, json!({ "allowed": false }));
+    assert_eq!(status_of(&db).await, "ready");
+}
+
+#[sqlx::test]
+async fn opening_sets_started_at_once_and_keeps_it_while_live(db: PgPool) {
+    seed(&db, "ready").await;
+    let r = router(db.clone());
+    let started = || async {
+        sqlx::query_scalar::<_, Option<time::OffsetDateTime>>(
+            "SELECT started_at FROM broadcasts WHERE stream_name = $1",
+        )
+        .bind(NAME)
+        .fetch_one(&db)
+        .await
+        .unwrap()
+    };
+    assert!(started().await.is_none());
+    signed(&r, "incoming", "opening", &publish_url(NAME, SKEY)).await;
+    let first = started().await.expect("송출이 열리면 시작 시각이 생긴다");
+    // 이미 live인데 다시 opening이 와도(재연결) 시작 시각은 그대로(V18)
+    sqlx::query("UPDATE broadcasts SET started_at = started_at - interval '1 minute'")
+        .execute(&db)
+        .await
+        .unwrap();
+    let before = started().await.unwrap();
+    signed(&r, "incoming", "opening", &publish_url(NAME, SKEY)).await;
+    assert_eq!(started().await.unwrap(), before);
+    assert!(before < first);
+}

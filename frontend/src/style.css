@@ -227,3 +227,21 @@ button:disabled {
   border-radius: 6px;
   font-size: 0.8rem;
 }
+
+/* 띄어쓰기 없는 긴 제목·설명도 화면 너비 안에서 줄을 바꾼다(휴대폰, #27 V9) */
+.detail-head,
+.card-top {
+  min-width: 0;
+}
+
+.detail-head h2,
+.card strong,
+.description,
+.hint {
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
+[hidden] {
+  display: none !important;
+}

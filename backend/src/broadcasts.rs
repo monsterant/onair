@@ -10,7 +10,7 @@
 use axum::{
     Json,
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode, header},
 };
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -18,6 +18,7 @@ use time::OffsetDateTime;
 use crate::{
     AppState,
     auth::{ApiError, CurrentUser},
+    guard::client_key,
 };
 
 pub const TITLE_MAX: usize = 100;
@@ -55,9 +56,18 @@ macro_rules! select_broadcast {
 
 // ---------- 입력 검사 ----------
 
+/// 화면에 보이지 않는 글자(폭 없는 공백 등). 이것만으로 된 제목은 빈 제목으로 본다.
+fn invisible(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '\u{200B}'..='\u{200D}' | '\u{2060}' | '\u{FEFF}')
+}
+
 fn clean_title(raw: &str) -> Result<String, ApiError> {
     let t = raw.trim();
-    if t.is_empty() {
+    // 제어 문자(NUL 등)는 DB가 받지 않거나 화면을 깨뜨린다. 500 대신 400으로 거절한다(#27 V8).
+    if t.chars().any(char::is_control) {
+        return Err(ApiError::BadRequest("제목에 쓸 수 없는 글자가 있습니다"));
+    }
+    if t.chars().all(invisible) {
         return Err(ApiError::BadRequest("제목을 입력하세요"));
     }
     if t.chars().count() > TITLE_MAX {
@@ -68,11 +78,20 @@ fn clean_title(raw: &str) -> Result<String, ApiError> {
 
 fn clean_description(raw: &str) -> Result<String, ApiError> {
     let d = raw.trim();
+    // 설명은 줄바꿈과 탭만 허락하고 나머지 제어 문자는 거절한다.
+    if d.chars()
+        .any(|c| c.is_control() && c != '\n' && c != '\r' && c != '\t')
+    {
+        return Err(ApiError::BadRequest("설명에 쓸 수 없는 글자가 있습니다"));
+    }
     if d.chars().count() > DESCRIPTION_MAX {
         return Err(ApiError::BadRequest("설명은 1000자 이하여야 합니다"));
     }
     Ok(d.to_string())
 }
+
+/// 한 사람이 동시에 가질 수 있는 끝나지 않은(대기·방송 중) 방송 수(#27 V7)
+pub const OPEN_BROADCASTS_MAX: i64 = 5;
 
 /// 임의의 바이트를 16진수 글자로. 이름·키 만들기에 쓴다.
 fn random_hex(bytes: usize) -> Result<String, ApiError> {
@@ -129,10 +148,26 @@ pub struct NewBroadcast {
 pub async fn create(
     State(state): State<AppState>,
     user: CurrentUser,
+    headers: HeaderMap,
     Json(input): Json<NewBroadcast>,
 ) -> Result<(StatusCode, Json<Broadcast>), ApiError> {
+    // 만들기도 로그인처럼 IP 하나당 1분 횟수 제한을 함께 쓴다(#27 V7: 대량 생성으로 목록 밀어내기 방지)
+    if !state.auth.limiter.allow(&client_key(&headers)) {
+        return Err(ApiError::TooManyRequests);
+    }
     let title = clean_title(&input.title)?;
     let description = clean_description(&input.description)?;
+    let open: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM broadcasts WHERE owner_id = $1 AND status <> 'ended'",
+    )
+    .bind(user.id)
+    .fetch_one(&state.db)
+    .await?;
+    if open >= OPEN_BROADCASTS_MAX {
+        return Err(ApiError::Conflict(
+            "끝나지 않은 방송은 5개까지 만들 수 있습니다. 쓰지 않는 방송을 종료하거나 삭제하세요",
+        ));
+    }
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO broadcasts (owner_id, title, description, stream_name, stream_key)
          VALUES ($1, $2, $3, $4, $5) RETURNING id",
@@ -187,15 +222,14 @@ pub async fn delete(
     Path(id): Path<i64>,
 ) -> Result<StatusCode, ApiError> {
     let b = owned(&state, id, &user).await?;
-    // 방송 중이면 송출을 먼저 끊는다(OME에 영상이 남지 않게).
-    if b.status == "live" {
-        state.ome.stop_stream(&b.stream_name).await;
-    }
+    // 행을 먼저 지우고 그다음 송출을 끊는다. 상태와 상관없이 항상 끊는다(#27 V4).
+    // 지운 뒤에는 웹훅이 이름을 찾지 못해 다시 송출할 수 없다. 끊기가 실패해도 맞춰 보기가 DB에 없는 스트림을 끊는다.
     sqlx::query("DELETE FROM broadcasts WHERE id = $1 AND owner_id = $2")
         .bind(id)
         .bind(user.id)
         .execute(&state.db)
         .await?;
+    state.ome.stop_stream(&b.stream_name).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -234,7 +268,7 @@ pub async fn publish_info(
     State(state): State<AppState>,
     user: CurrentUser,
     Path(id): Path<i64>,
-) -> Result<Json<PublishInfo>, ApiError> {
+) -> Result<([(header::HeaderName, &'static str); 1], Json<PublishInfo>), ApiError> {
     owned(&state, id, &user).await?;
     let (stream_name, stream_key): (String, String) =
         sqlx::query_as("SELECT stream_name, stream_key FROM broadcasts WHERE id = $1")
@@ -242,11 +276,15 @@ pub async fn publish_info(
             .fetch_one(&state.db)
             .await?;
     let whip_path = format!("/app/{stream_name}?direction=whip&key={stream_key}");
-    Ok(Json(PublishInfo {
-        stream_name,
-        stream_key,
-        whip_path,
-    }))
+    // 송출 키가 든 응답은 브라우저·중간 캐시에 남기지 않는다(#27 V20)
+    Ok((
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(PublishInfo {
+            stream_name,
+            stream_key,
+            whip_path,
+        }),
+    ))
 }
 
 #[cfg(test)]

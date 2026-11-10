@@ -10,7 +10,7 @@ use axum::{
     Json, Router,
     body::{Body, to_bytes},
     extract::{Path, State},
-    http::{Request, StatusCode, header},
+    http::{HeaderMap, Request, StatusCode, header},
     routing::{delete, get},
 };
 use onair_backend::{AppState, app, ome::reconcile, ome_api::OmeApi};
@@ -24,6 +24,16 @@ use tower::ServiceExt;
 struct FakeOme {
     streams: Arc<Mutex<HashSet<String>>>,
     deleted: Arc<Mutex<Vec<String>>>,
+    /// Some(코드)면 목록 조회가 그 상태 코드로 실패한다(OME 오류 흉내)
+    list_error: Arc<Mutex<Option<u16>>>,
+}
+
+/// 진짜 OME처럼 `Authorization: Basic base64(토큰)`이 없으면 401
+const FAKE_TOKEN: &str = "fake-token-0123456789";
+fn authorized(h: &HeaderMap) -> bool {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    h.get("authorization").and_then(|v| v.to_str().ok())
+        == Some(format!("Basic {}", STANDARD.encode(FAKE_TOKEN)).as_str())
 }
 
 async fn fake_ome() -> (FakeOme, OmeApi) {
@@ -31,18 +41,33 @@ async fn fake_ome() -> (FakeOme, OmeApi) {
     let r = Router::new()
         .route(
             "/v1/vhosts/default/apps/app/streams",
-            get(|State(f): State<FakeOme>| async move {
+            get(|State(f): State<FakeOme>, h: HeaderMap| async move {
+                if !authorized(&h) {
+                    return (StatusCode::UNAUTHORIZED, Json(json!({ "statusCode": 401 })));
+                }
+                if let Some(code) = *f.list_error.lock().unwrap() {
+                    return (
+                        StatusCode::from_u16(code).unwrap(),
+                        Json(json!({ "statusCode": code })),
+                    );
+                }
                 let list: Vec<String> = f.streams.lock().unwrap().iter().cloned().collect();
-                Json(json!({ "statusCode": 200, "message": "OK", "response": list }))
+                (
+                    StatusCode::OK,
+                    Json(json!({ "statusCode": 200, "message": "OK", "response": list })),
+                )
             }),
         )
         .route(
             "/v1/vhosts/default/apps/app/streams/{name}",
             delete(
-                |State(f): State<FakeOme>, Path(name): Path<String>| async move {
+                |State(f): State<FakeOme>, h: HeaderMap, Path(name): Path<String>| async move {
+                    if !authorized(&h) {
+                        return StatusCode::UNAUTHORIZED;
+                    }
                     f.streams.lock().unwrap().remove(&name);
                     f.deleted.lock().unwrap().push(name);
-                    Json(json!({ "statusCode": 200 }))
+                    StatusCode::OK
                 },
             ),
         )
@@ -50,10 +75,7 @@ async fn fake_ome() -> (FakeOme, OmeApi) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, r).await.unwrap() });
-    (
-        fake,
-        OmeApi::new(&format!("http://{addr}"), "fake-token-0123456789"),
-    )
+    (fake, OmeApi::new(&format!("http://{addr}"), FAKE_TOKEN))
 }
 
 // ---------- 요청 도우미 ----------
@@ -390,7 +412,8 @@ async fn end_marks_ended_and_stops_stream_idempotently(db: PgPool) {
 }
 
 #[sqlx::test]
-async fn deleting_live_broadcast_stops_stream_first(db: PgPool) {
+async fn deleting_any_broadcast_always_stops_its_stream(db: PgPool) {
+    // 상태가 ready여도 OME에 스트림이 남아 있을 수 있다(늦은 closing 등). 그래서 삭제할 때는 항상 끊는다(#27 V4).
     let (fake, ome) = fake_ome().await;
     let r = router(db.clone(), ome).await;
     let owner = login(&r, 1).await;
@@ -401,26 +424,164 @@ async fn deleting_live_broadcast_stops_stream_first(db: PgPool) {
         .execute(&db)
         .await
         .unwrap();
-    call(
-        &r,
-        "DELETE",
-        &format!("/broadcasts/{}", idle["id"]),
-        None,
-        Some(&owner),
-    )
-    .await;
-    assert!(fake.deleted.lock().unwrap().is_empty());
-    call(
-        &r,
-        "DELETE",
-        &format!("/broadcasts/{}", live["id"]),
-        None,
-        Some(&owner),
-    )
-    .await;
+    for b in [&idle, &live] {
+        let (code, _) = call(
+            &r,
+            "DELETE",
+            &format!("/broadcasts/{}", b["id"]),
+            None,
+            Some(&owner),
+        )
+        .await;
+        assert_eq!(code, StatusCode::NO_CONTENT);
+    }
     assert_eq!(
         *fake.deleted.lock().unwrap(),
-        vec![live["stream_name"].as_str().unwrap().to_string()]
+        vec![
+            idle["stream_name"].as_str().unwrap().to_string(),
+            live["stream_name"].as_str().unwrap().to_string()
+        ]
+    );
+}
+
+#[sqlx::test]
+async fn editing_or_ending_one_broadcast_leaves_owners_others_alone(db: PgPool) {
+    let (_fake, ome) = fake_ome().await;
+    let r = router(db, ome).await;
+    let owner = login(&r, 1).await;
+    let a = create(&r, &owner, "A").await;
+    let b = create(&r, &owner, "B").await;
+    call(
+        &r,
+        "PATCH",
+        &format!("/broadcasts/{}", a["id"]),
+        Some(json!({ "title": "A2", "description": "새 설명" })),
+        Some(&owner),
+    )
+    .await;
+    call(
+        &r,
+        "POST",
+        &format!("/broadcasts/{}/end", a["id"]),
+        None,
+        Some(&owner),
+    )
+    .await;
+    let (_, now_b) = call(&r, "GET", &format!("/broadcasts/{}", b["id"]), None, None).await;
+    assert_eq!(now_b["title"], "B");
+    assert_eq!(now_b["description"], "설명");
+    assert_eq!(now_b["status"], "ready");
+}
+
+#[sqlx::test]
+async fn create_rejects_control_chars_and_invisible_titles(db: PgPool) {
+    let r = router(db.clone(), OmeApi::default()).await;
+    let owner = login(&r, 1).await;
+    for body in [
+        json!({ "title": "a\u{0}b" }),
+        json!({ "title": "ok", "description": "a\u{0}" }),
+        json!({ "title": "\u{200b}\u{200b}" }),
+        json!({ "title": "\u{feff} \u{2060}" }),
+        json!({ "title": "줄\n바꿈" }),
+    ] {
+        let (code, err) = call(&r, "POST", "/broadcasts", Some(body.clone()), Some(&owner)).await;
+        assert_eq!(code, StatusCode::BAD_REQUEST, "{body}");
+        assert!(err["error"].is_string());
+    }
+    // 설명의 줄바꿈과 탭은 된다
+    let (code, b) = call(
+        &r,
+        "POST",
+        "/broadcasts",
+        Some(json!({ "title": "ok", "description": "첫 줄\n둘째\t줄" })),
+        Some(&owner),
+    )
+    .await;
+    assert_eq!(code, StatusCode::CREATED);
+    assert_eq!(b["description"], "첫 줄\n둘째\t줄");
+    // PATCH도 같은 규칙
+    let (code, _) = call(
+        &r,
+        "PATCH",
+        &format!("/broadcasts/{}", b["id"]),
+        Some(json!({ "title": "x\u{0}" })),
+        Some(&owner),
+    )
+    .await;
+    assert_eq!(code, StatusCode::BAD_REQUEST);
+}
+
+#[sqlx::test]
+async fn open_broadcasts_are_capped_per_owner(db: PgPool) {
+    let r = router(db, OmeApi::default()).await;
+    let owner = login(&r, 1).await;
+    let other = login(&r, 2).await;
+    let mut ids = vec![];
+    for i in 0..5 {
+        ids.push(create(&r, &owner, &format!("방송{i}")).await["id"].clone());
+    }
+    let (code, err) = call(
+        &r,
+        "POST",
+        "/broadcasts",
+        Some(json!({ "title": "여섯째" })),
+        Some(&owner),
+    )
+    .await;
+    assert_eq!(code, StatusCode::CONFLICT);
+    assert!(err["error"].as_str().unwrap().contains("5개"));
+    // 다른 사람은 따로 센다
+    create(&r, &other, "다른 사람").await;
+    // 하나를 끝내면 다시 만들 수 있다
+    call(
+        &r,
+        "POST",
+        &format!("/broadcasts/{}/end", ids[0]),
+        None,
+        Some(&owner),
+    )
+    .await;
+    create(&r, &owner, "여섯째").await;
+}
+
+#[sqlx::test]
+async fn create_is_rate_limited_per_client(db: PgPool) {
+    let r = app(AppState {
+        db,
+        auth: onair_backend::auth::AuthConfig {
+            demo_login: true,
+            limiter: onair_backend::guard::RateLimiter::new(3, std::time::Duration::from_secs(60)),
+        },
+        ome: OmeApi::default(),
+    });
+    // 데모 로그인 1번 + 만들기 2번 = 3번까지, 4번째 만들기는 429
+    let owner = login(&r, 1).await;
+    create(&r, &owner, "a").await;
+    create(&r, &owner, "b").await;
+    let (code, _) = call(
+        &r,
+        "POST",
+        "/broadcasts",
+        Some(json!({ "title": "c" })),
+        Some(&owner),
+    )
+    .await;
+    assert_eq!(code, StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[sqlx::test]
+async fn publish_info_is_not_cached(db: PgPool) {
+    let r = router(db, OmeApi::default()).await;
+    let owner = login(&r, 1).await;
+    let b = create(&r, &owner, "a").await;
+    let req = Request::get(format!("/broadcasts/{}/publish", b["id"]))
+        .header(header::COOKIE, format!("onair_session={owner}"))
+        .body(Body::empty())
+        .unwrap();
+    let res = r.clone().oneshot(req).await.unwrap();
+    assert_eq!(
+        res.headers().get(header::CACHE_CONTROL).unwrap(),
+        "no-store"
     );
 }
 
@@ -457,6 +618,8 @@ async fn reconcile_fixes_stale_live_and_stops_ended_streams(db: PgPool) {
     let fresh = create(&r, &owner, "방금 시작").await;
     let real = create(&r, &owner, "진짜 방송 중").await;
     let ended = create(&r, &owner, "종료").await;
+    // 늦은 closing 때문에 ready가 됐지만 OME에는 스트림이 살아 있는 방송(#27 V3)
+    let revived = create(&r, &owner, "다시 붙음").await;
     let set = |id: &Value, status: &str, ago: i32| {
         let db = db.clone();
         let (id, status) = (id.as_i64().unwrap(), status.to_string());
@@ -478,6 +641,9 @@ async fn reconcile_fixes_stale_live_and_stops_ended_streams(db: PgPool) {
         let mut s = fake.streams.lock().unwrap();
         s.insert(real["stream_name"].as_str().unwrap().to_string());
         s.insert(ended["stream_name"].as_str().unwrap().to_string());
+        s.insert(revived["stream_name"].as_str().unwrap().to_string());
+        // DB에 없는 이름(삭제된 방송 등)도 끊어야 한다(#27 V4)
+        s.insert("ffffffffffffffff".to_string());
     }
 
     reconcile(&db, &ome).await.unwrap();
@@ -498,9 +664,66 @@ async fn reconcile_fixes_stale_live_and_stops_ended_streams(db: PgPool) {
     assert_eq!(status(&real).await, "live");
     assert_eq!(status(&ended).await, "ended");
     assert_eq!(
-        *fake.deleted.lock().unwrap(),
-        vec![ended["stream_name"].as_str().unwrap().to_string()]
+        status(&revived).await,
+        "live",
+        "OME에 있으면 live로 되돌린다"
     );
+    let deleted: HashSet<String> = fake.deleted.lock().unwrap().iter().cloned().collect();
+    let expected: HashSet<String> = [ended["stream_name"].as_str().unwrap(), "ffffffffffffffff"]
+        .into_iter()
+        .map(String::from)
+        .collect();
+    assert_eq!(deleted, expected);
+}
+
+#[sqlx::test]
+async fn reconcile_does_nothing_when_ome_answers_error(db: PgPool) {
+    // OME가 401·500 등으로 답하면 목록을 모르는 것이다. 이때 live를 ready로 떨어뜨리면 안 된다(#27 V21).
+    for code in [401u16, 500] {
+        let (fake, ome) = fake_ome().await;
+        *fake.list_error.lock().unwrap() = Some(code);
+        let r = router(db.clone(), ome.clone()).await;
+        let owner = login(&r, 1).await;
+        let b = create(&r, &owner, "방송").await;
+        sqlx::query("UPDATE broadcasts SET status = 'live', started_at = now() - interval '1 hour' WHERE id = $1")
+            .bind(b["id"].as_i64().unwrap())
+            .execute(&db)
+            .await
+            .unwrap();
+        reconcile(&db, &ome).await.unwrap();
+        let (_, now) = call(&r, "GET", &format!("/broadcasts/{}", b["id"]), None, None).await;
+        assert_eq!(now["status"], "live", "OME {code}");
+        call(
+            &r,
+            "DELETE",
+            &format!("/broadcasts/{}", b["id"]),
+            None,
+            Some(&owner),
+        )
+        .await;
+    }
+}
+
+#[sqlx::test]
+async fn ome_api_client_sends_the_token(db: PgPool) {
+    // 가짜 OME는 토큰이 틀리면 401로 거절한다. 같은 서버에 맞는 토큰과 틀린 토큰으로 각각 끊어 본다(#27 V21).
+    let (fake, good) = fake_ome().await;
+    let bad = OmeApi::new(good.base().unwrap(), "wrong-token-0123456789");
+    assert!(
+        !format!("{good:?}").contains(FAKE_TOKEN),
+        "Debug에 토큰이 보이면 안 된다"
+    );
+    let r = router(db, good.clone()).await;
+    let owner = login(&r, 1).await;
+    let b = create(&r, &owner, "방송").await;
+    let name = b["stream_name"].as_str().unwrap().to_string();
+    bad.stop_stream(&name).await;
+    assert!(
+        fake.deleted.lock().unwrap().is_empty(),
+        "틀린 토큰이면 끊기지 않는다"
+    );
+    good.stop_stream(&name).await;
+    assert_eq!(*fake.deleted.lock().unwrap(), vec![name]);
 }
 
 #[sqlx::test]

@@ -191,7 +191,7 @@ function newPage(main: HTMLElement) {
 
 // ---------- 상세 ----------
 
-async function detailPage(main: HTMLElement, id: number) {
+async function detailPage(main: HTMLElement, id: number, gen: number) {
   let b: Broadcast;
   try {
     b = await getBroadcast(id);
@@ -199,6 +199,8 @@ async function detailPage(main: HTMLElement, id: number) {
     main.append(el('p', { className: 'error', textContent: message(e) }));
     return;
   }
+  // 기다리는 사이 다른 화면으로 옮겼으면 아무것도 하지 않는다(늦게 끝난 요청이 새 화면을 건드리지 않게, #27 V17)
+  if (gen !== routeGen) return;
   const isOwner = me?.id === b.owner_id;
 
   const statusBox = el('span');
@@ -207,6 +209,18 @@ async function detailPage(main: HTMLElement, id: number) {
   const playerBox = el('div', { className: 'player-box' });
   const offAir = el('p', { className: 'hint' });
   let playing = false;
+  let retry: ReturnType<typeof setTimeout> | undefined;
+  let gone = false;
+
+  // 재생 오류가 나면 3초 뒤 플레이어를 다시 만든다(#27 V2)
+  const onPlayerError = () => {
+    clearTimeout(retry);
+    retry = setTimeout(() => {
+      if (gen !== routeGen || gone || b.status !== 'live') return;
+      playing = false;
+      paint();
+    }, 3_000);
+  };
 
   const paint = () => {
     statusBox.replaceChildren(badge(b.status));
@@ -215,14 +229,18 @@ async function detailPage(main: HTMLElement, id: number) {
     const live = b.status === 'live';
     if (live && !playing) {
       playerBox.replaceChildren(el('div', { id: 'player' }));
-      player().then((p) => p.startPlayer('player', b.stream_name));
+      player().then((p) => {
+        if (gen === routeGen && b.status === 'live') p.startPlayer('player', b.stream_name, onPlayerError);
+      });
       playing = true;
     } else if (!live && playing) {
+      clearTimeout(retry);
       player().then((p) => p.stopPlayer('player'));
       playerBox.replaceChildren();
       playing = false;
     }
     offAir.textContent = live ? '' : b.status === 'ended' ? '종료된 방송입니다.' : '아직 방송 전입니다. 방송이 시작되면 자동으로 재생됩니다.';
+    owner?.update(b);
   };
 
   main.append(
@@ -232,25 +250,33 @@ async function detailPage(main: HTMLElement, id: number) {
     offAir,
     descEl,
   );
-  if (isOwner) main.append(ownerPanel(b, (nb) => { b = nb; paint(); }));
+  const owner = isOwner ? ownerPanel(b, (nb) => { b = nb; paint(); }) : null;
+  if (owner) main.append(owner.el);
   paint();
 
   // 5초마다 상태를 다시 본다(방송이 시작·종료되면 플레이어를 켜고 끈다)
+  const stop = () => {
+    clearInterval(timer);
+    clearTimeout(retry);
+    player().then((p) => p.stopPlayer('player'));
+  };
   const timer = setInterval(async () => {
     try {
       b = await getBroadcast(id);
-      paint();
-    } catch {
-      /* 잠깐 끊겨도 다음에 다시 본다 */
+      if (gen === routeGen) paint();
+    } catch (e) {
+      // 방송이 지워졌으면 멈추고 알린다(#27 V10). 그 밖의 오류는 잠깐 끊긴 것으로 보고 다음에 다시 본다.
+      if (e instanceof ApiError && e.status === 404) {
+        gone = true;
+        stop();
+        main.replaceChildren(el('p', { className: 'hint', textContent: '삭제된 방송입니다.' }), el('a', { href: '#/', textContent: '목록으로' }));
+      }
     }
   }, 5_000);
-  cleanup.push(() => {
-    clearInterval(timer);
-    player().then((p) => p.stopPlayer('player'));
-  });
+  cleanup.push(stop);
 }
 
-function ownerPanel(b: Broadcast, onChange: (b: Broadcast) => void): HTMLElement {
+function ownerPanel(b: Broadcast, onChange: (b: Broadcast) => void): { el: HTMLElement; update: (b: Broadcast) => void } {
   const error = el('p', { className: 'error', role: 'alert' });
 
   // 수정
@@ -282,21 +308,38 @@ function ownerPanel(b: Broadcast, onChange: (b: Broadcast) => void): HTMLElement
     go('#/');
   });
 
-  return el(
+  // 종료된 방송은 다시 송출할 수 없으니 송출 주소·종료 버튼을 숨기고 안내한다(#27 V15)
+  const endedNote = el('p', { className: 'hint', textContent: '종료된 방송은 다시 송출할 수 없습니다. 새로 방송하려면 방송을 새로 만드세요.' });
+  const update = (nb: Broadcast) => {
+    b = nb;
+    const ended = nb.status === 'ended';
+    showPublish.hidden = ended;
+    end.hidden = ended;
+    endedNote.hidden = !ended;
+    if (ended) publishBox.replaceChildren();
+  };
+  const panel = el(
     'section',
     { className: 'panel owner' },
     el('h3', { textContent: '방송 관리 (소유자)' }),
     title,
     description,
     el('div', { className: 'row' }, save, showPublish, end, del),
+    endedNote,
     publishBox,
     error,
   );
+  update(b);
+  return { el: panel, update };
 }
 
 // ---------- 길 찾기 ----------
 
+/** 화면을 바꿀 때마다 1씩 는다. 늦게 끝난 이전 화면의 작업이 지금 화면을 건드리지 않게 비교한다. */
+let routeGen = 0;
+
 async function route() {
+  const gen = ++routeGen;
   cleanup.forEach((f) => f());
   cleanup = [];
   try {
@@ -304,6 +347,7 @@ async function route() {
   } catch {
     me = null;
   }
+  if (gen !== routeGen) return;
   const main = el('main', { className: 'content' });
   const status = el('p', { className: 'status' });
   app.replaceChildren(header(), main, status);
@@ -316,7 +360,7 @@ async function route() {
   const detail = /^#\/b\/(\d+)$/.exec(hash);
   if (hash === '#/login') loginPage(main);
   else if (hash === '#/new') newPage(main);
-  else if (detail) await detailPage(main, Number(detail[1]));
+  else if (detail) await detailPage(main, Number(detail[1]), gen);
   else await listPage(main);
 }
 
