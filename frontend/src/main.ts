@@ -25,7 +25,7 @@ import {
 } from './api';
 // 플레이어(OvenPlayer+hls.js, 약 1MB)는 상세 화면에서만 불러온다. 목록 화면을 가볍게 하려는 것이다.
 const player = () => import('./player');
-import { CancelledError, Publisher, type PublishState, screenAndMic } from './publisher';
+import { CancelledError, type Facing, Publisher, type PublishState, cameraAndMic, keepScreenOn, screenAndMic } from './publisher';
 
 const app = document.querySelector<HTMLElement>('#app')!;
 let me: User | null = null;
@@ -294,7 +294,10 @@ const PUBLISH_LABEL: Record<PublishState, string> = {
   stopping: '멈추는 중...',
 };
 
-/** PC 화면 공유 + 마이크로 송출하는 칸(#1). 휴대폰 카메라(#2)도 같은 Publisher를 쓴다. */
+/**
+ * 방송하기 칸: PC 화면 공유 + 마이크(#1), 카메라 + 마이크(#2, 휴대폰·PC). 둘 다 같은 Publisher를 쓴다.
+ * 화면 공유가 없는 브라우저(휴대폰)에서는 화면 공유 줄을 숨기고 카메라만 보인다.
+ */
 function studioPanel(current: () => Broadcast, publisher: Publisher): { el: HTMLElement; update: (b: Broadcast) => void } {
   const state = el('strong', { className: 'pub-state', textContent: PUBLISH_LABEL.idle });
   const note = el('p', { className: 'hint', role: 'status' });
@@ -302,55 +305,96 @@ function studioPanel(current: () => Broadcast, publisher: Publisher): { el: HTML
   const preview = el('video', { className: 'preview', muted: true, autoplay: true, playsInline: true });
   preview.hidden = true;
   const withMic = el('input', { type: 'checkbox', checked: true, id: 'with-mic' });
-  const start = el('button', { type: 'button', className: 'start-screen', textContent: '화면 공유로 방송 시작' });
+  const startScreen = el('button', { type: 'button', className: 'start-screen', textContent: '화면 공유로 방송 시작' });
+  const facing = el(
+    'select',
+    { className: 'facing', title: '카메라' },
+    el('option', { value: 'user', textContent: '앞 카메라' }),
+    el('option', { value: 'environment', textContent: '뒤 카메라' }),
+  );
+  const startCamera = el('button', { type: 'button', className: 'start-camera', textContent: '카메라로 방송 시작' });
   const stop = el('button', { type: 'button', className: 'danger stop-publish', textContent: '송출 멈춤' });
   stop.hidden = true;
-  const supported = !!navigator.mediaDevices?.getDisplayMedia;
+  const screenSupported = !!navigator.mediaDevices?.getDisplayMedia;
+  const cameraSupported = !!navigator.mediaDevices?.getUserMedia;
+  /** 송출하는 동안 화면 꺼짐 막기(휴대폰). 멈추면 푼다. */
+  let releaseScreen: (() => void) | null = null;
 
   const paint = (s: PublishState, detail?: string) => {
     state.textContent = PUBLISH_LABEL[s];
     state.className = `pub-state ${s}`;
-    start.disabled = s !== 'idle' || !supported;
-    withMic.disabled = s !== 'idle';
-    stop.hidden = s === 'idle';
+    const idle = s === 'idle';
+    startScreen.disabled = !idle || !screenSupported;
+    startCamera.disabled = !idle || !cameraSupported;
+    withMic.disabled = !idle;
+    facing.disabled = !idle;
+    stop.hidden = idle;
     // 멈추는 중에는 멈춤을 다시 누를 수 없다(#30 P2)
     stop.disabled = s === 'stopping';
-    if (s === 'idle') {
+    if (idle) {
       preview.hidden = true;
       preview.srcObject = null;
+      preview.classList.remove('mirror');
       warn.textContent = '';
+      releaseScreen?.();
+      releaseScreen = null;
       if (detail) note.textContent = detail;
     }
   };
   publisher.onState = paint;
 
-  start.onclick = async () => {
-    // 누르자마자 막는다(#30 P8). 공유 창은 클릭 직후에 열어야 하므로 서버 요청을 먼저 기다리지 않는다(#30 P4).
-    start.disabled = true;
+  /** 두 시작 버튼이 함께 쓰는 흐름. 누르자마자 막고(#30 P8), 장치 켜기를 서버 요청보다 먼저 한다(#30 P4). */
+  const begin = async (
+    getTracks: Parameters<Publisher['start']>[0],
+    endedReason: string,
+    afterStart: () => void,
+  ) => {
+    startScreen.disabled = true;
+    startCamera.disabled = true;
     warn.textContent = '';
     note.textContent = '';
-    let screenAudio = 0;
     try {
-      const stream = await publisher.start(
-        async (register) => {
-          const t = await screenAndMic(register, withMic.checked);
-          screenAudio = t.screenAudio;
-          return t;
-        },
-        async () => (await publishInfo(current().id)).whip_path,
-      );
+      const stream = await publisher.start(getTracks, async () => (await publishInfo(current().id)).whip_path, endedReason);
       preview.srcObject = stream;
       preview.hidden = false;
-      if (screenAudio === 0) {
-        warn.textContent = '화면 소리가 함께 가지 않습니다. 공유 창에서 "탭 오디오 공유" 또는 "시스템 오디오 공유"를 켰는지 확인하세요(Chrome·Edge만 되고, "창" 공유에는 소리 칸이 없습니다).';
-      }
+      releaseScreen = keepScreenOn();
+      afterStart();
     } catch (e) {
       // 멈춰서 취소된 시도는 조용히 넘긴다(새 시도나 멈춘 이유를 덮지 않게, #30 P7)
       if (e instanceof CancelledError) return;
       note.textContent = e instanceof Error ? e.message : String(e);
     } finally {
-      if (publisher.state === 'idle') start.disabled = !supported;
+      if (publisher.state === 'idle') {
+        startScreen.disabled = !screenSupported;
+        startCamera.disabled = !cameraSupported;
+      }
     }
+  };
+
+  startScreen.onclick = () => {
+    let screenAudio = 0;
+    void begin(
+      async (register) => {
+        const t = await screenAndMic(register, withMic.checked);
+        screenAudio = t.screenAudio;
+        return t;
+      },
+      '화면 공유가 끝났습니다',
+      () => {
+        if (screenAudio === 0) {
+          warn.textContent = '화면 소리가 함께 가지 않습니다. 공유 창에서 "탭 오디오 공유" 또는 "시스템 오디오 공유"를 켰는지 확인하세요(Chrome·Edge만 되고, "창" 공유에는 소리 칸이 없습니다).';
+        }
+      },
+    );
+  };
+  startCamera.onclick = () => {
+    const f = facing.value as Facing;
+    void begin(
+      (register) => cameraAndMic(register, f),
+      '카메라가 꺼졌습니다(다른 앱으로 가거나 화면이 꺼지면 브라우저가 카메라를 멈춥니다)',
+      // 앞 카메라는 거울처럼 보여야 자연스럽다. 미리보기만 뒤집는다(시청자에게 가는 영상은 그대로).
+      () => preview.classList.toggle('mirror', f === 'user'),
+    );
   };
   stop.onclick = () => void publisher.stop('송출을 멈췄습니다. 다시 시작할 수 있습니다.');
 
@@ -361,15 +405,32 @@ function studioPanel(current: () => Broadcast, publisher: Publisher): { el: HTML
   window.addEventListener('beforeunload', beforeUnload);
   cleanup.push(() => window.removeEventListener('beforeunload', beforeUnload));
 
+  // 화면 공유(PC): 화면 공유가 없는 브라우저(휴대폰)에서는 줄째 숨긴다
+  const screenRow = el(
+    'div',
+    { className: 'studio-mode screen-mode' },
+    el('h4', { textContent: 'PC 화면 공유' }),
+    el('p', { className: 'hint', textContent: '공유 창에서 탭을 고르고 "탭 오디오 공유"를 켜면 탭 소리가 함께 갑니다. Windows에서 전체 화면을 고르면 "시스템 오디오 공유"도 고를 수 있습니다.' }),
+    el('label', { className: 'check' }, withMic, ' 마이크 소리도 함께 보내기'),
+    el('div', { className: 'row' }, startScreen),
+  );
+  screenRow.hidden = !screenSupported;
+  const cameraRow = el(
+    'div',
+    { className: 'studio-mode camera-mode' },
+    el('h4', { textContent: '카메라 (휴대폰·PC)' }),
+    el('p', { className: 'hint', textContent: cameraSupported
+      ? '카메라 영상과 마이크 소리를 보냅니다. 휴대폰에서는 송출하는 동안 이 화면을 켜 두세요. 다른 앱으로 가거나 화면을 끄면 브라우저가 카메라를 멈춥니다.'
+      : '이 브라우저에서는 카메라를 쓸 수 없습니다. https 주소에서 최신 Chrome이나 Safari로 여세요.' }),
+    el('div', { className: 'row' }, facing, startCamera),
+  );
   const panel = el(
     'section',
     { className: 'panel studio' },
-    el('h3', { textContent: '방송하기 (PC)' }),
-    el('p', { className: 'hint', textContent: supported
-      ? '화면 공유 창에서 탭을 고르고 "탭 오디오 공유"를 켜면 탭 소리가 함께 갑니다. Windows에서 전체 화면을 고르면 "시스템 오디오 공유"도 고를 수 있습니다.'
-      : '이 브라우저는 화면 공유를 지원하지 않습니다. PC의 Chrome이나 Edge에서 여세요.' }),
-    el('label', { className: 'check' }, withMic, ' 마이크 소리도 함께 보내기'),
-    el('div', { className: 'row' }, start, stop, state),
+    el('h3', { textContent: '방송하기' }),
+    screenRow,
+    cameraRow,
+    el('div', { className: 'row' }, stop, state),
     preview,
     warn,
     note,
