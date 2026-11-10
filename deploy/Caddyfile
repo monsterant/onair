@@ -40,6 +40,16 @@
 		file_server
 	}
 
+	# Caddy가 직접 만드는 오류 응답(없는 파일 404, OME 꺼짐 502 등)에도 보안 헤더를 붙이고 캐시하지 않게 한다(#21 2바퀴).
+	handle_errors {
+		header Cache-Control "no-store"
+		header Strict-Transport-Security "max-age=31536000"
+		header X-Content-Type-Options "nosniff"
+		header Content-Security-Policy "frame-ancestors 'none'"
+		header -Server
+		respond "{err.status_code}"
+	}
+
 	# 화면(index.html): 매번 새 버전인지 확인하게 한다. 그래야 다시 배포한 뒤 옛 화면이 남지 않는다(#21 C2).
 	handle {
 		root * /srv
