@@ -399,10 +399,15 @@ function studioPanel(current: () => Broadcast, publisher: Publisher): { el: HTML
       '카메라가 꺼져 송출을 멈췄습니다',
       (stream) => {
         const video = stream.getVideoTracks()[0];
+        // 경고는 종류별로 따로 들고 이어 붙여 보여 준다. 하나가 풀려도 다른 경고가 지워지지 않게(#33 2바퀴).
+        const warns = { facing: '', mute: '', mic: '' };
+        const showWarns = () => {
+          if (publisher.state !== 'idle') warn.textContent = Object.values(warns).filter(Boolean).join(' ');
+        };
         // 실제로 켜진 카메라 방향(브라우저가 알려 줄 때). 고른 카메라가 없으면 브라우저가 다른 카메라를 켠다(#33 M4).
         const actual = video?.getSettings().facingMode as Facing | undefined;
         if (actual && actual !== f) {
-          warn.textContent = `고른 ${f === 'user' ? '앞' : '뒤'} 카메라가 없어 다른 카메라로 보냅니다.`;
+          warns.facing = `고른 ${f === 'user' ? '앞' : '뒤'} 카메라가 없어 다른 카메라로 보냅니다.`;
         }
         // 앞 카메라는 거울처럼 보여야 자연스럽다. 미리보기만 뒤집는다(시청자에게 가는 영상은 그대로).
         preview.classList.toggle('mirror', (actual ?? f) === 'user');
@@ -419,18 +424,27 @@ function studioPanel(current: () => Broadcast, publisher: Publisher): { el: HTML
         releases.push(() => document.removeEventListener('visibilitychange', onHidden));
         if (video) {
           video.onmute = () => {
-            if (publisher.state !== 'idle') warn.textContent = '카메라 영상이 잠시 멈췄습니다. 이 화면을 켜 두세요.';
+            warns.mute = '카메라 영상이 잠시 멈췄습니다. 이 화면을 켜 두세요.';
+            showWarns();
           };
           video.onunmute = () => {
-            if (warn.textContent?.startsWith('카메라 영상이')) warn.textContent = '';
+            warns.mute = '';
+            showWarns();
           };
+          // 준비하는 사이에 이미 멈춰 있었으면 지금 알린다
+          if (video.muted) warns.mute = '카메라 영상이 잠시 멈췄습니다. 이 화면을 켜 두세요.';
         }
         // 마이크만 끊기면(전화 등) 소리 없이 계속 가므로 알린다(#33 M6)
         if (mic) {
           mic.onended = () => {
-            if (publisher.state !== 'idle') warn.textContent = '마이크가 꺼졌습니다. 지금은 소리 없이 송출 중입니다.';
+            warns.mic = '마이크가 꺼졌습니다. 지금은 소리 없이 송출 중입니다.';
+            showWarns();
           };
+          if (mic.readyState === 'ended') warns.mic = '마이크가 꺼졌습니다. 지금은 소리 없이 송출 중입니다.';
         }
+        showWarns();
+        // 송출을 준비하는 사이에(장치 켠 뒤 서버 응답을 기다리는 1~2초) 이미 화면을 떠났으면 바로 멈춘다(#33 2바퀴)
+        onHidden();
       },
     );
   };
