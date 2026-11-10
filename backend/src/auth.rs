@@ -1,0 +1,384 @@
+//! 회원가입·로그인·로그아웃과 로그인 상태 확인 (#4).
+//!
+//! 로그인 상태는 "서버 세션 + HttpOnly 쿠키"로 관리한다.
+//! - 로그인하면 서버가 임의의 토큰을 만들어 쿠키(`onair_session`)로 브라우저에 준다.
+//! - DB `sessions` 표에는 토큰 원문이 아니라 SHA-256 해시만 저장한다.
+//! - 요청이 오면 쿠키의 토큰을 해시해서 표에서 찾는다. 없거나 만료됐으면 로그인하지 않은 것이다.
+//! - 로그아웃하면 표에서 지우므로 그 쿠키는 바로 쓸 수 없게 된다(JWT와 다른 점).
+
+use argon2::{Argon2, PasswordHasher, PasswordVerifier};
+use axum::{
+    Json,
+    extract::{FromRequestParts, Path, State},
+    http::{StatusCode, request::Parts},
+    response::{IntoResponse, Response},
+};
+use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use sha2::{Digest, Sha256};
+
+use crate::AppState;
+
+pub const SESSION_COOKIE: &str = "onair_session";
+/// 로그인 유지 기간
+pub const SESSION_DAYS: i64 = 7;
+
+/// 인증 관련 설정. main.rs가 환경변수에서 읽는다.
+#[derive(Clone, Debug, Default)]
+pub struct AuthConfig {
+    /// true면 `/auth/demo/{1,2}`로 데모 사용자에 바로 로그인할 수 있다(심사용 테스트 계정, 공모 6절).
+    pub demo_login: bool,
+}
+
+/// 데모 사용자 아이디. 일반 가입에서는 `demo`로 시작하는 아이디를 쓸 수 없다.
+pub const DEMO_USERS: [&str; 2] = ["demo1", "demo2"];
+
+// ---------- 오류 ----------
+
+/// API 오류. 화면이 읽을 수 있게 `{"error": "..."}` 모양으로 돌려준다.
+#[derive(Debug)]
+pub enum ApiError {
+    BadRequest(&'static str),
+    Unauthorized(&'static str),
+    Conflict(&'static str),
+    NotFound,
+    Internal,
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        let (code, msg) = match self {
+            ApiError::BadRequest(m) => (StatusCode::BAD_REQUEST, m),
+            ApiError::Unauthorized(m) => (StatusCode::UNAUTHORIZED, m),
+            ApiError::Conflict(m) => (StatusCode::CONFLICT, m),
+            ApiError::NotFound => (StatusCode::NOT_FOUND, "찾을 수 없습니다"),
+            ApiError::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "서버 오류입니다"),
+        };
+        (code, Json(json!({ "error": msg }))).into_response()
+    }
+}
+
+impl From<sqlx::Error> for ApiError {
+    fn from(e: sqlx::Error) -> Self {
+        tracing::error!(error = %e, "DB 오류");
+        ApiError::Internal
+    }
+}
+
+// ---------- 입력 검사 ----------
+
+/// 아이디를 소문자로 바꾸고 규칙에 맞는지 본다: 영문 소문자·숫자·_ 3~20자.
+pub fn normalize_username(raw: &str) -> Result<String, &'static str> {
+    let u = raw.trim().to_ascii_lowercase();
+    let len = u.chars().count();
+    if !(3..=20).contains(&len) {
+        return Err("아이디는 3~20자여야 합니다");
+    }
+    if !u
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+    {
+        return Err("아이디는 영문, 숫자, _만 쓸 수 있습니다");
+    }
+    Ok(u)
+}
+
+/// 비밀번호 길이 검사: 8~128자. 앞뒤 공백도 비밀번호의 일부로 본다.
+pub fn check_password(pw: &str) -> Result<(), &'static str> {
+    let len = pw.chars().count();
+    if len < 8 {
+        return Err("비밀번호는 8자 이상이어야 합니다");
+    }
+    if len > 128 {
+        return Err("비밀번호는 128자 이하여야 합니다");
+    }
+    Ok(())
+}
+
+// ---------- 비밀번호·토큰 ----------
+
+fn hash_password(pw: &str) -> Result<String, ApiError> {
+    Argon2::default()
+        .hash_password(pw.as_bytes())
+        .map(|h| h.to_string())
+        .map_err(|_| ApiError::Internal)
+}
+
+fn verify_password(pw: &str, stored: &str) -> bool {
+    Argon2::default()
+        .verify_password(pw.as_bytes(), stored)
+        .is_ok()
+}
+
+/// 아이디가 없을 때도 같은 시간만큼 계산하려고 쓰는 해시. 응답 시간으로 아이디가 있는지 알아내지 못하게 한다.
+fn dummy_hash() -> &'static str {
+    use std::sync::OnceLock;
+    static H: OnceLock<String> = OnceLock::new();
+    H.get_or_init(|| hash_password("dummy-password-for-timing").unwrap_or_default())
+}
+
+/// 32바이트 임의 토큰(쿠키에 넣는 값)과 그 SHA-256(DB에 넣는 값)
+fn new_token() -> Result<(String, Vec<u8>), ApiError> {
+    let mut raw = [0u8; 32];
+    getrandom::fill(&mut raw).map_err(|_| ApiError::Internal)?;
+    let token = hex::encode(raw);
+    let hash = token_hash(&token);
+    Ok((token, hash))
+}
+
+fn token_hash(token: &str) -> Vec<u8> {
+    Sha256::digest(token.as_bytes()).to_vec()
+}
+
+fn session_cookie(token: String) -> Cookie<'static> {
+    Cookie::build((SESSION_COOKIE, token))
+        .http_only(true)
+        .secure(true)
+        .same_site(SameSite::Lax)
+        .path("/")
+        .max_age(time::Duration::days(SESSION_DAYS))
+        .build()
+}
+
+fn removal_cookie() -> Cookie<'static> {
+    Cookie::build((SESSION_COOKIE, ""))
+        .http_only(true)
+        .secure(true)
+        .same_site(SameSite::Lax)
+        .path("/")
+        .max_age(time::Duration::ZERO)
+        .build()
+}
+
+/// 세션을 만들고 쿠키를 붙인다. 이 사용자의 만료된 세션도 함께 지운다.
+async fn start_session(
+    state: &AppState,
+    jar: CookieJar,
+    user_id: i64,
+) -> Result<CookieJar, ApiError> {
+    let (token, hash) = new_token()?;
+    sqlx::query("DELETE FROM sessions WHERE user_id = $1 AND expires_at <= now()")
+        .bind(user_id)
+        .execute(&state.db)
+        .await?;
+    sqlx::query(
+        "INSERT INTO sessions (token_hash, user_id, expires_at)
+         VALUES ($1, $2, now() + make_interval(days => $3))",
+    )
+    .bind(&hash)
+    .bind(user_id)
+    .bind(SESSION_DAYS as i32)
+    .execute(&state.db)
+    .await?;
+    Ok(jar.add(session_cookie(token)))
+}
+
+// ---------- 로그인한 사용자 꺼내기 ----------
+
+/// 요청에서 로그인한 사용자를 꺼낸다. 핸들러 인자에 넣으면 로그인하지 않은 요청은 401로 끝난다.
+#[derive(Debug, Clone, Serialize)]
+pub struct CurrentUser {
+    pub id: i64,
+    pub username: String,
+}
+
+impl FromRequestParts<AppState> for CurrentUser {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let jar = CookieJar::from_headers(&parts.headers);
+        let token = jar
+            .get(SESSION_COOKIE)
+            .map(|c| c.value().to_owned())
+            .ok_or(ApiError::Unauthorized("로그인이 필요합니다"))?;
+        let row: Option<(i64, String)> = sqlx::query_as(
+            "SELECT u.id, u.username FROM sessions s JOIN users u ON u.id = s.user_id
+             WHERE s.token_hash = $1 AND s.expires_at > now()",
+        )
+        .bind(token_hash(&token))
+        .fetch_optional(&state.db)
+        .await?;
+        let (id, username) = row.ok_or(ApiError::Unauthorized("로그인이 필요합니다"))?;
+        Ok(CurrentUser { id, username })
+    }
+}
+
+// ---------- 핸들러 ----------
+
+#[derive(Deserialize)]
+pub struct Credentials {
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Serialize)]
+pub struct Me {
+    pub id: i64,
+    pub username: String,
+}
+
+pub async fn signup(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Json(c): Json<Credentials>,
+) -> Result<(StatusCode, CookieJar, Json<Me>), ApiError> {
+    let username = normalize_username(&c.username).map_err(ApiError::BadRequest)?;
+    if username.starts_with("demo") {
+        return Err(ApiError::BadRequest(
+            "demo로 시작하는 아이디는 쓸 수 없습니다",
+        ));
+    }
+    check_password(&c.password).map_err(ApiError::BadRequest)?;
+    let hash = hash_password(&c.password)?;
+
+    // 같은 아이디가 있으면 아무것도 넣지 않는다. 동시에 두 요청이 와도 UNIQUE 제약 덕분에 하나만 들어간다.
+    let id: Option<i64> = sqlx::query_scalar(
+        "INSERT INTO users (username, password_hash) VALUES ($1, $2)
+         ON CONFLICT (username) DO NOTHING RETURNING id",
+    )
+    .bind(&username)
+    .bind(&hash)
+    .fetch_optional(&state.db)
+    .await?;
+    let id = id.ok_or(ApiError::Conflict("이미 있는 아이디입니다"))?;
+
+    let jar = start_session(&state, jar, id).await?;
+    Ok((StatusCode::CREATED, jar, Json(Me { id, username })))
+}
+
+pub async fn login(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Json(c): Json<Credentials>,
+) -> Result<(CookieJar, Json<Me>), ApiError> {
+    const FAIL: ApiError = ApiError::Unauthorized("아이디 또는 비밀번호가 틀렸습니다");
+    // 형식이 틀린 아이디도 같은 실패 메시지로 돌려준다(어떤 아이디가 있는지 알려 주지 않는다).
+    let Ok(username) = normalize_username(&c.username) else {
+        verify_password(&c.password, dummy_hash());
+        return Err(FAIL);
+    };
+    if c.password.chars().count() > 128 {
+        return Err(FAIL);
+    }
+    let row: Option<(i64, String)> =
+        sqlx::query_as("SELECT id, password_hash FROM users WHERE username = $1")
+            .bind(&username)
+            .fetch_optional(&state.db)
+            .await?;
+    let Some((id, stored)) = row else {
+        verify_password(&c.password, dummy_hash());
+        return Err(FAIL);
+    };
+    if !verify_password(&c.password, &stored) {
+        return Err(FAIL);
+    }
+    let jar = start_session(&state, jar, id).await?;
+    Ok((jar, Json(Me { id, username })))
+}
+
+/// 로그아웃: 세션을 DB에서 지우고 쿠키도 지운다. 로그인하지 않았어도 204로 끝낸다(여러 번 불러도 결과가 같다).
+pub async fn logout(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Result<(StatusCode, CookieJar), ApiError> {
+    if let Some(c) = jar.get(SESSION_COOKIE) {
+        sqlx::query("DELETE FROM sessions WHERE token_hash = $1")
+            .bind(token_hash(c.value()))
+            .execute(&state.db)
+            .await?;
+    }
+    Ok((StatusCode::NO_CONTENT, jar.add(removal_cookie())))
+}
+
+pub async fn me(user: CurrentUser) -> Json<Me> {
+    Json(Me {
+        id: user.id,
+        username: user.username,
+    })
+}
+
+/// 심사용 테스트 계정으로 바로 로그인한다. `DEMO_LOGIN=true`일 때만 열린다.
+/// n=1이면 demo1, n=2이면 demo2. 소유자와 다른 사용자를 둘 다 시험할 수 있게 두 명을 둔다.
+/// 데모 사용자의 비밀번호는 쓸 수 없는 값이라, 이 길로만 로그인할 수 있다.
+pub async fn demo_login(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Path(n): Path<usize>,
+) -> Result<(CookieJar, Json<Me>), ApiError> {
+    if !state.auth.demo_login {
+        return Err(ApiError::NotFound);
+    }
+    let username = *DEMO_USERS
+        .get(n.wrapping_sub(1))
+        .ok_or(ApiError::NotFound)?;
+    // 없으면 만들고, 있으면 그대로 쓴다. 여러 번 불러도 사용자는 하나다.
+    sqlx::query(
+        "INSERT INTO users (username, password_hash) VALUES ($1, '!demo-no-password')
+         ON CONFLICT (username) DO NOTHING",
+    )
+    .bind(username)
+    .execute(&state.db)
+    .await?;
+    let id: i64 = sqlx::query_scalar("SELECT id FROM users WHERE username = $1")
+        .bind(username)
+        .fetch_one(&state.db)
+        .await?;
+    let jar = start_session(&state, jar, id).await?;
+    Ok((
+        jar,
+        Json(Me {
+            id,
+            username: username.to_string(),
+        }),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn username_rules() {
+        assert_eq!(normalize_username("  Alice_01 "), Ok("alice_01".into()));
+        assert!(normalize_username("ab").is_err());
+        assert!(normalize_username("abc").is_ok());
+        assert!(normalize_username(&"a".repeat(20)).is_ok());
+        assert!(normalize_username(&"a".repeat(21)).is_err());
+        assert!(normalize_username("한글아이디").is_err());
+        assert!(normalize_username("bad-name").is_err());
+        assert!(normalize_username("bad name").is_err());
+    }
+
+    #[test]
+    fn password_rules() {
+        assert!(check_password("1234567").is_err());
+        assert!(check_password("12345678").is_ok());
+        assert!(check_password(&"x".repeat(128)).is_ok());
+        assert!(check_password(&"x".repeat(129)).is_err());
+        // 한글은 글자 수로 센다
+        assert!(check_password("가나다라마바사아").is_ok());
+    }
+
+    #[test]
+    fn hash_roundtrip_and_demo_hash_never_verifies() {
+        let h = hash_password("correct horse").unwrap();
+        assert!(h.starts_with("$argon2id$"));
+        assert!(verify_password("correct horse", &h));
+        assert!(!verify_password("wrong horse", &h));
+        assert!(!verify_password("", "!demo-no-password"));
+        assert!(!verify_password("!demo-no-password", "!demo-no-password"));
+    }
+
+    #[test]
+    fn token_is_random_and_hash_matches() {
+        let (t1, h1) = new_token().unwrap();
+        let (t2, _) = new_token().unwrap();
+        assert_eq!(t1.len(), 64);
+        assert_ne!(t1, t2);
+        assert_eq!(h1, token_hash(&t1));
+    }
+}

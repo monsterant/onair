@@ -34,9 +34,32 @@ async fn main() {
     };
     let ome_state = onair_backend::ome::OmeState { secret: ome_secret };
 
+    // DB 구조 변경을 적용한다. DB가 아직 뜨는 중일 수 있어서 2초 간격으로 30번까지 다시 시도한다.
+    // 끝내 실패하면 표가 없는 채로 돌 수 없으므로 멈춘다.
+    let mut tries = 0;
+    loop {
+        match onair_backend::migrate(&db).await {
+            Ok(()) => break,
+            Err(e) if tries < 30 => {
+                tries += 1;
+                tracing::warn!(error = %e, tries, "DB 마이그레이션 실패, 다시 시도");
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+            Err(e) => panic!("DB 마이그레이션 실패: {e}"),
+        }
+    }
+
+    // 심사용 테스트 계정 로그인(/auth/demo/1, /auth/demo/2). "true"일 때만 켠다.
+    let auth = onair_backend::auth::AuthConfig {
+        demo_login: std::env::var("DEMO_LOGIN").is_ok_and(|v| v.trim() == "true"),
+    };
+    if auth.demo_login {
+        tracing::info!("테스트 계정 로그인(DEMO_LOGIN)이 켜져 있습니다");
+    }
+
     // CORS(다른 주소에서 오는 호출 허용)는 켜지 않는다. 화면은 vite 프록시(/api)로 같은 주소에서 부르고,
     // OME 웹훅은 서버끼리 주고받으므로 필요 없다.
-    let router = app(AppState { db }).merge(onair_backend::ome_routes(ome_state));
+    let router = app(AppState { db, auth }).merge(onair_backend::ome_routes(ome_state));
 
     let listener = tokio::net::TcpListener::bind(&bind_addr)
         .await

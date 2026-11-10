@@ -18,6 +18,22 @@ jobs:
     defaults:
       run:
         working-directory: backend
+    # DB 시험(#[sqlx::test])용 PostgreSQL. 시험마다 빈 DB를 새로 만들어 쓴다. 비밀번호는 CI 전용 예시 값이다.
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: onair
+          POSTGRES_PASSWORD: ci-only
+          POSTGRES_DB: onair
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U onair"
+          --health-interval 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://onair:ci-only@localhost:5432/onair
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
