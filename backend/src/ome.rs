@@ -147,9 +147,11 @@ async fn decide_opening(
                     SET started_at = CASE WHEN status = 'live' AND started_at IS NOT NULL
                                           THEN started_at ELSE now() END,
                         status = 'live', updated_at = now()
-                  WHERE stream_name = $1 AND status <> 'ended'",
+                  WHERE stream_name = $1 AND status <> 'ended' AND stream_key = $2",
             )
             .bind(&name)
+            // 키를 다시 확인한다. 확인과 갱신 사이에 송출 키를 다시 만들었으면 옛 키로는 live가 되지 않는다(#28 리뷰)
+            .bind(&stored)
             .execute(db)
             .await?
             .rows_affected();

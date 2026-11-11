@@ -323,6 +323,8 @@ pub async fn rotate_key(
     .execute(&state.db)
     .await?;
     if changed.rows_affected() == 0 {
+        // 그 사이 지워졌으면 404(find가 돌려준다), 종료됐으면 409(#28 리뷰)
+        find(&state, id).await?;
         return Err(ApiError::Conflict(
             "종료된 방송은 송출 키를 바꿀 수 없습니다",
         ));
