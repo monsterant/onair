@@ -74,7 +74,10 @@ async fn main() {
     };
     if auth.demo_login {
         tracing::info!("테스트 계정 로그인(DEMO_LOGIN)이 켜져 있습니다");
-        // 한 시간마다 24시간 지난 테스트 계정(guest_)을 지운다(#35)
+    }
+    // 한 시간마다 24시간 지난 테스트 계정(guest_)을 지운다(#35). 첫 번째는 바로 돈다.
+    // DEMO_LOGIN을 나중에 꺼도 남은 테스트 계정이 지워지도록 설정과 상관없이 돌린다(#35 리뷰).
+    {
         let db = db.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(3600));

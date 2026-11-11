@@ -283,3 +283,77 @@ async fn cleanup_removes_only_old_guests_that_are_not_live(db: PgPool) {
     // 두 번 불러도 더 지울 것이 없다
     assert_eq!(cleanup_guests(&db).await.unwrap(), 0);
 }
+
+#[sqlx::test]
+async fn cleanup_boundary_is_24_hours(db: PgPool) {
+    let r = router(db.clone(), true);
+    let (young, _, _) = guest(&r).await;
+    let (old, _, _) = guest(&r).await;
+    for (id, hours) in [(young, 23), (old, 25)] {
+        sqlx::query(
+            "UPDATE users SET created_at = now() - make_interval(hours => $2) WHERE id = $1",
+        )
+        .bind(id)
+        .bind(hours)
+        .execute(&db)
+        .await
+        .unwrap();
+    }
+    assert_eq!(cleanup_guests(&db).await.unwrap(), 1);
+    let left: Vec<i64> = sqlx::query_scalar("SELECT id FROM users")
+        .fetch_all(&db)
+        .await
+        .unwrap();
+    assert_eq!(left, vec![young]);
+}
+
+#[sqlx::test]
+async fn cleanup_keeps_real_accounts_named_like_guests(db: PgPool) {
+    // 가입 금지 전에 만들어졌을 수 있는 guest_ 이름의 일반 회원(비밀번호 해시가 진짜)과,
+    // 이름은 비슷하지만 밑줄이 없는 회원은 지우지 않는다
+    for name in ["guest_realuser", "guestxrealuser"] {
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, created_at)
+             VALUES ($1, '$argon2id$v=19$m=19456,t=2,p=1$fake$fake', now() - interval '48 hours')",
+        )
+        .bind(name)
+        .execute(&db)
+        .await
+        .unwrap();
+    }
+    sqlx::query(
+        "INSERT INTO users (username, password_hash, created_at)
+         VALUES ('guestxtest', '!guest-no-password', now() - interval '48 hours')",
+    )
+    .execute(&db)
+    .await
+    .unwrap();
+    assert_eq!(cleanup_guests(&db).await.unwrap(), 0);
+}
+
+#[sqlx::test]
+async fn guest_login_shares_the_login_rate_limit(db: PgPool) {
+    let r = router(db.clone(), true);
+    // 같은 IP(시험에서는 헤더가 없어 같은 키)로 1분에 20번까지
+    for i in 0..20 {
+        assert_eq!(
+            call(&r, "POST", "/auth/guest", None, None).await.status,
+            StatusCode::OK,
+            "{i}"
+        );
+    }
+    let over = call(&r, "POST", "/auth/guest", None, None).await;
+    assert_eq!(over.status, StatusCode::TOO_MANY_REQUESTS);
+    assert!(over.json["error"].is_string());
+    // 로그인과 같은 몫이라 로그인도 막힌다
+    let login = call(
+        &r,
+        "POST",
+        "/auth/login",
+        Some(json!({"username": "nobody", "password": "password123"})),
+        None,
+    )
+    .await;
+    assert_eq!(login.status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(count(&db, "SELECT count(*) FROM users").await, 20);
+}

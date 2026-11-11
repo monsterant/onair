@@ -450,8 +450,11 @@ pub async fn guest_login(
 /// 지금 송출 중(live)인 방송이 있는 계정은 남긴다(송출 도중에 끊기지 않게).
 pub async fn cleanup_guests(db: &sqlx::PgPool) -> Result<u64, sqlx::Error> {
     let done = sqlx::query(
+        // 이름만 보지 않고, guest_login만 쓰는 비밀번호 표시 값도 함께 본다.
+        // 이 변경 전에 guest_로 가입한 일반 회원이 있어도 지우지 않게 한다(#35 리뷰).
         r"DELETE FROM users u
           WHERE u.username LIKE 'guest\_%'
+            AND u.password_hash = '!guest-no-password'
             AND u.created_at < now() - make_interval(hours => $1)
             AND NOT EXISTS (SELECT 1 FROM broadcasts b WHERE b.owner_id = u.id AND b.status = 'live')",
     )
