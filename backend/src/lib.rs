@@ -83,6 +83,9 @@ pub fn app(state: AppState) -> Router {
             axum::routing::patch(comments::update).delete(comments::delete),
         )
         .merge(limited)
+        // 없는 길은 {"error"} 404(#25 A12). 기본 처리로 두면 main.rs에서 OME 웹훅 라우터와 합칠 때
+        // 그쪽 기본 처리(빈 본문 404)가 쓰여서 JSON이 되지 않는다(#25 리뷰).
+        .fallback(|| async { auth::ApiError::NotFound })
         // 상태를 바꾸는 요청은 같은 사이트에서 온 것만 받는다(#24 A3). OME 웹훅(ome_routes)에는 걸지 않는다.
         .layer(axum::middleware::from_fn(guard::reject_cross_site))
         // 기본 오류 응답도 {"error"} 모양으로(#25 A12). 가장 바깥에 둔다.

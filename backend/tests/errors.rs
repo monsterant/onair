@@ -192,3 +192,44 @@ async fn expired_sessions_of_all_users_are_cleaned(db: PgPool) {
         .unwrap();
     assert_eq!(left, 1);
 }
+
+#[sqlx::test]
+async fn unknown_path_is_json_in_the_production_router(db: PgPool) {
+    // main.rs와 똑같이 OME 웹훅 라우터와 합친 라우터로 본다
+    let r =
+        router(db.clone(), true).merge(onair_backend::ome_routes(onair_backend::ome::OmeState {
+            secret: "test-secret-for-ome-webhook".into(),
+            db,
+            ome: Default::default(),
+        }));
+    let (status, ct, json, _) = send(&r, json_req("GET", "/no-such-path", None, "")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(ct.as_deref(), Some("application/json"));
+    assert_eq!(json["error"], "찾을 수 없습니다");
+    // HEAD 오류 응답에는 본문이 없다
+    let res = r
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("HEAD")
+                .uri("/no-such-path")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    assert!(
+        to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    // OME 웹훅은 그대로 있다(서명이 없으면 401)
+    let (status, _, _, _) = send(
+        &r,
+        json_req("POST", "/ome/admission", Some("application/json"), "{}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
