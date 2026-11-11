@@ -84,6 +84,8 @@ export const updateBroadcast = (id: number, title: string, description: string) 
 export const deleteBroadcast = (id: number) => api<void>('DELETE', `/broadcasts/${id}`);
 export const endBroadcast = (id: number) => api<Broadcast>('POST', `/broadcasts/${id}/end`);
 export const publishInfo = (id: number) => api<PublishInfo>('GET', `/broadcasts/${id}/publish`);
+/** 송출 키를 새로 만든다(#28). 옛 키로 송출 중이면 끊긴다. */
+export const rotateStreamKey = (id: number) => api<PublishInfo>('POST', `/broadcasts/${id}/stream-key`);
 
 export const listComments = (broadcastId: number) => api<Comment[]>('GET', `/broadcasts/${broadcastId}/comments`);
 export const createComment = (broadcastId: number, body: string) =>

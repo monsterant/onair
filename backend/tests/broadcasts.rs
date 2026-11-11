@@ -750,3 +750,76 @@ async fn reconcile_does_nothing_when_ome_unreachable(db: PgPool) {
     let (_, now) = call(&r, "GET", &format!("/broadcasts/{}", b["id"]), None, None).await;
     assert_eq!(now["status"], "live");
 }
+
+#[sqlx::test]
+async fn owner_can_rotate_the_stream_key(db: PgPool) {
+    let (fake, ome) = fake_ome().await;
+    let r = router(db.clone(), ome).await;
+    let owner = login(&r, 1).await;
+    let other = login(&r, 2).await;
+    let b = create(&r, &owner, "키 바꾸기").await;
+    let id = b["id"].as_i64().unwrap();
+    let name = b["stream_name"].as_str().unwrap().to_string();
+    let (_, before) = call(
+        &r,
+        "GET",
+        &format!("/broadcasts/{id}/publish"),
+        None,
+        Some(&owner),
+    )
+    .await;
+    let path = format!("/broadcasts/{id}/stream-key");
+    // 비로그인 401, 다른 사용자 403(키는 그대로)
+    assert_eq!(
+        call(&r, "POST", &path, None, None).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        call(&r, "POST", &path, None, Some(&other)).await.0,
+        StatusCode::FORBIDDEN
+    );
+    let (_, same) = call(
+        &r,
+        "GET",
+        &format!("/broadcasts/{id}/publish"),
+        None,
+        Some(&owner),
+    )
+    .await;
+    assert_eq!(same["stream_key"], before["stream_key"]);
+    // 소유자: 새 키, 송출 주소도 새 키, 옛 송출은 끊는다
+    let (code, after) = call(&r, "POST", &path, None, Some(&owner)).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_ne!(after["stream_key"], before["stream_key"]);
+    assert_eq!(after["stream_key"].as_str().unwrap().len(), 64);
+    assert!(
+        after["whip_path"]
+            .as_str()
+            .unwrap()
+            .ends_with(after["stream_key"].as_str().unwrap())
+    );
+    assert!(fake.deleted.lock().unwrap().contains(&name));
+    let (_, now) = call(
+        &r,
+        "GET",
+        &format!("/broadcasts/{id}/publish"),
+        None,
+        Some(&owner),
+    )
+    .await;
+    assert_eq!(now["stream_key"], after["stream_key"]);
+    // 종료된 방송은 바꿀 수 없다
+    call(
+        &r,
+        "POST",
+        &format!("/broadcasts/{id}/end"),
+        None,
+        Some(&owner),
+    )
+    .await;
+    assert_eq!(
+        call(&r, "POST", &path, None, Some(&owner)).await.0,
+        StatusCode::CONFLICT
+    );
+    let _ = db;
+}

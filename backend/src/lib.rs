@@ -61,6 +61,7 @@ pub fn app(state: AppState) -> Router {
         )
         .route("/broadcasts/{id}/publish", get(broadcasts::publish_info))
         .route("/broadcasts/{id}/end", post(broadcasts::end))
+        .route("/broadcasts/{id}/stream-key", post(broadcasts::rotate_key))
         .route(
             "/broadcasts/{id}/comments",
             get(comments::list).post(comments::create),

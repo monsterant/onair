@@ -33,6 +33,7 @@ import {
   login,
   logout,
   publishInfo,
+  rotateStreamKey,
   signup,
   updateBroadcast,
 } from './api';
@@ -939,12 +940,25 @@ function ownerPanel(b: Broadcast, onChange: (b: Broadcast) => void, publisher: P
   // 송출 주소(소유자만)
   const publishBox = el('div', { className: 'publish' });
   const showPublish = el('button', { type: 'button', textContent: '송출 주소 보기' });
-  showPublish.onclick = action(showPublish, error, async () => {
-    const p = await publishInfo(b.id);
+  const showKey = (whipPath: string, rotated = false) => {
+    const rotate = el('button', { type: 'button', className: 'small', textContent: '송출 키 다시 만들기' });
+    rotate.onclick = action(rotate, error, async () => {
+      if (!confirm('송출 키를 새로 만들까요? 옛 주소는 더 쓸 수 없고, 옛 키로 송출 중이면 끊깁니다.')) return;
+      // 이 브라우저에서 송출 중이면 먼저 멈춘다(서버도 옛 키 송출을 끊는다)
+      await publisher.stop('송출 키를 새로 만들어 송출을 멈췄습니다. 다시 시작하면 새 키로 송출합니다.');
+      const p = await rotateStreamKey(b.id);
+      showKey(p.whip_path, true);
+    });
     publishBox.replaceChildren(
       el('p', { className: 'hint', textContent: 'WHIP 송출 주소입니다. 남에게 보여 주지 마세요(이 주소를 가진 사람은 이 방송으로 송출할 수 있습니다). OBS 30 이상의 WHIP 출력에도 쓸 수 있습니다.' }),
-      el('code', { textContent: `${location.origin}${p.whip_path}` }),
+      el('code', { textContent: `${location.origin}${whipPath}` }),
+      ...(rotated ? [el('p', { className: 'hint', textContent: '새 송출 키를 만들었습니다. 옛 주소는 더 쓸 수 없습니다.' })] : []),
+      el('div', { className: 'row' }, rotate),
     );
+  };
+  showPublish.onclick = action(showPublish, error, async () => {
+    const p = await publishInfo(b.id);
+    showKey(p.whip_path);
   });
 
   const end = el('button', { type: 'button', className: 'danger', textContent: '방송 종료' });
