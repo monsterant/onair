@@ -88,3 +88,15 @@ export const createComment = (broadcastId: number, body: string) =>
   api<Comment>('POST', `/broadcasts/${broadcastId}/comments`, { body });
 export const updateComment = (id: number, body: string) => api<Comment>('PATCH', `/comments/${id}`, { body });
 export const deleteComment = (id: number) => api<void>('DELETE', `/comments/${id}`);
+
+/** 도네이션(#41) */
+export type DonationItem = { id: number; donor_username: string; amount: number; message: string; paid_at: string | null };
+export type DonationSummary = { total: number; count: number; items: DonationItem[] };
+export type Checkout = { order_id: string; order_name: string; amount: number; client_key: string; customer_key: string };
+export type DonationStatus = { id: number; order_id: string; broadcast_id: number; amount: number; message: string; status: 'pending' | 'paid' | 'failed' };
+
+export const listDonations = (broadcastId: number) => api<DonationSummary>('GET', `/broadcasts/${broadcastId}/donations`);
+export const createDonation = (broadcastId: number, amount: number, message: string) =>
+  api<Checkout>('POST', `/broadcasts/${broadcastId}/donations`, { amount, message });
+export const confirmDonation = (paymentKey: string, orderId: string, amount: number) =>
+  api<DonationStatus>('POST', '/donations/confirm', { paymentKey, orderId, amount });

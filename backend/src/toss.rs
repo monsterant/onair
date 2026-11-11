@@ -64,9 +64,17 @@ struct ErrorBody {
     message: String,
 }
 
+/// HTTP 클라이언트(reqwest)를 만들기 전에 암호 방식(ring)을 프로그램 전체 기본값으로 정한다.
+/// reqwest를 `rustls-no-provider`로 쓰므로, 이것을 하지 않으면 클라이언트를 만들 때 프로그램이 멈춘다.
+/// 여러 번 불러도 된다(이미 정해져 있으면 그대로 둔다).
+pub fn install_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 impl Toss {
     /// `base`: 예) https://api.tosspayments.com, `secret_key`: test_gsk_... , `client_key`: test_gck_...
     pub fn new(base: &str, secret_key: &str, client_key: &str) -> Self {
+        install_crypto_provider();
         // https: ring 암호 + 프로그램에 들어 있는 루트 인증서 목록(webpki-roots)
         let mut roots = rustls::RootCertStore::empty();
         roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());

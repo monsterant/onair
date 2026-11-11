@@ -10,6 +10,9 @@ import {
   type Broadcast,
   type Comment,
   type Status,
+  confirmDonation,
+  createDonation,
+  listDonations,
   createComment,
   deleteComment,
   listComments,
@@ -30,6 +33,7 @@ import {
 } from './api';
 // 플레이어(OvenPlayer+hls.js, 약 1MB)는 상세 화면에서만 불러온다. 목록 화면을 가볍게 하려는 것이다.
 const player = () => import('./player');
+import { mountWidget } from './toss';
 import { CancelledError, type Facing, Publisher, type PublishState, cameraAndMic, keepScreenOn, screenAndMic } from './publisher';
 
 const app = document.querySelector<HTMLElement>('#app')!;
@@ -262,7 +266,7 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
   const studio = publisher ? studioPanel(() => b, publisher) : null;
   if (studio) main.append(studio.el);
   if (owner) main.append(owner.el);
-  main.append(commentsPanel(id, gen));
+  main.append(donationsPanel(b, gen), commentsPanel(id, gen));
   paint();
 
   // 5초마다 상태를 다시 본다(방송이 시작·종료되면 플레이어를 켜고 끈다)
@@ -288,6 +292,118 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
   }, 5_000);
   cleanup.push(stop);
   if (publisher) cleanup.push(() => void publisher.stop());
+}
+
+// ---------- 도네이션(#41) ----------
+
+const won = (n: number) => `${n.toLocaleString('ko-KR')}원`;
+const AMOUNTS = [1_000, 5_000, 10_000, 50_000];
+
+/**
+ * 방송 상세 화면의 후원 칸. 누구나 합계와 내역을 본다. 로그인한 다른 사용자는 후원한다(자기 방송은 안 됨).
+ * 후원하기 → 서버가 주문을 만든다 → 토스 결제위젯 → 결제창 → /donate/success로 돌아와 서버가 승인을 확인한다.
+ */
+function donationsPanel(b: Broadcast, gen: number): HTMLElement {
+  const total = el('strong', { className: 'donation-total' });
+  const list = el('ul', { className: 'donations' });
+  const panel = el('section', { className: 'donations-panel panel' }, el('h3', {}, '후원 ', total), list);
+  let stopped = false;
+
+  const load = async () => {
+    try {
+      const s = await listDonations(b.id);
+      if (stopped || gen !== routeGen) return;
+      total.textContent = `${won(s.total)} · ${s.count}건`;
+      list.replaceChildren(
+        ...s.items.map((d) =>
+          el(
+            'li',
+            { className: 'donation' },
+            el('strong', { textContent: d.donor_username }),
+            el('span', { className: 'donation-amount', textContent: ` ${won(d.amount)}` }),
+            d.message ? el('p', { className: 'comment-body', textContent: d.message }) : '',
+          ),
+        ),
+      );
+      if (s.items.length === 0) list.append(el('li', { className: 'hint', textContent: '아직 후원이 없습니다.' }));
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404) stopped = true;
+    }
+  };
+
+  if (!me) {
+    panel.append(el('p', { className: 'hint' }, el('a', { href: '#/login', textContent: '로그인' }), '하면 후원할 수 있습니다.'));
+  } else if (me.id === b.owner_id) {
+    panel.append(el('p', { className: 'hint', textContent: '내 방송에는 후원할 수 없습니다.' }));
+  } else {
+    const error = el('p', { className: 'error', role: 'alert' });
+    const amount = el('select', { ariaLabel: '후원 금액' });
+    for (const a of AMOUNTS) amount.append(el('option', { value: String(a), textContent: won(a) }));
+    const message = el('input', { type: 'text', placeholder: '응원 메시지 (선택, 100자까지)', ariaLabel: '응원 메시지' });
+    const start = el('button', { type: 'button', textContent: '후원하기' });
+    const widgetBox = el('div', { className: 'toss-widget', hidden: true }, el('div', { id: 'toss-methods' }), el('div', { id: 'toss-agreement' }));
+    const pay = el('button', { type: 'button', textContent: '결제하기', hidden: true });
+    const note = el('p', { className: 'hint', textContent: '토스페이먼츠 테스트 결제입니다. 실제로 돈이 나가지 않습니다.' });
+    // 토스 SDK가 던지는 오류(결제수단 미선택, 사용자 취소 등)는 그 문구를 그대로 보여 준다
+    const tossError = (e: unknown) => new ApiError(0, e instanceof Error && e.message ? e.message : '결제를 진행하지 못했습니다');
+    start.onclick = action(start, error, async () => {
+      const checkout = await createDonation(b.id, Number(amount.value), message.value);
+      widgetBox.hidden = false;
+      const w = await mountWidget(checkout, b.id, '#toss-methods', '#toss-agreement').catch((e) => {
+        widgetBox.hidden = true;
+        throw tossError(e);
+      });
+      // 주문(금액·메시지)이 정해졌으므로 다시 고를 수 없게 하고, 결제하기만 남긴다
+      amount.disabled = message.disabled = true;
+      start.hidden = true;
+      pay.hidden = false;
+      pay.onclick = action(pay, error, async () => {
+        await w.pay().catch((e) => {
+          throw tossError(e);
+        });
+      });
+    });
+    panel.append(el('div', { className: 'row' }, amount, start), message, widgetBox, pay, note, error);
+  }
+
+  void load();
+  const timer = setInterval(() => {
+    if (!stopped) void load();
+  }, 10_000);
+  cleanup.push(() => {
+    stopped = true;
+    clearInterval(timer);
+  });
+  return panel;
+}
+
+/** 토스 결제창에서 돌아온 화면(/donate/success, /donate/fail). 서버에 승인 확인을 맡기고 방송 화면으로 돌아간다. */
+async function donateReturnPage(main: HTMLElement) {
+  const q = new URLSearchParams(location.search);
+  const bid = Number(q.get('b'));
+  const back = () => {
+    // 결제 정보가 주소에 남지 않게 주소를 방송 화면으로 바꾼다
+    history.replaceState(null, '', `/#/b/${bid}`);
+    void route();
+  };
+  const msg = el('p');
+  const backBtn = el('button', { type: 'button', textContent: '방송으로 돌아가기' });
+  backBtn.onclick = back;
+  main.append(el('section', { className: 'panel' }, el('h2', { textContent: '후원' }), msg, backBtn));
+  if (location.pathname === '/donate/fail') {
+    msg.textContent = `결제하지 않았습니다: ${q.get('message') ?? '취소되었습니다'}`;
+    return;
+  }
+  const paymentKey = q.get('paymentKey') ?? '';
+  const orderId = q.get('orderId') ?? '';
+  const amount = Number(q.get('amount'));
+  msg.textContent = '결제를 확인하는 중입니다...';
+  try {
+    const d = await confirmDonation(paymentKey, orderId, amount);
+    msg.textContent = d.status === 'paid' ? `${won(d.amount)} 후원이 완료되었습니다. 고맙습니다!` : '후원을 확인하지 못했습니다.';
+  } catch (e) {
+    msg.textContent = `후원을 확인하지 못했습니다: ${message(e)}`;
+  }
 }
 
 // ---------- 댓글(#37) ----------
@@ -742,6 +858,11 @@ async function route() {
     .then((h: { status: string; db: string }) => (status.textContent = `서버 ${h.status}, DB ${h.db}`))
     .catch(() => (status.textContent = '백엔드에 연결하지 못했습니다'));
 
+  // 토스 결제창에서 돌아온 주소(/donate/success?..., /donate/fail?...)는 주소 # 대신 경로로 온다(#41)
+  if (location.pathname === '/donate/success' || location.pathname === '/donate/fail') {
+    await donateReturnPage(main);
+    return;
+  }
   const hash = location.hash || '#/';
   const detail = /^#\/b\/(\d+)$/.exec(hash);
   if (hash === '#/login') loginPage(main);

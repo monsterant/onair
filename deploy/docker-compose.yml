@@ -38,6 +38,9 @@ services:
       # OME 관리 API(#3): 방송 종료 때 스트림 끊기, 15초마다 맞춰 보기. Docker 안쪽 주소라 인터넷에는 열리지 않는다.
       OME_API_URL: http://ome:8081
       OME_API_TOKEN: ${OME_API_TOKEN:?deploy/.env에 OME_API_TOKEN을 넣으세요}
+      # 도네이션(#41): 토스 테스트 키. 비우면 도네이션이 꺼진다.
+      TOSS_CLIENT_KEY: ${TOSS_CLIENT_KEY:-}
+      TOSS_SECRET_KEY: ${TOSS_SECRET_KEY:-}
     depends_on:
       db:
         condition: service_healthy
