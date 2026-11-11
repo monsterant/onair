@@ -129,5 +129,8 @@ jobs:
           curl -sf -X POST http://localhost:8080/auth/guest | grep -q '"username":"guest_'
           curl -sf http://localhost:8080/broadcasts | grep -q '^\['
           curl -sf http://localhost:8080/recordings | grep -q '^\['
-          # 시작 직후 멈추지 않았는지(재시작·종료 없이 계속 떠 있는지)
+          # 첫 상태 맞춰 보기·녹화 정리(시작하자마자 한 번, 그 뒤 15초마다)가 돈 뒤에도 계속 떠 있는지(#50 리뷰)
+          sleep 20
+          docker logs be 2>&1 | tail -20
           test "$(docker inspect -f '{{.State.Running}}' be)" = true
+          curl -sf http://localhost:8080/health | grep -q '"db":"ok"'
