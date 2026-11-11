@@ -391,3 +391,43 @@ async fn ended_broadcast_still_takes_comments(db: PgPool) {
     .await;
     assert_eq!(res.status, StatusCode::CREATED);
 }
+
+#[sqlx::test]
+async fn comment_rate_limit_is_per_user_and_separate_from_login(db: PgPool) {
+    let r = router(db);
+    let a = login(&r, 1).await;
+    let b = login(&r, 2).await;
+    let bid = broadcast(&r, &a).await;
+    let list = format!("/broadcasts/{bid}/comments");
+    // 내용 검사에 걸린 글은 횟수에 넣지 않는다
+    for _ in 0..5 {
+        assert_eq!(
+            call(&r, "POST", &list, body(""), Some(&a)).await.status,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    for i in 0..20 {
+        assert_eq!(
+            call(&r, "POST", &list, body(&format!("댓글 {i}")), Some(&a))
+                .await
+                .status,
+            StatusCode::CREATED,
+            "{i}"
+        );
+    }
+    let over = call(&r, "POST", &list, body("21번째"), Some(&a)).await;
+    assert_eq!(over.status, StatusCode::TOO_MANY_REQUESTS);
+    assert!(over.json["error"].is_string());
+    // 다른 사용자는 자기 몫이 따로 있다
+    assert_eq!(
+        call(&r, "POST", &list, body("B의 댓글"), Some(&b))
+            .await
+            .status,
+        StatusCode::CREATED
+    );
+    // 로그인 몫과 따로라 같은 곳(IP)에서 로그인이 막히지 않는다
+    assert_eq!(
+        call(&r, "POST", "/auth/demo/1", None, None).await.status,
+        StatusCode::OK
+    );
+}

@@ -12,7 +12,7 @@
 use axum::{
     Json,
     extract::{Path, State},
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
 };
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -20,7 +20,6 @@ use time::OffsetDateTime;
 use crate::{
     AppState,
     auth::{ApiError, CurrentUser},
-    guard::client_key,
 };
 
 /// 댓글 한 개의 최대 글자 수
@@ -58,15 +57,36 @@ pub struct CommentInput {
     pub body: String,
 }
 
-/// 내용 검사: 앞뒤 공백을 떼고 1~300자. 줄바꿈 말고 제어 문자는 거절한다.
+/// 화면에 보이지 않거나 빈칸처럼 보이는 글자. 이것만으로 된 댓글은 빈 댓글로 본다(#37 리뷰).
+fn blank_like(c: char) -> bool {
+    c.is_whitespace()
+        || matches!(
+            c,
+            '\u{200B}'..='\u{200F}'          // 폭 없는 공백, 방향 표시
+                | '\u{2060}'..='\u{2064}'    // 단어 이음 등
+                | '\u{FEFF}'                 // BOM
+                | '\u{115F}' | '\u{1160}' | '\u{3164}' | '\u{FFA0}' // 한글 채움 문자
+                | '\u{2800}'                 // 빈 점자
+                | '\u{180E}'
+        )
+}
+
+/// 글자 방향을 바꾸는 문자. 뒤따르는 글을 거꾸로 보이게 해서 다른 내용으로 속일 수 있다(#37 리뷰).
+fn bidi_control(c: char) -> bool {
+    matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
+/// 내용 검사: 줄바꿈을 \n으로 맞추고 앞뒤 공백을 뗀 뒤 1~300자.
+/// 줄바꿈·탭 말고 제어 문자와 글자 방향 문자는 거절한다.
 fn clean_body(raw: &str) -> Result<String, ApiError> {
-    let b = raw.trim();
-    if b.chars().any(|c| c.is_control() && c != '\n') {
+    let normalized = raw.replace("\r\n", "\n").replace('\r', "\n");
+    let b = normalized.trim();
+    if b.chars()
+        .any(|c| (c.is_control() && c != '\n' && c != '\t') || bidi_control(c))
+    {
         return Err(ApiError::BadRequest("댓글에 쓸 수 없는 글자가 있습니다"));
     }
-    if b.chars().all(|c| {
-        c.is_whitespace() || matches!(c, '\u{200B}'..='\u{200D}' | '\u{2060}' | '\u{FEFF}')
-    }) {
+    if b.chars().all(blank_like) {
         return Err(ApiError::BadRequest("댓글 내용을 입력하세요"));
     }
     if b.chars().count() > BODY_MAX {
@@ -120,15 +140,19 @@ pub async fn list(
 pub async fn create(
     State(state): State<AppState>,
     user: CurrentUser,
-    headers: HeaderMap,
     Path(broadcast_id): Path<i64>,
     Json(input): Json<CommentInput>,
 ) -> Result<(StatusCode, Json<Comment>), ApiError> {
-    // 도배를 막으려고 로그인과 같은 IP당 1분 횟수 제한을 함께 쓴다
-    if !state.auth.limiter.allow(&client_key(&headers)) {
+    let body = clean_body(&input.body)?;
+    // 도배를 막으려고 사용자 하나당 1분 횟수 제한을 건다. 로그인 몫과는 따로 센다(#37 리뷰).
+    // 내용 검사를 먼저 해서, 거절된 글은 횟수에 넣지 않는다.
+    if !state
+        .auth
+        .comment_limiter
+        .allow(&format!("user:{}", user.id))
+    {
         return Err(ApiError::TooManyRequests);
     }
-    let body = clean_body(&input.body)?;
     // 방송이 없으면 외래 키 오류(500) 대신 404. 확인과 저장 사이에 방송이 지워지면 INSERT ... SELECT가 0행이라 404다.
     let id: Option<i64> = sqlx::query_scalar(
         "INSERT INTO comments (broadcast_id, author_id, body)
@@ -191,7 +215,21 @@ mod tests {
         assert!(clean_body("\u{200B}\u{FEFF}").is_err());
         assert!(clean_body("널\u{0}글자").is_err());
         assert!(clean_body("탭\t").is_ok()); // 앞뒤 공백(탭 포함)은 잘라 낸다
-        assert!(clean_body("가운데\t탭").is_err());
+        assert_eq!(clean_body("가운데\t탭").unwrap(), "가운데\t탭");
+        // Windows 줄바꿈(\r\n)과 \r만 쓴 줄바꿈은 \n으로 맞춘다
+        assert_eq!(clean_body("a\r\nb\rc").unwrap(), "a\nb\nc");
+        // 빈칸처럼 보이는 글자만 있으면 빈 댓글
+        for blank in [
+            "\u{3164}",
+            "\u{2800}\u{2800}",
+            "\u{115F}\u{1160}",
+            "\u{200E}",
+        ] {
+            assert!(clean_body(blank).is_err(), "{blank:?}");
+        }
+        // 글자 방향을 뒤집는 문자는 거절
+        assert!(clean_body("abc\u{202E}def").is_err());
+        assert!(clean_body("abc\u{2067}def").is_err());
         assert!(clean_body(&"가".repeat(300)).is_ok());
         assert!(clean_body(&"가".repeat(301)).is_err());
     }
