@@ -58,7 +58,7 @@ pub struct CommentInput {
 }
 
 /// 화면에 보이지 않거나 빈칸처럼 보이는 글자. 이것만으로 된 댓글은 빈 댓글로 본다(#37 리뷰).
-fn blank_like(c: char) -> bool {
+pub(crate) fn blank_like(c: char) -> bool {
     c.is_whitespace()
         || matches!(
             c,
@@ -74,7 +74,7 @@ fn blank_like(c: char) -> bool {
 }
 
 /// 글자 방향을 바꾸는 문자. 뒤따르는 글을 거꾸로 보이게 해서 다른 내용으로 속일 수 있다(#37 리뷰).
-fn bidi_control(c: char) -> bool {
+pub(crate) fn bidi_control(c: char) -> bool {
     matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }
 

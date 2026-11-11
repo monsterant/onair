@@ -51,6 +51,10 @@ pub enum ApiError {
     NotFound,
     TooManyRequests,
     Internal,
+    /// 503: 기능이 설정되지 않음(예: 결제 키 없음)
+    Unavailable(&'static str),
+    /// 502: 바깥 서비스(결제 등)에 닿지 못함
+    BadGateway(&'static str),
 }
 
 impl IntoResponse for ApiError {
@@ -66,6 +70,8 @@ impl IntoResponse for ApiError {
                 "요청이 너무 많습니다. 잠시 뒤에 다시 시도하세요",
             ),
             ApiError::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "서버 오류입니다"),
+            ApiError::Unavailable(m) => (StatusCode::SERVICE_UNAVAILABLE, m),
+            ApiError::BadGateway(m) => (StatusCode::BAD_GATEWAY, m),
         };
         (code, Json(json!({ "error": msg }))).into_response()
     }

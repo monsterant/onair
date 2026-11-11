@@ -82,6 +82,7 @@ async fn fake_ome() -> (FakeOme, OmeApi) {
 
 async fn router(db: PgPool, ome: OmeApi) -> Router {
     app(AppState {
+        toss: Default::default(),
         db,
         auth: onair_backend::auth::AuthConfig {
             demo_login: true,
@@ -547,6 +548,7 @@ async fn open_broadcasts_are_capped_per_owner(db: PgPool) {
 #[sqlx::test]
 async fn create_is_rate_limited_per_client(db: PgPool) {
     let r = app(AppState {
+        toss: Default::default(),
         db,
         auth: onair_backend::auth::AuthConfig {
             demo_login: true,

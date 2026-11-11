@@ -13,6 +13,7 @@ use tower::ServiceExt;
 
 fn router(db: PgPool, demo_login: bool) -> Router {
     app(AppState {
+        toss: Default::default(),
         ome: Default::default(),
         db,
         auth: AuthConfig {
@@ -617,6 +618,7 @@ async fn cross_site_posts_are_rejected(db: PgPool) {
 #[sqlx::test]
 async fn auth_requests_are_rate_limited_per_client(db: PgPool) {
     let r = app(AppState {
+        toss: Default::default(),
         ome: Default::default(),
         db,
         auth: AuthConfig {
