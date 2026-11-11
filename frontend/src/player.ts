@@ -27,6 +27,16 @@ export function startPlayer(containerId: string, streamName: string, onError?: (
   return p;
 }
 
+/** 소리를 켜고 끈다. 지금 소리가 켜져 있으면 true. 플레이어가 없으면 null. */
+export function toggleMute(containerId: string): boolean | null {
+  const p = OvenPlayer.getPlayerByContainerId(containerId);
+  if (!p) return null;
+  const muted = p.getMute();
+  p.setMute(!muted);
+  if (muted && p.getVolume() === 0) p.setVolume(100);
+  return muted;
+}
+
 export function stopPlayer(containerId: string) {
   OvenPlayer.getPlayerByContainerId(containerId)?.remove();
 }
