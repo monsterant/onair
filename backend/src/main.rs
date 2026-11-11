@@ -113,6 +113,15 @@ async fn main() {
         std::env::var("TOSS_SECRET_KEY"),
         std::env::var("TOSS_CLIENT_KEY"),
     ) {
+        // 테스트 키(test_로 시작)만 받는다. 실제 키(live_)를 넣으면 진짜 돈이 나가므로 켜지 않는다(#41 리뷰)
+        (Ok(s), Ok(c))
+            if !s.trim().is_empty()
+                && !c.trim().is_empty()
+                && !(s.trim().starts_with("test_") && c.trim().starts_with("test_")) =>
+        {
+            tracing::error!("TOSS 키가 테스트 키(test_...)가 아니어서 도네이션을 켜지 않습니다");
+            Default::default()
+        }
         (Ok(s), Ok(c)) if !s.trim().is_empty() && !c.trim().is_empty() => {
             let base = std::env::var("TOSS_API_BASE")
                 .unwrap_or_else(|_| "https://api.tosspayments.com".into());

@@ -19,9 +19,16 @@ function loadSdk(): Promise<TossPaymentsFn> {
   loading ??= new Promise((resolve, reject) => {
     const s = document.createElement('script');
     s.src = SDK;
-    s.onload = () => (w.TossPayments ? resolve(w.TossPayments) : reject(new Error('결제 모듈을 불러오지 못했습니다')));
+    s.onload = () => {
+      if (w.TossPayments) return resolve(w.TossPayments);
+      // 실패를 기억하지 않는다: 다음에 누르면 다시 불러온다(#41 리뷰)
+      loading = null;
+      s.remove();
+      reject(new Error('결제 모듈을 불러오지 못했습니다'));
+    };
     s.onerror = () => {
       loading = null;
+      s.remove();
       reject(new Error('결제 모듈을 불러오지 못했습니다'));
     };
     document.head.append(s);

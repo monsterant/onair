@@ -381,16 +381,17 @@ function donationsPanel(b: Broadcast, gen: number): HTMLElement {
 async function donateReturnPage(main: HTMLElement) {
   const q = new URLSearchParams(location.search);
   const bid = Number(q.get('b'));
-  const back = () => {
-    // 결제 정보가 주소에 남지 않게 주소를 방송 화면으로 바꾼다
-    history.replaceState(null, '', `/#/b/${bid}`);
-    void route();
-  };
+  const failed = location.pathname === '/donate/fail';
+  // 값을 읽자마자 주소를 방송 화면으로 바꾼다(#41 리뷰).
+  // - 결제 키가 주소창·방문 기록에 남지 않는다.
+  // - 머리말 링크(#/)를 눌러도 이 화면에 다시 갇혀 승인 확인을 또 보내지 않는다(경로가 /donate/...로 남지 않으므로).
+  history.replaceState(null, '', Number.isFinite(bid) && bid > 0 ? `/#/b/${bid}` : '/#/');
+  const back = () => void route();
   const msg = el('p');
   const backBtn = el('button', { type: 'button', textContent: '방송으로 돌아가기' });
   backBtn.onclick = back;
   main.append(el('section', { className: 'panel' }, el('h2', { textContent: '후원' }), msg, backBtn));
-  if (location.pathname === '/donate/fail') {
+  if (failed) {
     msg.textContent = `결제하지 않았습니다: ${q.get('message') ?? '취소되었습니다'}`;
     return;
   }

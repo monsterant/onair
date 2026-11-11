@@ -625,6 +625,7 @@ async fn auth_requests_are_rate_limited_per_client(db: PgPool) {
             demo_login: true,
             limiter: onair_backend::guard::RateLimiter::new(2, std::time::Duration::from_secs(60)),
             comment_limiter: Default::default(),
+            notify_limiter: Default::default(),
         },
     });
     let ip1 = [("x-forwarded-for", "1.1.1.1")];

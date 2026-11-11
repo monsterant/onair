@@ -63,7 +63,8 @@ pub struct Donation {
     pub id: i64,
     pub order_id: String,
     pub broadcast_id: i64,
-    pub donor_id: i64,
+    /// 후원자가 탈퇴(테스트 계정 정리 등)하면 None. 후원 기록과 합계는 남긴다.
+    pub donor_id: Option<i64>,
     pub amount: i64,
     pub message: String,
     pub status: String,
@@ -155,7 +156,7 @@ pub async fn create(
     }
     // 토스 주문번호 규칙: 6~64자, 영문·숫자·-·_. 문서용 테스트 상점은 여러 사람이 같이 쓰므로 겹치지 않게 임의 값으로.
     let order_id = format!("onair-{}", crate::broadcasts::random_hex(16)?);
-    sqlx::query(
+    let inserted = sqlx::query(
         "INSERT INTO donations (order_id, broadcast_id, donor_id, amount, message)
          SELECT $1, b.id, $3, $4, $5 FROM broadcasts b WHERE b.id = $2",
     )
@@ -166,6 +167,10 @@ pub async fn create(
     .bind(&message)
     .execute(&state.db)
     .await?;
+    // 확인과 저장 사이에 방송이 지워졌으면 주문이 생기지 않았다. 결제창을 열지 않게 404(#41 리뷰)
+    if inserted.rows_affected() == 0 {
+        return Err(ApiError::NotFound);
+    }
     let name: String = title.chars().take(40).collect();
     Ok((
         StatusCode::CREATED,
@@ -174,7 +179,8 @@ pub async fn create(
             order_name: format!("onair 후원: {name}"),
             amount: input.amount,
             client_key: client_key.to_string(),
-            customer_key: format!("onair-user-{}", user.id),
+            // 토스 권고: 구매자 키는 짐작할 수 없는 값으로(사용자 번호를 그대로 쓰지 않는다, #41 리뷰)
+            customer_key: format!("onair-c-{}", crate::broadcasts::random_hex(12)?),
         }),
     ))
 }
@@ -197,11 +203,28 @@ async fn mark_failed(state: &AppState, id: i64) -> Result<(), ApiError> {
 }
 
 /// 토스가 확인해 준 결제를 대기 주문과 맞춰 보고 한 번만 적립한다.
+/// 주문번호·금액이 맞고 DONE인 결제는 주문이 failed여도 적립한다. 토스가 이미 돈을 받았기 때문이다.
+/// (예: 결제창을 두 번 열어 첫 결제는 취소, 두 번째는 승인된 경우. 취소 통지가 먼저 와서 failed가 됐어도 승인된 결제를 잃지 않게, #41 리뷰)
 async fn settle(state: &AppState, d: &Donation, p: &Payment) -> Result<Donation, ApiError> {
     if p.order_id != d.order_id || p.total_amount != d.amount {
         tracing::warn!(order_id = %d.order_id, "토스 결제와 주문이 맞지 않음");
         mark_failed(state, d.id).await?;
         return Err(ApiError::BadRequest("결제 정보가 주문과 맞지 않습니다"));
+    }
+    // 적립한 결제가 나중에 취소(환불)됐으면 합계에서 뺀다(같은 결제 키일 때만, #41 리뷰)
+    if matches!(p.status.as_str(), "CANCELED" | "PARTIAL_CANCELED")
+        && d.status == "paid"
+        && d.payment_key.as_deref() == Some(p.payment_key.as_str())
+    {
+        sqlx::query(
+            "UPDATE donations SET status = 'canceled'
+              WHERE id = $1 AND status = 'paid' AND payment_key = $2",
+        )
+        .bind(d.id)
+        .bind(&p.payment_key)
+        .execute(&state.db)
+        .await?;
+        return find(state, &d.order_id).await?.ok_or(ApiError::NotFound);
     }
     if p.status != "DONE" {
         // 아직 승인 전(READY 등)이면 대기로 두고, 취소·만료면 실패로 둔다
@@ -215,7 +238,7 @@ async fn settle(state: &AppState, d: &Donation, p: &Payment) -> Result<Donation,
     }
     let updated = sqlx::query(
         "UPDATE donations SET status = 'paid', payment_key = $1, paid_at = now()
-          WHERE id = $2 AND status = 'pending'",
+          WHERE id = $2 AND status IN ('pending', 'failed')",
     )
     .bind(&p.payment_key)
     .bind(d.id)
@@ -258,7 +281,7 @@ pub async fn confirm(
     let d = find(&state, &input.order_id)
         .await?
         .ok_or(ApiError::NotFound)?;
-    if d.donor_id != user.id {
+    if d.donor_id != Some(user.id) {
         return Err(ApiError::Forbidden("후원한 사람만 확인할 수 있습니다"));
     }
     match d.status.as_str() {
@@ -267,7 +290,6 @@ pub async fn confirm(
             return Ok(Json(d));
         }
         "paid" => return Err(ApiError::Conflict("다른 결제로 이미 처리된 후원입니다")),
-        "failed" => return Err(ApiError::Conflict("실패한 후원입니다. 다시 후원해 주세요")),
         _ => {}
     }
     // 화면이 보낸 금액이 주문 금액과 다르면 토스를 부르기 전에 거절한다(금액 바꿔치기 방지)
@@ -324,10 +346,11 @@ pub async fn notify(
     if !state.toss.is_configured() {
         return Err(ApiError::Unavailable("결제가 설정되지 않았습니다"));
     }
-    // 이 길은 부를 때마다 토스에 조회를 보내므로 IP당 횟수를 제한한다
+    // 이 길은 부를 때마다 토스에 조회를 보내므로 IP당 횟수를 제한한다.
+    // 로그인 없이 부르는 길이라 다른 기능(댓글·후원)과 몫을 나누지 않는다(#41 리뷰)
     if !state
         .auth
-        .comment_limiter
+        .notify_limiter
         .allow(&format!("notify:{}", client_key(&headers)))
     {
         return Err(ApiError::TooManyRequests);
@@ -368,8 +391,8 @@ pub async fn list(
     .fetch_one(&state.db)
     .await?;
     let items = sqlx::query_as::<_, DonationItem>(
-        "SELECT d.id, u.username AS donor_username, d.amount, d.message, d.paid_at
-           FROM donations d JOIN users u ON u.id = d.donor_id
+        "SELECT d.id, COALESCE(u.username, '(탈퇴한 사용자)') AS donor_username, d.amount, d.message, d.paid_at
+           FROM donations d LEFT JOIN users u ON u.id = d.donor_id
           WHERE d.broadcast_id = $1 AND d.status = 'paid'
           ORDER BY d.paid_at DESC, d.id DESC LIMIT 100",
     )

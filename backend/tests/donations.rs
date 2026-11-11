@@ -39,6 +39,10 @@ struct FakeToss {
     get_calls: Arc<AtomicUsize>,
     /// 승인 응답을 늦춘다(동시 요청 시험)
     delay_ms: Arc<Mutex<u64>>,
+    /// Some(코드)면 승인이 그 상태 코드로 실패한다(429 등)
+    confirm_error: Arc<Mutex<Option<u16>>>,
+    /// true면 승인된 결제에 주문번호 확인 없이 ALREADY_PROCESSED를 돌려준다
+    already_first: Arc<Mutex<bool>>,
 }
 
 const SECRET: &str = "test_gsk_fake";
@@ -76,6 +80,10 @@ async fn fake_toss() -> (FakeToss, Toss) {
                     let Some(p) = map.get_mut(&key) else {
                         return err(StatusCode::NOT_FOUND, "NOT_FOUND_PAYMENT_SESSION");
                     };
+                    // 승인된 결제면 주문번호를 보기 전에 "이미 처리됨"을 돌려주는 경우를 흉내 낸다
+                    if *f.already_first.lock().unwrap() && p.status == "DONE" {
+                        return err(StatusCode::BAD_REQUEST, "ALREADY_PROCESSED_PAYMENT");
+                    }
                     // 진짜 토스처럼 결제창에서 요청한 주문번호·금액과 다르면 거절한다
                     if b["orderId"].as_str() != Some(p.order_id.as_str())
                         || b["amount"].as_i64() != Some(p.amount)
@@ -84,6 +92,13 @@ async fn fake_toss() -> (FakeToss, Toss) {
                     }
                     if p.status == "DONE" {
                         return err(StatusCode::BAD_REQUEST, "ALREADY_PROCESSED_PAYMENT");
+                    }
+                    // 진짜 토스처럼 취소·중단된 결제는 승인하지 않는다
+                    if p.status != "READY" {
+                        return err(StatusCode::BAD_REQUEST, "NOT_AVAILABLE_PAYMENT");
+                    }
+                    if let Some(code) = *f.confirm_error.lock().unwrap() {
+                        return err(StatusCode::from_u16(code).unwrap(), "TOO_MANY_REQUESTS");
                     }
                     p.status = "DONE".into();
                     (StatusCode::OK, Json(payment_json(&key, p)))
@@ -507,7 +522,7 @@ async fn unfinished_or_canceled_payments_are_not_credited(db: PgPool) {
         StatusCode::CONFLICT
     );
     assert_eq!(status(db.clone(), oid.clone()).await, "failed");
-    // 실패한 주문은 다시 확인해도 적립되지 않는다
+    // 취소된 결제로 다시 확인해도 토스가 거절하므로 적립되지 않는다
     let again = call(
         &r,
         "POST",
@@ -516,7 +531,7 @@ async fn unfinished_or_canceled_payments_are_not_credited(db: PgPool) {
         Some(&donor),
     )
     .await;
-    assert_eq!(again.status, StatusCode::CONFLICT);
+    assert_eq!(again.status, StatusCode::BAD_REQUEST);
     assert_eq!(summary(&r, bid).await["total"], 0);
 }
 
@@ -768,4 +783,272 @@ async fn donations_are_off_without_toss_keys(db: PgPool) {
         .json["total"],
         0
     );
+}
+
+#[sqlx::test]
+async fn approved_payment_is_credited_even_after_the_order_was_marked_failed(db: PgPool) {
+    // 결제창을 두 번 열어 첫 결제(pk_a)는 중단, 두 번째(pk_b)는 승인된 경우.
+    // 중단 통지가 먼저 와서 주문이 failed가 됐어도, 승인된 결제는 적립돼야 한다(토스가 돈을 받았다).
+    let (fake, toss) = fake_toss().await;
+    let r = router(db, toss);
+    let (bid, donor, oid) = setup(&r, 4000).await;
+    fake.pay("pk_a", &oid, 4000);
+    fake.set_status("pk_a", "ABORTED");
+    assert_eq!(
+        call(
+            &r,
+            "POST",
+            "/donations/notify",
+            Some(json!({"paymentKey": "pk_a"})),
+            None
+        )
+        .await
+        .status,
+        StatusCode::CONFLICT
+    );
+    fake.pay("pk_b", &oid, 4000);
+    let ok = call(
+        &r,
+        "POST",
+        "/donations/confirm",
+        confirm_body("pk_b", &oid, 4000),
+        Some(&donor),
+    )
+    .await;
+    assert_eq!(ok.status, StatusCode::OK, "{:?}", ok.json);
+    assert_eq!(ok.json["status"], "paid");
+    assert_eq!(summary(&r, bid).await["total"], 4000);
+    // 중단된 결제의 통지가 또 와도 적립된 주문은 그대로다
+    call(
+        &r,
+        "POST",
+        "/donations/notify",
+        Some(json!({"paymentKey": "pk_a"})),
+        None,
+    )
+    .await;
+    assert_eq!(summary(&r, bid).await["count"], 1);
+}
+
+#[sqlx::test]
+async fn toss_throttling_keeps_the_order_pending(db: PgPool) {
+    let (fake, toss) = fake_toss().await;
+    let r = router(db.clone(), toss);
+    let (bid, donor, oid) = setup(&r, 2000).await;
+    fake.pay("pk_429", &oid, 2000);
+    *fake.confirm_error.lock().unwrap() = Some(429);
+    let busy = call(
+        &r,
+        "POST",
+        "/donations/confirm",
+        confirm_body("pk_429", &oid, 2000),
+        Some(&donor),
+    )
+    .await;
+    assert_eq!(busy.status, StatusCode::BAD_GATEWAY);
+    let status: String = sqlx::query_scalar("SELECT status FROM donations WHERE order_id = $1")
+        .bind(&oid)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(status, "pending");
+    *fake.confirm_error.lock().unwrap() = None;
+    assert_eq!(
+        call(
+            &r,
+            "POST",
+            "/donations/confirm",
+            confirm_body("pk_429", &oid, 2000),
+            Some(&donor)
+        )
+        .await
+        .status,
+        StatusCode::OK
+    );
+    assert_eq!(summary(&r, bid).await["total"], 2000);
+}
+
+#[sqlx::test]
+async fn donations_stay_when_the_donor_account_is_removed(db: PgPool) {
+    let (fake, toss) = fake_toss().await;
+    let r = router(db.clone(), toss);
+    let (bid, donor, oid) = setup(&r, 6000).await;
+    fake.pay("pk_d", &oid, 6000);
+    assert_eq!(
+        call(
+            &r,
+            "POST",
+            "/donations/confirm",
+            confirm_body("pk_d", &oid, 6000),
+            Some(&donor)
+        )
+        .await
+        .status,
+        StatusCode::OK
+    );
+    sqlx::query("DELETE FROM users WHERE username = 'demo2'")
+        .execute(&db)
+        .await
+        .unwrap();
+    let s = summary(&r, bid).await;
+    assert_eq!(s["total"], 6000);
+    assert_eq!(s["items"][0]["donor_username"], "(탈퇴한 사용자)");
+}
+
+#[sqlx::test]
+async fn canceled_after_credit_is_removed_from_total(db: PgPool) {
+    let (fake, toss) = fake_toss().await;
+    let r = router(db.clone(), toss);
+    let (bid, donor, oid) = setup(&r, 8000).await;
+    fake.pay("pk_x", &oid, 8000);
+    assert_eq!(
+        call(
+            &r,
+            "POST",
+            "/donations/confirm",
+            confirm_body("pk_x", &oid, 8000),
+            Some(&donor)
+        )
+        .await
+        .status,
+        StatusCode::OK
+    );
+    assert_eq!(summary(&r, bid).await["total"], 8000);
+    fake.set_status("pk_x", "CANCELED");
+    let n = call(
+        &r,
+        "POST",
+        "/donations/notify",
+        Some(json!({"paymentKey": "pk_x"})),
+        None,
+    )
+    .await;
+    assert_eq!(n.status, StatusCode::OK);
+    assert_eq!(n.json["status"], "canceled");
+    assert_eq!(summary(&r, bid).await["total"], 0);
+    // 다시 와도 그대로
+    call(
+        &r,
+        "POST",
+        "/donations/notify",
+        Some(json!({"paymentKey": "pk_x"})),
+        None,
+    )
+    .await;
+    assert_eq!(summary(&r, bid).await["count"], 0);
+}
+
+#[sqlx::test]
+async fn db_rejects_amounts_and_messages_outside_the_rules(db: PgPool) {
+    let (_, toss) = fake_toss().await;
+    let r = router(db.clone(), toss);
+    let (bid, _, _) = setup(&r, 1000).await;
+    let uid: i64 = sqlx::query_scalar("SELECT id FROM users WHERE username = 'demo2'")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    for (amount, msg) in [(1500_i64, String::new()), (1000, "가".repeat(101))] {
+        let res = sqlx::query("INSERT INTO donations (order_id, broadcast_id, donor_id, amount, message) VALUES ($4, $1, $2, $3, $5)")
+            .bind(bid).bind(uid).bind(amount).bind(format!("onair-db-{amount}-{}", msg.len())).bind(msg).execute(&db).await;
+        assert!(res.is_err(), "{amount}");
+    }
+}
+
+#[sqlx::test]
+async fn retry_after_lost_response_uses_already_processed_and_credits_once(db: PgPool) {
+    // 승인은 토스에서 끝났는데 응답을 못 받아 화면이 다시 확인을 보낸 경우
+    let (fake, toss) = fake_toss().await;
+    let r = router(db, toss);
+    let (bid, donor, oid) = setup(&r, 3000).await;
+    fake.pay("pk_lost", &oid, 3000);
+    fake.set_status("pk_lost", "DONE");
+    let ok = call(
+        &r,
+        "POST",
+        "/donations/confirm",
+        confirm_body("pk_lost", &oid, 3000),
+        Some(&donor),
+    )
+    .await;
+    assert_eq!(ok.status, StatusCode::OK, "{:?}", ok.json);
+    assert_eq!(ok.json["status"], "paid");
+    assert_eq!(fake.get_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(summary(&r, bid).await["total"], 3000);
+}
+
+#[sqlx::test]
+async fn already_processed_payment_of_another_order_is_not_credited(db: PgPool) {
+    let (fake, toss) = fake_toss().await;
+    let r = router(db.clone(), toss);
+    let (bid, donor, x) = setup(&r, 5000).await;
+    let y = order(&r, bid, &donor, 5000).await;
+    fake.pay("pk_x", &x, 5000);
+    fake.set_status("pk_x", "DONE");
+    *fake.already_first.lock().unwrap() = true;
+    // 주문 X의 결제 키로 주문 Y를 확인하려 한다
+    let res = call(
+        &r,
+        "POST",
+        "/donations/confirm",
+        confirm_body("pk_x", &y, 5000),
+        Some(&donor),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::BAD_REQUEST);
+    let y_status: String = sqlx::query_scalar("SELECT status FROM donations WHERE order_id = $1")
+        .bind(&y)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_ne!(y_status, "paid");
+    // X는 자기 결제로 적립된다
+    assert_eq!(
+        call(
+            &r,
+            "POST",
+            "/donations/confirm",
+            confirm_body("pk_x", &x, 5000),
+            Some(&donor)
+        )
+        .await
+        .status,
+        StatusCode::OK
+    );
+    assert_eq!(summary(&r, bid).await["total"], 5000);
+    assert_eq!(summary(&r, bid).await["count"], 1);
+}
+
+#[sqlx::test]
+async fn second_payment_for_the_same_order_is_not_credited_again(db: PgPool) {
+    let (fake, toss) = fake_toss().await;
+    let r = router(db, toss);
+    let (bid, donor, oid) = setup(&r, 2000).await;
+    fake.pay("pk_1", &oid, 2000);
+    assert_eq!(
+        call(
+            &r,
+            "POST",
+            "/donations/confirm",
+            confirm_body("pk_1", &oid, 2000),
+            Some(&donor)
+        )
+        .await
+        .status,
+        StatusCode::OK
+    );
+    // 같은 주문으로 결제가 한 번 더 승인됐다
+    fake.pay("pk_2", &oid, 2000);
+    fake.set_status("pk_2", "DONE");
+    let n = call(
+        &r,
+        "POST",
+        "/donations/notify",
+        Some(json!({"paymentKey": "pk_2"})),
+        None,
+    )
+    .await;
+    assert_eq!(n.status, StatusCode::CONFLICT);
+    let s = summary(&r, bid).await;
+    assert_eq!(s["total"], 2000);
+    assert_eq!(s["count"], 1);
 }
