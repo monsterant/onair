@@ -872,10 +872,17 @@ async fn start_soon_does_not_wait_when_all_recording_slots_are_full(db: PgPool) 
         fake.streams.lock().unwrap().insert(s, "H264".into());
     }
     // 4개 중 3개만 녹화할 수 있다. 남은 1개를 위해 헛되이 10번 돌지 않는다.
-    start_soon(&db, &api, &cfg, Duration::from_millis(20), 10)
+    // 자리가 없으면 쉬지 않고 바로 끝난다(전에는 100ms씩 9번 더 쉬어 0.9초 넘게 걸렸다, #59 2바퀴)
+    let t = std::time::Instant::now();
+    start_soon(&db, &api, &cfg, Duration::from_millis(100), 10)
         .await
         .unwrap();
     assert_eq!(statuses(&db).await.len(), 3);
+    assert!(
+        t.elapsed() < Duration::from_millis(500),
+        "{:?}",
+        t.elapsed()
+    );
     assert_eq!(*fake.codec_calls.lock().unwrap(), 3);
 }
 
