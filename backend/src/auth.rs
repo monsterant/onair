@@ -398,7 +398,7 @@ pub async fn demo_login(
     if !state.auth.demo_login {
         return Err(ApiError::NotFound);
     }
-    // "1"과 "2"만 받는다. 01, +1, %31 같은 다른 표기는 없는 길로 본다(#25 A15)
+    // "1"과 "2"만 받는다. 01, +1 같은 다른 표기는 없는 길로 본다(#25 A15). %31은 주소 규칙상 "1"과 같은 글자라 1로 받는다.
     let username = match n.as_str() {
         "1" => DEMO_USERS[0],
         "2" => DEMO_USERS[1],
