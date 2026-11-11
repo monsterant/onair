@@ -12,6 +12,8 @@
 		X-Content-Type-Options "nosniff"
 		Content-Security-Policy "frame-ancestors 'none'"
 		Referrer-Policy "strict-origin-when-cross-origin"
+		# 카메라·마이크·화면 공유는 우리 화면에서만 쓸 수 있다(다른 사이트를 겹쳐 띄워 몰래 켜지 못하게). 위치 정보는 쓰지 않는다.
+		Permissions-Policy "camera=(self), microphone=(self), display-capture=(self), geolocation=()"
 		-Server
 	}
 

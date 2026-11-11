@@ -74,6 +74,7 @@ services:
   # 한 번 실행하고 끝난다. 파일 내용은 그대로 OME 소유(읽기 전용)다.
   rec-init:
     image: busybox:1.36
+    security_opt: ["no-new-privileges:true"]
     command: ["sh", "-c", "chmod 0777 /rec"]
     volumes:
       - rec-data:/rec

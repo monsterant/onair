@@ -155,7 +155,20 @@ pub fn client_key(headers: &HeaderMap) -> String {
         .and_then(|v| v.rsplit(',').next())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
+        .map(|s| ipv6_prefix(&s).unwrap_or(s))
         .unwrap_or_else(|| "direct".into())
+}
+
+/// IPv6 주소는 앞 64비트(보통 한 가입자·한 기기 묶음)로 센다(보안 점검 M1).
+/// 한 사람이 같은 /64 안에서 주소를 바꿔 가며 횟수 제한을 피하거나 기록표를 채우지 못하게 한다.
+fn ipv6_prefix(ip: &str) -> Option<String> {
+    let addr: std::net::Ipv6Addr = ip.parse().ok()?;
+    // IPv6 모양으로 적은 IPv4(::ffff:1.2.3.4)는 IPv4 그대로 센다(모두 한 /64로 묶이지 않게)
+    if let Some(v4) = addr.to_ipv4_mapped() {
+        return Some(v4.to_string());
+    }
+    let s = addr.segments();
+    Some(format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3]))
 }
 
 pub async fn limit_auth(State(state): State<AppState>, req: Request, next: Next) -> Response {
@@ -169,6 +182,20 @@ pub async fn limit_auth(State(state): State<AppState>, req: Request, next: Next)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ipv6_addresses_are_grouped_by_64_bit_prefix() {
+        let key = |ip: &str| {
+            let mut h = HeaderMap::new();
+            h.insert("x-forwarded-for", ip.parse().unwrap());
+            client_key(&h)
+        };
+        assert_eq!(key("2001:db8:1:2::1"), key("2001:db8:1:2:ffff::9"));
+        assert_ne!(key("2001:db8:1:2::1"), key("2001:db8:1:3::1"));
+        assert_eq!(key("203.0.113.7"), "203.0.113.7");
+        assert_eq!(key("1.1.1.1, 2001:db8:1:2::5"), "2001:db8:1:2::/64");
+        assert_eq!(key("::ffff:198.51.100.4"), "198.51.100.4");
+    }
     use axum::http::HeaderValue;
 
     fn h(pairs: &[(&'static str, &'static str)]) -> HeaderMap {

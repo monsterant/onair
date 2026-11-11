@@ -554,13 +554,17 @@ async fn create_is_rate_limited_per_client(db: PgPool) {
         db,
         auth: onair_backend::auth::AuthConfig {
             demo_login: true,
-            limiter: onair_backend::guard::RateLimiter::new(3, std::time::Duration::from_secs(60)),
-            comment_limiter: Default::default(),
+            limiter: Default::default(),
+            // 만들기 횟수는 로그인과 따로 센다(보안 점검 L3)
+            comment_limiter: onair_backend::guard::RateLimiter::new(
+                2,
+                std::time::Duration::from_secs(60),
+            ),
             notify_limiter: Default::default(),
         },
         ome: OmeApi::default(),
     });
-    // 데모 로그인 1번 + 만들기 2번 = 3번까지, 4번째 만들기는 429
+    // 만들기 2번까지, 3번째 만들기는 429. 로그인은 막히지 않는다.
     let owner = login(&r, 1).await;
     create(&r, &owner, "a").await;
     create(&r, &owner, "b").await;
@@ -573,6 +577,11 @@ async fn create_is_rate_limited_per_client(db: PgPool) {
     )
     .await;
     assert_eq!(code, StatusCode::TOO_MANY_REQUESTS);
+    let again = Request::post("/auth/demo/2").body(Body::empty()).unwrap();
+    assert_eq!(
+        r.clone().oneshot(again).await.unwrap().status(),
+        StatusCode::OK
+    );
 }
 
 #[sqlx::test]
