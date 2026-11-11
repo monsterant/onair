@@ -42,6 +42,8 @@ struct RequestPart {
 pub struct OmeState {
     pub secret: String,
     pub db: sqlx::PgPool,
+    /// 송출이 끊기면 그 방송의 녹화를 바로 멈추는 데 쓴다(#47). 설정하지 않으면(Default) 부르지 않는다.
+    pub ome: crate::ome_api::OmeApi,
 }
 
 /// OME가 알려 준 주소에서 방송 이름과 송출 키를 꺼낸다.
@@ -166,7 +168,12 @@ async fn decide_opening(
 }
 
 /// 송출이 닫히면 `live`였던 방송을 `ready`로 돌린다(종료된 방송은 그대로 둔다).
-async fn on_closing(db: &sqlx::PgPool, direction: &str, url: &str) -> Result<(), sqlx::Error> {
+async fn on_closing(
+    db: &sqlx::PgPool,
+    api: &crate::ome_api::OmeApi,
+    direction: &str,
+    url: &str,
+) -> Result<(), sqlx::Error> {
     if direction != "incoming" {
         return Ok(());
     }
@@ -178,6 +185,26 @@ async fn on_closing(db: &sqlx::PgPool, direction: &str, url: &str) -> Result<(),
         .bind(&name)
         .execute(db)
         .await?;
+        // 송출이 끊기면 그 방송의 녹화를 바로 멈춘다(#47 공격 사냥).
+        // 15초 맞춰 보기를 기다리면, 그 사이 다시 붙은 송출을 OME가 같은 녹화·같은 파일에 이어 써서 앞부분을 덮어쓴다.
+        let recording: Vec<String> = sqlx::query_scalar(
+            "SELECT r.record_id FROM recordings r JOIN broadcasts b ON b.id = r.broadcast_id
+              WHERE b.stream_name = $1 AND r.status = 'recording'",
+        )
+        .bind(&name)
+        .fetch_all(db)
+        .await?;
+        for rid in recording {
+            if api.stop_record(&rid).await {
+                sqlx::query(
+                    "UPDATE recordings SET status = 'finishing', ended_at = now()
+                      WHERE record_id = $1 AND status = 'recording'",
+                )
+                .bind(&rid)
+                .execute(db)
+                .await?;
+            }
+        }
     }
     Ok(())
 }
@@ -276,7 +303,7 @@ pub async fn admission(
         // 닫힘 알림에는 빈 JSON으로 답한다(OME 문서).
         "closing" => {
             tracing::info!(direction = %r.direction, protocol = %r.protocol, url = redact(&r.url), "OME closing");
-            on_closing(&state.db, &r.direction, &r.url)
+            on_closing(&state.db, &state.ome, &r.direction, &r.url)
                 .await
                 .map_err(db_err)?;
             Ok(Json(json!({})))

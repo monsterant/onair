@@ -222,6 +222,16 @@ pub async fn delete(
     Path(id): Path<i64>,
 ) -> Result<StatusCode, ApiError> {
     let b = owned(&state, id, &user).await?;
+    // 녹화 중이면 먼저 멈춘다(#47 리뷰). 행이 지워지면 맞춰 보기가 이 녹화를 다시 찾지 못한다. 남은 파일은 정리 작업이 지운다.
+    let recording: Vec<String> = sqlx::query_scalar(
+        "SELECT record_id FROM recordings WHERE broadcast_id = $1 AND status = 'recording'",
+    )
+    .bind(id)
+    .fetch_all(&state.db)
+    .await?;
+    for rid in recording {
+        state.ome.stop_record(&rid).await;
+    }
     // 행을 먼저 지우고 그다음 송출을 끊는다. 상태와 상관없이 항상 끊는다(#27 V4).
     // 지운 뒤에는 웹훅이 이름을 찾지 못해 다시 송출할 수 없다. 끊기가 실패해도 맞춰 보기가 DB에 없는 스트림을 끊는다.
     sqlx::query("DELETE FROM broadcasts WHERE id = $1 AND owner_id = $2")

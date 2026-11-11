@@ -100,3 +100,21 @@ export const createDonation = (broadcastId: number, amount: number, message: str
   api<Checkout>('POST', `/broadcasts/${broadcastId}/donations`, { amount, message });
 export const confirmDonation = (paymentKey: string, orderId: string, amount: number) =>
   api<DonationStatus>('POST', '/donations/confirm', { paymentKey, orderId, amount });
+
+/** 녹화·다시보기(#47) */
+export type Recording = {
+  id: number;
+  broadcast_id: number;
+  title: string;
+  owner_username: string;
+  format: 'mp4' | 'webm';
+  started_at: string;
+  ended_at: string | null;
+  bytes: number;
+  /** 재생 주소(/vod/...). 화면에서는 /api를 붙인다 */
+  url: string;
+};
+
+export const listRecordings = () => api<Recording[]>('GET', '/recordings');
+export const getRecording = (id: number) => api<Recording>('GET', `/recordings/${id}`);
+export const listBroadcastRecordings = (broadcastId: number) => api<Recording[]>('GET', `/broadcasts/${broadcastId}/recordings`);

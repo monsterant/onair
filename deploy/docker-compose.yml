@@ -38,12 +38,18 @@ services:
       # OME 관리 API(#3): 방송 종료 때 스트림 끊기, 15초마다 맞춰 보기. Docker 안쪽 주소라 인터넷에는 열리지 않는다.
       OME_API_URL: http://ome:8081
       OME_API_TOKEN: ${OME_API_TOKEN:?deploy/.env에 OME_API_TOKEN을 넣으세요}
+      # 녹화 파일 폴더(#47). OME가 쓰고 백엔드가 읽고 내보내고 지운다
+      RECORDINGS_DIR: /rec
       # 도네이션(#41): 토스 테스트 키. 비우면 도네이션이 꺼진다.
       TOSS_CLIENT_KEY: ${TOSS_CLIENT_KEY:-}
       TOSS_SECRET_KEY: ${TOSS_SECRET_KEY:-}
+    volumes:
+      - rec-data:/rec
     depends_on:
       db:
         condition: service_healthy
+      rec-init:
+        condition: service_completed_successfully
 
   ome:
     image: airensoft/ovenmediaengine:v0.21.0
@@ -58,10 +64,19 @@ services:
       OME_API_TOKEN: ${OME_API_TOKEN}
     volumes:
       - ../ome/Server.xml:/opt/ovenmediaengine/bin/origin_conf/Server.xml:ro
+      - rec-data:/rec
     ports:
       - "3478:3478"                    # WebRTC TCP 중계 (TURN)
       - "10000-10003:10000-10003/udp"  # WebRTC 영상·소리 통로
       - "10000:10000/tcp"              # WebRTC 직접 TCP 연결
+
+  # 녹화 폴더 권한 맞추기(#47): OME(root)가 만든 파일을 백엔드(root 아닌 사용자)가 지울 수 있게 폴더를 쓰기 가능으로 둔다.
+  # 한 번 실행하고 끝난다. 파일 내용은 그대로 OME 소유(읽기 전용)다.
+  rec-init:
+    image: busybox:1.36
+    command: ["sh", "-c", "chmod 0777 /rec"]
+    volumes:
+      - rec-data:/rec
 
   web:
     build:
@@ -85,6 +100,7 @@ services:
       - ome
 
 volumes:
+  rec-data:
   db-data:
   caddy-data:
   caddy-config:

@@ -9,6 +9,7 @@ pub mod donations;
 pub mod guard;
 pub mod ome;
 pub mod ome_api;
+pub mod recordings;
 pub mod toss;
 
 use axum::{
@@ -28,6 +29,8 @@ pub struct AppState {
     pub ome: ome_api::OmeApi,
     /// 토스 결제 API(#41). 설정하지 않으면(Default) 도네이션이 꺼진다
     pub toss: toss::Toss,
+    /// 녹화(#47). 폴더를 설정하지 않으면(Default) 녹화·다시보기 파일이 꺼진다
+    pub rec: recordings::RecConfig,
 }
 
 pub fn app(state: AppState) -> Router {
@@ -66,6 +69,13 @@ pub fn app(state: AppState) -> Router {
             get(donations::list).post(donations::create),
         )
         .route("/donations/confirm", post(donations::confirm))
+        .route("/recordings", get(recordings::list))
+        .route("/recordings/{id}", get(recordings::get))
+        .route(
+            "/broadcasts/{id}/recordings",
+            get(recordings::list_for_broadcast),
+        )
+        .route("/vod/{file}", get(recordings::serve_file))
         .route("/donations/notify", post(donations::notify))
         .route(
             "/comments/{id}",

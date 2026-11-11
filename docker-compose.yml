@@ -33,6 +33,8 @@ services:
     volumes:
       # 기본 설정에 AdmissionWebhooks를 더하고 인증서(TLS) 칸을 뺀 onair용 설정
       - ./ome/Server.xml:/opt/ovenmediaengine/bin/origin_conf/Server.xml:ro
+      # 녹화 파일(#47). 로컬 백엔드(cargo run)가 같은 폴더를 RECORDINGS_DIR로 읽는다
+      - ./recordings:/rec
     extra_hosts:
       # 리눅스 서버에서도 컨테이너가 host.docker.internal로 호스트의 백엔드에 닿게 한다
       - "host.docker.internal:host-gateway"

@@ -154,6 +154,7 @@ impl FakeToss {
 
 fn router(db: PgPool, toss: Toss) -> Router {
     app(AppState {
+        rec: Default::default(),
         toss,
         ome: Default::default(),
         db,

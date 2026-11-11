@@ -97,4 +97,119 @@ impl OmeApi {
         let list: StreamList = r.json().await.ok()?;
         Some(list.response.into_iter().collect())
     }
+
+    fn app_url(base: &str, action: &str) -> String {
+        format!("{base}/v1/vhosts/default/apps/app:{action}")
+    }
+
+    /// 스트림의 영상 코덱(예: "H264", "VP8"). 녹화 파일 형식을 정하는 데 쓴다(#47). 모르면 None.
+    pub async fn video_codec(&self, name: &str) -> Option<String> {
+        let i = self.inner.as_ref()?;
+        let url = format!("{}/{}", Self::streams_url(&i.base), name);
+        let r = i
+            .http
+            .get(&url)
+            .header("Authorization", &i.auth)
+            .send()
+            .await
+            .ok()?;
+        if !r.status().is_success() {
+            return None;
+        }
+        let v: serde_json::Value = r.json().await.ok()?;
+        v["response"]["input"]["tracks"]
+            .as_array()?
+            .iter()
+            .find(|t| {
+                t["type"]
+                    .as_str()
+                    .is_some_and(|x| x.eq_ignore_ascii_case("video"))
+            })
+            .and_then(|t| t["video"]["codec"].as_str())
+            .map(str::to_string)
+    }
+
+    /// 녹화를 시작한다(#47). `file`은 녹화 폴더 안의 파일 이름, `variants`는 넣을 영상·소리 출력 이름.
+    /// OME는 스트림이 아직 없어도 받아 두었다가 스트림이 오면 시작한다. 성공하면 true.
+    pub async fn start_record(
+        &self,
+        id: &str,
+        stream: &str,
+        file: &str,
+        variants: &[&str],
+    ) -> bool {
+        let Some(i) = &self.inner else { return false };
+        let body = serde_json::json!({
+            "id": id,
+            "stream": { "name": stream, "variantNames": variants },
+            "filePath": format!("/{file}"),
+        });
+        match i
+            .http
+            .post(Self::app_url(&i.base, "startRecord"))
+            .header("Authorization", &i.auth)
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(r) if r.status().is_success() => true,
+            Ok(r) => {
+                tracing::warn!(status = %r.status(), id, "OME 녹화 시작 실패");
+                false
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, id, "OME API에 닿지 못함(녹화 시작)");
+                false
+            }
+        }
+    }
+
+    /// 녹화를 멈춘다(#47). 멈췄으면(또는 이미 없는 녹화면) true. OME에 닿지 못했거나 거절하면 false(다음에 다시 시도).
+    pub async fn stop_record(&self, id: &str) -> bool {
+        let Some(i) = &self.inner else { return false };
+        match i
+            .http
+            .post(Self::app_url(&i.base, "stopRecord"))
+            .header("Authorization", &i.auth)
+            .json(&serde_json::json!({ "id": id }))
+            .send()
+            .await
+        {
+            Ok(r) if r.status().is_success() || r.status() == reqwest::StatusCode::NOT_FOUND => {
+                true
+            }
+            Ok(r) => {
+                tracing::warn!(status = %r.status(), id, "OME 녹화 멈춤 실패");
+                false
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, id, "OME API에 닿지 못함(녹화 멈춤)");
+                false
+            }
+        }
+    }
+
+    /// OME가 지금 들고 있는 녹화 id들(#47). 물어볼 수 없으면 None(그때는 아무것도 바꾸지 않는다).
+    pub async fn records(&self) -> Option<HashSet<String>> {
+        let i = self.inner.as_ref()?;
+        let r = i
+            .http
+            .post(Self::app_url(&i.base, "records"))
+            .header("Authorization", &i.auth)
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .ok()?;
+        if !r.status().is_success() {
+            return None;
+        }
+        let v: serde_json::Value = r.json().await.ok()?;
+        Some(
+            v["response"]
+                .as_array()?
+                .iter()
+                .filter_map(|x| x["id"].as_str().map(str::to_string))
+                .collect(),
+        )
+    }
 }

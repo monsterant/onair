@@ -14,6 +14,7 @@ use tower::ServiceExt;
 #[sqlx::test]
 async fn dropped_request_keeps_hash_slot_until_hash_finishes(db: PgPool) {
     let r = app(AppState {
+        rec: Default::default(),
         toss: Default::default(),
         ome: Default::default(),
         db,
