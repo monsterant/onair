@@ -108,10 +108,37 @@ async fn main() {
         });
     }
 
+    // 토스 결제(#41, 테스트 모드). 두 키가 다 있을 때만 켠다. 비밀 키는 로그에 남기지 않는다.
+    let toss = match (
+        std::env::var("TOSS_SECRET_KEY"),
+        std::env::var("TOSS_CLIENT_KEY"),
+    ) {
+        // 테스트 키(test_로 시작)만 받는다. 실제 키(live_)를 넣으면 진짜 돈이 나가므로 켜지 않는다(#41 리뷰)
+        (Ok(s), Ok(c))
+            if !s.trim().is_empty()
+                && !c.trim().is_empty()
+                && !(s.trim().starts_with("test_") && c.trim().starts_with("test_")) =>
+        {
+            tracing::error!("TOSS 키가 테스트 키(test_...)가 아니어서 도네이션을 켜지 않습니다");
+            Default::default()
+        }
+        (Ok(s), Ok(c)) if !s.trim().is_empty() && !c.trim().is_empty() => {
+            let base = std::env::var("TOSS_API_BASE")
+                .unwrap_or_else(|_| "https://api.tosspayments.com".into());
+            tracing::info!(%base, "도네이션(토스 결제) 켜짐");
+            onair_backend::toss::Toss::new(&base, s.trim(), c.trim())
+        }
+        _ => {
+            tracing::warn!("TOSS_SECRET_KEY·TOSS_CLIENT_KEY가 없어 도네이션이 꺼져 있습니다");
+            Default::default()
+        }
+    };
+
     let router = app(AppState {
         db,
         auth,
         ome: ome_api,
+        toss,
     })
     .merge(onair_backend::ome_routes(ome_state));
 

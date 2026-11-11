@@ -5,9 +5,11 @@
 pub mod auth;
 pub mod broadcasts;
 pub mod comments;
+pub mod donations;
 pub mod guard;
 pub mod ome;
 pub mod ome_api;
+pub mod toss;
 
 use axum::{
     Json, Router,
@@ -24,6 +26,8 @@ pub struct AppState {
     pub auth: auth::AuthConfig,
     /// 설정하지 않으면(Default) OME를 부르지 않는다
     pub ome: ome_api::OmeApi,
+    /// 토스 결제 API(#41). 설정하지 않으면(Default) 도네이션이 꺼진다
+    pub toss: toss::Toss,
 }
 
 pub fn app(state: AppState) -> Router {
@@ -57,6 +61,12 @@ pub fn app(state: AppState) -> Router {
             "/broadcasts/{id}/comments",
             get(comments::list).post(comments::create),
         )
+        .route(
+            "/broadcasts/{id}/donations",
+            get(donations::list).post(donations::create),
+        )
+        .route("/donations/confirm", post(donations::confirm))
+        .route("/donations/notify", post(donations::notify))
         .route(
             "/comments/{id}",
             axum::routing::patch(comments::update).delete(comments::delete),

@@ -34,6 +34,8 @@ pub struct AuthConfig {
     /// 댓글 작성 횟수 제한(사용자 하나당). 기본은 1분에 20번.
     /// 로그인 몫과 따로 둔다. 같이 쓰면 댓글을 많이 쓴 사람 때문에 같은 IP의 로그인이 막힌다(#37 리뷰).
     pub comment_limiter: crate::guard::RateLimiter,
+    /// 결제 승인 통지 횟수 제한(IP 하나당). 로그인 없이 부르는 길이라 따로 둔다(#41 리뷰).
+    pub notify_limiter: crate::guard::RateLimiter,
 }
 
 /// 데모 사용자 아이디. 일반 가입에서는 `demo`로 시작하는 아이디를 쓸 수 없다.
@@ -51,6 +53,10 @@ pub enum ApiError {
     NotFound,
     TooManyRequests,
     Internal,
+    /// 503: 기능이 설정되지 않음(예: 결제 키 없음)
+    Unavailable(&'static str),
+    /// 502: 바깥 서비스(결제 등)에 닿지 못함
+    BadGateway(&'static str),
 }
 
 impl IntoResponse for ApiError {
@@ -66,6 +72,8 @@ impl IntoResponse for ApiError {
                 "요청이 너무 많습니다. 잠시 뒤에 다시 시도하세요",
             ),
             ApiError::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "서버 오류입니다"),
+            ApiError::Unavailable(m) => (StatusCode::SERVICE_UNAVAILABLE, m),
+            ApiError::BadGateway(m) => (StatusCode::BAD_GATEWAY, m),
         };
         (code, Json(json!({ "error": msg }))).into_response()
     }

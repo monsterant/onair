@@ -13,6 +13,7 @@ use tower::ServiceExt;
 
 fn router(db: PgPool) -> Router {
     app(AppState {
+        toss: Default::default(),
         ome: Default::default(),
         db,
         auth: AuthConfig {

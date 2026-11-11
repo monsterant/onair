@@ -39,6 +39,7 @@ struct StreamList {
 impl OmeApi {
     /// `base`: 예) http://ome:8081, `token`: OME Server.xml의 AccessToken과 같은 값
     pub fn new(base: &str, token: &str) -> Self {
+        crate::toss::install_crypto_provider();
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(3))
             .build()

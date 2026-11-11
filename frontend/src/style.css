@@ -365,3 +365,35 @@ select {
     gap: 8px;
   }
 }
+
+/* 도네이션 (#41) */
+.donation-total {
+  color: var(--accent, #7cf);
+}
+
+.donations {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.donation {
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.donation-amount {
+  font-weight: 600;
+}
+
+.toss-widget {
+  background: #fff;
+  border-radius: 8px;
+  padding: 4px;
+}

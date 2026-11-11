@@ -16,6 +16,7 @@ async fn health_reports_db_error_when_db_is_down() {
         .unwrap();
 
     let res = app(AppState {
+        toss: Default::default(),
         ome: Default::default(),
         db,
         auth: Default::default(),
