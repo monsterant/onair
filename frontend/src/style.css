@@ -490,3 +490,12 @@ a.button {
   overflow-wrap: anywhere;
   display: block;
 }
+
+/* 시청자 끊김 알림 (#63) */
+.net-note {
+  margin: 8px 0;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: #3a2f12;
+  color: #ffd27a;
+}
