@@ -299,14 +299,24 @@ function shortTime(iso: string): string {
 
 /**
  * 방송 상세 화면 아래 댓글 칸. 누구나 읽고, 로그인한 사용자만 쓴다. 내 댓글에만 수정·삭제 버튼이 있다.
- * 4초마다 목록을 다시 불러온다(폴링). 수정하는 동안에는 그 댓글을 다시 그리지 않는다(쓰던 글이 지워지지 않게).
+ * 4초마다 목록을 다시 불러온다(폴링).
+ * - 바뀌지 않은 댓글과 수정 중인 댓글은 같은 화면 요소를 그대로 둔다. 다시 그리면 수정 칸의 커서(포커스)와
+ *   댓글별 오류 문구가 사라지기 때문이다(#37 리뷰).
+ * - 늦게 도착한 옛 응답이 새 목록을 덮지 않게 요청마다 번호를 매긴다.
  */
 function commentsPanel(broadcastId: number, gen: number): HTMLElement {
   const list = el('ul', { className: 'comments' });
   const error = el('p', { className: 'error', role: 'alert' });
   const count = el('span', { className: 'hint' });
-  let editing: number | null = null;
+  /** 수정 중인 댓글 id들 */
+  const editing = new Set<number>();
+  /** 댓글 id → 화면 요소와 그 내용 표시(내용이나 수정 시각이 바뀌면 다시 그린다) */
+  const nodes = new Map<number, { li: HTMLElement; sig: string }>();
+  const sigOf = (c: Comment) => `${c.body}\u0000${c.updated_at ?? ''}`;
   let stopped = false;
+  let seq = 0;
+  let applied = 0;
+  let firstPaint = true;
 
   const row = (c: Comment): HTMLElement => {
     const head = el(
@@ -323,18 +333,24 @@ function commentsPanel(broadcastId: number, gen: number): HTMLElement {
     const rowError = el('p', { className: 'error', role: 'alert' });
     const editBtn = el('button', { type: 'button', className: 'small', textContent: '수정' });
     const delBtn = el('button', { type: 'button', className: 'small danger', textContent: '삭제' });
+    // 수정을 끝내면 이 댓글을 다음 목록에서 새로 그리게 한다
+    const finishEdit = () => {
+      editing.delete(c.id);
+      nodes.delete(c.id);
+    };
     editBtn.onclick = () => {
-      editing = c.id;
-      const box = el('textarea', { maxLength: 300, rows: 2, value: c.body, ariaLabel: '댓글 수정' });
+      editing.add(c.id);
+      // 글자 수는 서버가 센다(브라우저 maxLength는 이모지를 2자로 세서 서버와 다르다)
+      const box = el('textarea', { rows: 2, value: c.body, ariaLabel: '댓글 수정' });
       const save = el('button', { type: 'button', className: 'small', textContent: '저장' });
       const cancel = el('button', { type: 'button', className: 'small', textContent: '취소' });
       save.onclick = action(save, rowError, async () => {
         await updateComment(c.id, box.value);
-        editing = null;
+        finishEdit();
         await load();
       });
       cancel.onclick = () => {
-        editing = null;
+        finishEdit();
         void load();
       };
       li.replaceChildren(head, box, el('div', { className: 'row' }, save, cancel), rowError);
@@ -349,15 +365,37 @@ function commentsPanel(broadcastId: number, gen: number): HTMLElement {
     return li;
   };
 
-  const load = async () => {
+  /** 목록을 다시 불러와 그린다. toBottom이면 맨 아래(최신 댓글)로 내린다. */
+  const load = async (toBottom = false) => {
+    const my = ++seq;
     try {
       const items = await listComments(broadcastId);
-      if (stopped || gen !== routeGen) return;
+      if (stopped || gen !== routeGen || my < applied) return;
+      applied = my;
       count.textContent = ` ${items.length}개`;
-      // 수정 중인 댓글은 그대로 두고 나머지만 새로 그린다
-      const keep = editing === null ? null : list.querySelector<HTMLElement>(`li[data-id="${editing}"]`);
-      list.replaceChildren(...items.map((c) => (keep && c.id === editing ? keep : row(c))));
-      if (editing !== null && !items.some((c) => c.id === editing)) editing = null;
+      // 읽는 사람이 이미 맨 아래 근처에 있으면 새 댓글이 와도 맨 아래를 계속 보여 준다
+      const nearBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 40;
+      const wanted = items.map((c) => {
+        const old = nodes.get(c.id);
+        if (old && (editing.has(c.id) || old.sig === sigOf(c))) return old.li;
+        const li = row(c);
+        nodes.set(c.id, { li, sig: sigOf(c) });
+        return li;
+      });
+      const ids = new Set(items.map((c) => c.id));
+      for (const id of [...nodes.keys()]) {
+        if (!ids.has(id)) {
+          nodes.delete(id);
+          editing.delete(id);
+        }
+      }
+      // 필요한 곳만 옮기거나 끼워 넣는다. 제자리에 있는 요소는 건드리지 않아 포커스가 유지된다.
+      wanted.forEach((li, i) => {
+        if (list.children[i] !== li) list.insertBefore(li, list.children[i] ?? null);
+      });
+      while (list.children.length > wanted.length) list.lastElementChild?.remove();
+      if (toBottom || firstPaint || nearBottom) list.scrollTop = list.scrollHeight;
+      firstPaint = false;
     } catch (e) {
       // 방송이 지워졌으면(404) 멈춘다. 그 밖에는 잠깐 끊긴 것으로 보고 다음에 다시 부른다.
       if (e instanceof ApiError && e.status === 404) stopped = true;
@@ -366,7 +404,7 @@ function commentsPanel(broadcastId: number, gen: number): HTMLElement {
 
   const panel = el('section', { className: 'comments-panel panel' }, el('h3', {}, '댓글', count), list);
   if (me) {
-    const input = el('textarea', { maxLength: 300, rows: 2, placeholder: '댓글을 남겨 보세요 (300자까지)', ariaLabel: '댓글 입력' });
+    const input = el('textarea', { rows: 2, placeholder: '댓글을 남겨 보세요 (300자까지)', ariaLabel: '댓글 입력' });
     const send = el('button', { type: 'submit', textContent: '댓글 쓰기' });
     const form = el('form', { className: 'comment-form' }, input, el('div', { className: 'row' }, send), error);
     form.onsubmit = (ev) => {
@@ -374,7 +412,7 @@ function commentsPanel(broadcastId: number, gen: number): HTMLElement {
       action(send, error, async () => {
         await createComment(broadcastId, input.value);
         input.value = '';
-        await load();
+        await load(true);
       })();
     };
     panel.append(form);
