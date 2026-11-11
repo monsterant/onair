@@ -8,7 +8,12 @@ import './style.css';
 import {
   ApiError,
   type Broadcast,
+  type Comment,
   type Status,
+  createComment,
+  deleteComment,
+  listComments,
+  updateComment,
   type User,
   createBroadcast,
   currentUser,
@@ -257,6 +262,7 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
   const studio = publisher ? studioPanel(() => b, publisher) : null;
   if (studio) main.append(studio.el);
   if (owner) main.append(owner.el);
+  main.append(commentsPanel(id, gen));
   paint();
 
   // 5초마다 상태를 다시 본다(방송이 시작·종료되면 플레이어를 켜고 끈다)
@@ -282,6 +288,109 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
   }, 5_000);
   cleanup.push(stop);
   if (publisher) cleanup.push(() => void publisher.stop());
+}
+
+// ---------- 댓글(#37) ----------
+
+/** 날짜를 "11. 11. 오후 2:05"처럼 짧게 */
+function shortTime(iso: string): string {
+  return new Date(iso).toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+}
+
+/**
+ * 방송 상세 화면 아래 댓글 칸. 누구나 읽고, 로그인한 사용자만 쓴다. 내 댓글에만 수정·삭제 버튼이 있다.
+ * 4초마다 목록을 다시 불러온다(폴링). 수정하는 동안에는 그 댓글을 다시 그리지 않는다(쓰던 글이 지워지지 않게).
+ */
+function commentsPanel(broadcastId: number, gen: number): HTMLElement {
+  const list = el('ul', { className: 'comments' });
+  const error = el('p', { className: 'error', role: 'alert' });
+  const count = el('span', { className: 'hint' });
+  let editing: number | null = null;
+  let stopped = false;
+
+  const row = (c: Comment): HTMLElement => {
+    const head = el(
+      'div',
+      { className: 'comment-head' },
+      el('strong', { textContent: c.author_username }),
+      el('span', { className: 'hint', textContent: ` ${shortTime(c.created_at)}${c.updated_at ? ' (수정됨)' : ''}` }),
+    );
+    const text = el('p', { className: 'comment-body', textContent: c.body });
+    const li = el('li', { className: 'comment' }, head, text);
+    li.dataset.id = String(c.id);
+    if (me?.id !== c.author_id) return li;
+
+    const rowError = el('p', { className: 'error', role: 'alert' });
+    const editBtn = el('button', { type: 'button', className: 'small', textContent: '수정' });
+    const delBtn = el('button', { type: 'button', className: 'small danger', textContent: '삭제' });
+    editBtn.onclick = () => {
+      editing = c.id;
+      const box = el('textarea', { maxLength: 300, rows: 2, value: c.body, ariaLabel: '댓글 수정' });
+      const save = el('button', { type: 'button', className: 'small', textContent: '저장' });
+      const cancel = el('button', { type: 'button', className: 'small', textContent: '취소' });
+      save.onclick = action(save, rowError, async () => {
+        await updateComment(c.id, box.value);
+        editing = null;
+        await load();
+      });
+      cancel.onclick = () => {
+        editing = null;
+        void load();
+      };
+      li.replaceChildren(head, box, el('div', { className: 'row' }, save, cancel), rowError);
+      box.focus();
+    };
+    delBtn.onclick = action(delBtn, rowError, async () => {
+      if (!confirm('이 댓글을 지울까요?')) return;
+      await deleteComment(c.id);
+      await load();
+    });
+    li.append(el('div', { className: 'row' }, editBtn, delBtn), rowError);
+    return li;
+  };
+
+  const load = async () => {
+    try {
+      const items = await listComments(broadcastId);
+      if (stopped || gen !== routeGen) return;
+      count.textContent = ` ${items.length}개`;
+      // 수정 중인 댓글은 그대로 두고 나머지만 새로 그린다
+      const keep = editing === null ? null : list.querySelector<HTMLElement>(`li[data-id="${editing}"]`);
+      list.replaceChildren(...items.map((c) => (keep && c.id === editing ? keep : row(c))));
+      if (editing !== null && !items.some((c) => c.id === editing)) editing = null;
+    } catch (e) {
+      // 방송이 지워졌으면(404) 멈춘다. 그 밖에는 잠깐 끊긴 것으로 보고 다음에 다시 부른다.
+      if (e instanceof ApiError && e.status === 404) stopped = true;
+    }
+  };
+
+  const panel = el('section', { className: 'comments-panel panel' }, el('h3', {}, '댓글', count), list);
+  if (me) {
+    const input = el('textarea', { maxLength: 300, rows: 2, placeholder: '댓글을 남겨 보세요 (300자까지)', ariaLabel: '댓글 입력' });
+    const send = el('button', { type: 'submit', textContent: '댓글 쓰기' });
+    const form = el('form', { className: 'comment-form' }, input, el('div', { className: 'row' }, send), error);
+    form.onsubmit = (ev) => {
+      ev.preventDefault();
+      action(send, error, async () => {
+        await createComment(broadcastId, input.value);
+        input.value = '';
+        await load();
+      })();
+    };
+    panel.append(form);
+  } else {
+    panel.append(el('p', { className: 'hint' }, el('a', { href: '#/login', textContent: '로그인' }), '하면 댓글을 쓸 수 있습니다.'));
+  }
+
+  void load();
+  const timer = setInterval(() => {
+    if (!stopped) void load();
+  }, 4_000);
+  cleanup.push(() => {
+    stopped = true;
+    clearInterval(timer);
+  });
+  return panel;
 }
 
 // ---------- 방송하기(소유자) ----------
