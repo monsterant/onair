@@ -8,7 +8,8 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-onair}
     ports:
       # 5432는 다른 프로젝트 DB와 겹칠 수 있어서 기본을 55432로 둔다.
-      - "${DB_PORT:-55432}:5432"
+      # 이 PC에서만 열린다(예시 비밀번호가 공개돼 있어 같은 와이파이에 열지 않는다, 보안 점검 M3)
+      - "127.0.0.1:${DB_PORT:-55432}:5432"
     volumes:
       # 컨테이너를 지워도 데이터가 남도록 이름 붙은 볼륨에 저장한다 (서버 재시작 후 조회 요구사항).
       - db-data:/var/lib/postgresql/data

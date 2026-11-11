@@ -151,8 +151,13 @@ pub async fn create(
     headers: HeaderMap,
     Json(input): Json<NewBroadcast>,
 ) -> Result<(StatusCode, Json<Broadcast>), ApiError> {
-    // 만들기도 로그인처럼 IP 하나당 1분 횟수 제한을 함께 쓴다(#27 V7: 대량 생성으로 목록 밀어내기 방지)
-    if !state.auth.limiter.allow(&client_key(&headers)) {
+    // 만들기도 IP 하나당 1분 횟수 제한을 건다(#27 V7: 대량 생성으로 목록 밀어내기 방지).
+    // 로그인 몫과는 따로 센다. 같이 세면 같은 와이파이의 심사자들이 방송을 만들다 로그인이 막힐 수 있다(보안 점검 L3).
+    if !state
+        .auth
+        .comment_limiter
+        .allow(&format!("create:{}", client_key(&headers)))
+    {
         return Err(ApiError::TooManyRequests);
     }
     let title = clean_title(&input.title)?;
