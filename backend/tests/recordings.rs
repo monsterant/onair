@@ -121,7 +121,7 @@ async fn fake_ome(dir: PathBuf) -> (FakeOme, OmeApi) {
                                 && !*f.no_file.lock().unwrap()
                         {
                                 let file = f.dir.join(path.trim_start_matches('/'));
-                                std::fs::write(file, b"0123456789abcdefghij").unwrap();
+                                std::fs::write(file, fake_video()).unwrap();
                         }
                         ok(StatusCode::OK)
                     }
@@ -137,6 +137,13 @@ async fn fake_ome(dir: PathBuf) -> (FakeOme, OmeApi) {
         fake,
         OmeApi::new(&format!("http://{addr}"), "fake-token-0123456789"),
     )
+}
+
+/// 가짜 녹화 파일 내용(70KB, 앞 20바이트는 알아보기 쉬운 글자). 64KB보다 작으면 너무 짧은 녹화로 본다.
+fn fake_video() -> Vec<u8> {
+    let mut v = b"0123456789abcdefghij".to_vec();
+    v.resize(70_000, 46);
+    v
 }
 
 fn temp_dir() -> PathBuf {
@@ -289,7 +296,7 @@ async fn live_broadcast_is_recorded_and_replayable(db: PgPool) {
     assert_eq!(list[0]["title"], "녹화 시험");
     assert_eq!(list[0]["owner_username"], "demo1");
     assert_eq!(list[0]["format"], "mp4");
-    assert_eq!(list[0]["bytes"], 20);
+    assert_eq!(list[0]["bytes"], 70_000);
     let url = list[0]["url"].as_str().unwrap().to_string();
     let rid = list[0]["id"].as_i64().unwrap();
     assert_eq!(
@@ -314,7 +321,7 @@ async fn live_broadcast_is_recorded_and_replayable(db: PgPool) {
     // 파일 재생: 전체, 그리고 탐색(Range)
     let (st, _, body, _) = call(&r, "GET", &url, None, None, None).await;
     assert_eq!(st, StatusCode::OK);
-    assert_eq!(body, b"0123456789abcdefghij");
+    assert_eq!(body, fake_video());
     let (st, _, body, _) = call(&r, "GET", &url, None, None, Some("bytes=10-14")).await;
     assert_eq!(st, StatusCode::PARTIAL_CONTENT);
     assert_eq!(body, b"abcde");
@@ -720,6 +727,38 @@ async fn cleanup_keeps_known_old_files_and_removes_stale_temp_files(db: PgPool) 
     assert!(
         dir.join("tmp_fresh.mp4").exists(),
         "쓰는 중일 수 있는 새 임시 파일은 남긴다"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[sqlx::test]
+async fn too_short_recordings_are_not_listed(db: PgPool) {
+    let dir = temp_dir();
+    let (fake, api) = fake_ome(dir.clone()).await;
+    let cfg = RecConfig {
+        dir: Some(dir.clone()),
+    };
+    let r = router(db.clone(), api.clone(), Some(dir.clone()));
+    let (bid, stream) = live_broadcast(&r, &db, "짧음").await;
+    fake.streams.lock().unwrap().insert(stream, "H264".into());
+    *fake.no_file.lock().unwrap() = true;
+    sync(&db, &api, &cfg).await.unwrap();
+    let file: String = sqlx::query_scalar("SELECT file_name FROM recordings")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    std::fs::write(dir.join(&file), vec![0u8; 10_000]).unwrap();
+    sqlx::query("UPDATE broadcasts SET status = 'ended' WHERE id = $1")
+        .bind(bid)
+        .execute(&db)
+        .await
+        .unwrap();
+    sync(&db, &api, &cfg).await.unwrap();
+    sync(&db, &api, &cfg).await.unwrap();
+    assert_eq!(statuses(&db).await, ["failed"]);
+    assert_eq!(
+        call(&r, "GET", "/recordings", None, None, None).await.1,
+        json!([])
     );
     let _ = std::fs::remove_dir_all(dir);
 }

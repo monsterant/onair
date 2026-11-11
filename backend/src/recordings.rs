@@ -32,6 +32,8 @@ pub const MAX_RECORDING: Duration = Duration::from_secs(2 * 60 * 60);
 pub const TOTAL_CAP_BYTES: i64 = 3 * 1024 * 1024 * 1024;
 /// 멈춘 뒤 파일을 기다리는 시간
 pub const FINISH_WAIT: Duration = Duration::from_secs(120);
+/// 이보다 작은 파일(1초 남짓)은 다시보기로 올리지 않는다(#47 공격 사냥: 거의 빈 녹화가 목록에 뜸)
+pub const MIN_BYTES: u64 = 64 * 1024;
 /// 동시에 녹화하는 방송 수 상한(서버 디스크·CPU 보호). 넘으면 다음 차례까지 기다린다.
 pub const MAX_CONCURRENT: i64 = 3;
 
@@ -276,10 +278,18 @@ async fn settle_finishing(db: &sqlx::PgPool, dir: &FsPath) -> Result<(), sqlx::E
     .await?;
     for (id, file, waited_long) in rows {
         match file_size(dir, &file) {
-            Some(bytes) if bytes > 0 => {
+            Some(bytes) if bytes >= MIN_BYTES => {
                 sqlx::query("UPDATE recordings SET status = 'ready', bytes = $2 WHERE id = $1 AND status = 'finishing'")
                     .bind(id)
                     .bind(bytes as i64)
+                    .execute(db)
+                    .await?;
+            }
+            // 너무 짧은 녹화: 다시보기에 올리지 않는다(파일은 정리 작업이 지운다)
+            Some(bytes) if bytes > 0 => {
+                tracing::info!(%file, bytes, "너무 짧은 녹화라 올리지 않음");
+                sqlx::query("UPDATE recordings SET status = 'failed' WHERE id = $1 AND status = 'finishing'")
+                    .bind(id)
                     .execute(db)
                     .await?;
             }

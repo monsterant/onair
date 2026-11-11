@@ -32,9 +32,10 @@ async fn main() {
         Ok(s) => s.to_string(),
         Err(why) => panic!("OME_ADMISSION_SECRET 확인 실패: {why}"),
     };
-    let ome_state = onair_backend::ome::OmeState {
+    let mut ome_state = onair_backend::ome::OmeState {
         secret: ome_secret,
         db: db.clone(),
+        ome: Default::default(),
     };
 
     // OME 관리 API(스트림 끊기, 목록). 둘 다 있을 때만 쓴다. 토큰은 OME Server.xml의 AccessToken과 같은 값이다.
@@ -51,6 +52,8 @@ async fn main() {
             Err(why) => panic!("OME_API_TOKEN 확인 실패: {why}"),
         }
     };
+    // 송출이 끊기면 웹훅에서 녹화를 바로 멈추도록 같은 OME 클라이언트를 넘긴다(#47)
+    ome_state.ome = ome_api.clone();
 
     // DB 구조 변경을 적용한다. DB가 아직 뜨는 중일 수 있어서 2초 간격으로 30번까지 다시 시도한다.
     // 끝내 실패하면 표가 없는 채로 돌 수 없으므로 멈춘다.

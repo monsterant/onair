@@ -25,6 +25,7 @@ fn router(db: PgPool) -> Router {
     ome_routes(OmeState {
         secret: KEY.into(),
         db,
+        ome: Default::default(),
     })
 }
 
