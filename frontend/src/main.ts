@@ -46,6 +46,8 @@ const app = document.querySelector<HTMLElement>('#app')!;
 let me: User | null = null;
 /** 화면을 바꿀 때 지울 것(주기적 새로고침, 플레이어) */
 let cleanup: (() => void)[] = [];
+/** 로그인 화면에 오기 직전에 보던 화면. 로그인하면 그리로 돌아간다(심사 시뮬레이션 2차) */
+let backAfterLogin = '#/';
 
 function el<K extends keyof HTMLElementTagNameMap>(
   tag: K,
@@ -175,7 +177,7 @@ function loginPage(main: HTMLElement) {
   const error = el('p', { className: 'error', role: 'alert' });
   const done = (u: User) => {
     me = u;
-    go('#/');
+    go(backAfterLogin);
   };
   const loginBtn = el('button', { type: 'submit', textContent: '로그인' });
   const signupBtn = el('button', { type: 'button', textContent: '회원가입' });
@@ -235,7 +237,7 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
   try {
     b = await getBroadcast(id);
   } catch (e) {
-    main.append(el('p', { className: 'error', textContent: message(e) }));
+    main.append(el('p', { className: 'error', textContent: message(e) }), el('a', { href: '#/', textContent: '방송 목록으로' }));
     return;
   }
   // 기다리는 사이 다른 화면으로 옮겼으면 아무것도 하지 않는다(늦게 끝난 요청이 새 화면을 건드리지 않게, #27 V17)
@@ -245,6 +247,11 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
   const statusBox = el('span');
   const titleEl = el('h2');
   const descEl = el('p', { className: 'description' });
+  const moreBtn = el('button', { type: 'button', className: 'small more', textContent: '더보기', hidden: true });
+  moreBtn.onclick = () => {
+    const folded = descEl.classList.toggle('folded');
+    moreBtn.textContent = folded ? '더보기' : '접기';
+  };
   const playerBox = el('div', { className: 'player-box' });
   const offAir = el('p', { className: 'hint' });
   // 브라우저는 소리 있는 자동 재생을 막아 음소거로 시작한다. 켜는 방법이 눈에 띄게 버튼을 둔다(심사 시뮬레이션: "소리가 안 난다"로 보임)
@@ -274,7 +281,17 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
   const paint = () => {
     statusBox.replaceChildren(badge(b.status));
     titleEl.textContent = b.title;
-    descEl.textContent = b.description;
+    if (descEl.textContent !== b.description) {
+      descEl.textContent = b.description;
+      // 긴 설명은 접어 둔다(휴대폰에서 방송하기·댓글까지 한참 내려가야 하던 문제)
+      const long = b.description.length > 200 || b.description.split('\n').length > 4;
+      descEl.classList.toggle('folded', long);
+      // 글자가 많아도 넓은 화면에서 접힌 높이 안에 다 들어가면 접지 않는다(리뷰 지적 3)
+      const fits = long && descEl.isConnected && descEl.scrollHeight <= descEl.clientHeight + 1;
+      if (fits) descEl.classList.remove('folded');
+      moreBtn.hidden = !long || fits;
+      moreBtn.textContent = '더보기';
+    }
     const live = b.status === 'live' && !selfPublishing();
     if (live && !playing) {
       playerBox.replaceChildren(el('div', { id: 'player' }));
@@ -309,7 +326,6 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
     playerBox,
     soundBtn,
     offAir,
-    descEl,
   );
   // 이 화면에서 쓰는 송출기(소유자만). 화면을 떠나면 송출을 멈춘다.
   const publisher = isOwner ? new Publisher() : null;
@@ -333,7 +349,9 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
       }
     };
   }
+  // 소유자는 방송하기 칸을 설명보다 먼저 본다(긴 설명 아래에 묻히지 않게)
   if (studio) main.append(studio.el);
+  main.append(descEl, moreBtn);
   if (owner) main.append(owner.el);
   main.append(recordingsPanel(id), donationsPanel(b, gen), commentsPanel(id, gen));
   paint();
@@ -932,10 +950,17 @@ function ownerPanel(b: Broadcast, onChange: (b: Broadcast) => void, publisher: P
   const error = el('p', { className: 'error', role: 'alert' });
 
   // 수정
-  const title = el('input', { value: b.title, maxLength: 100 });
-  const description = el('textarea', { value: b.description, maxLength: 1000, rows: 3 });
+  const title = el('input', { value: b.title, maxLength: 100, ariaLabel: '방송 제목', placeholder: '방송 제목 (100자 이하)' });
+  const description = el('textarea', { value: b.description, maxLength: 1000, rows: 3, ariaLabel: '방송 설명', placeholder: '설명 (1000자 이하, 선택)' });
   const save = el('button', { type: 'button', textContent: '저장' });
-  save.onclick = action(save, error, async () => onChange(await updateBroadcast(b.id, title.value, description.value)));
+  const saved = el('span', { className: 'hint', role: 'status' });
+  // 저장 뒤에 다시 고치기 시작하면 "저장했습니다"를 지운다(리뷰 지적 2)
+  title.oninput = description.oninput = () => (saved.textContent = '');
+  save.onclick = action(save, error, async () => {
+    saved.textContent = '';
+    onChange(await updateBroadcast(b.id, title.value, description.value));
+    saved.textContent = '저장했습니다.';
+  });
 
   // 송출 주소(소유자만)
   const publishBox = el('div', { className: 'publish' });
@@ -952,6 +977,16 @@ function ownerPanel(b: Broadcast, onChange: (b: Broadcast) => void, publisher: P
     publishBox.replaceChildren(
       el('p', { className: 'hint', textContent: 'WHIP 송출 주소입니다. 남에게 보여 주지 마세요(이 주소를 가진 사람은 이 방송으로 송출할 수 있습니다). OBS 30 이상의 WHIP 출력에도 쓸 수 있습니다.' }),
       el('code', { textContent: `${location.origin}${whipPath}` }),
+      (() => {
+        const copy = el('button', { type: 'button', className: 'small', textContent: '주소 복사' });
+        // http(보안 연결이 아닌 곳)에서는 navigator.clipboard가 없어 바로 오류가 난다. 그때도 안내가 뜨게 한다(리뷰 지적 1)
+        copy.onclick = () =>
+          void Promise.resolve()
+            .then(() => navigator.clipboard.writeText(`${location.origin}${whipPath}`))
+            .then(() => (copy.textContent = '복사했습니다'))
+            .catch(() => (copy.textContent = '복사하지 못했습니다'));
+        return copy;
+      })(),
       ...(rotated ? [el('p', { className: 'hint', textContent: '새 송출 키를 만들었습니다. 옛 주소는 더 쓸 수 없습니다.' })] : []),
       el('div', { className: 'row' }, rotate),
     );
@@ -991,7 +1026,7 @@ function ownerPanel(b: Broadcast, onChange: (b: Broadcast) => void, publisher: P
     el('h3', { textContent: '방송 관리 (소유자)' }),
     title,
     description,
-    el('div', { className: 'row' }, save, showPublish, end, del),
+    el('div', { className: 'row' }, save, saved, showPublish, end, del),
     endedNote,
     publishBox,
     error,
@@ -1022,7 +1057,7 @@ async function route() {
     .then((r) => r.json())
     // 정상이면 아무것도 보이지 않는다. 문제가 있을 때만 알린다.
     .then((h: { status: string; db: string }) => (status.textContent = h.db === 'ok' ? '' : `서버 ${h.status}, DB ${h.db}`))
-    .catch(() => (status.textContent = '백엔드에 연결하지 못했습니다'));
+    .catch(() => (status.textContent = '서버에 연결하지 못했습니다. 잠시 뒤 새로고침해 주세요.'));
 
   // 토스 결제창에서 돌아온 주소(/donate/success?..., /donate/fail?...)는 주소 # 대신 경로로 온다(#41)
   if (location.pathname === '/donate/success' || location.pathname === '/donate/fail') {
@@ -1030,6 +1065,7 @@ async function route() {
     return;
   }
   const hash = location.hash || '#/';
+  if (hash !== '#/login') backAfterLogin = hash;
   const detail = /^#\/b\/(\d+)$/.exec(hash);
   const replay = /^#\/r\/(\d+)$/.exec(hash);
   if (hash === '#/login') loginPage(main);
