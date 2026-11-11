@@ -815,6 +815,10 @@ function studioPanel(current: () => Broadcast, publisher: Publisher): { el: HTML
   };
   window.addEventListener('beforeunload', beforeUnload);
   cleanup.push(() => window.removeEventListener('beforeunload', beforeUnload));
+  // 그래도 닫거나 새로고침하면 송출 자원을 바로 정리한다(#31 P14: OME가 끊김을 알 때까지 "방송 중"이 남아 다시 시작하면 409)
+  const onPageHide = () => publisher.abandon();
+  window.addEventListener('pagehide', onPageHide);
+  cleanup.push(() => window.removeEventListener('pagehide', onPageHide));
 
   // 화면 공유(PC): 화면 공유가 없는 브라우저(휴대폰)에서는 줄째 숨긴다
   const screenRow = el(

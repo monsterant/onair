@@ -51,9 +51,31 @@ class Attempt {
       t.stop();
     }
     pc?.close();
-    await audioCtx?.close().catch(() => {});
     // WHIP 규칙: 끝낼 때 자원 주소에 DELETE. OME가 세션을 바로 지워 다시 시작할 때 409가 나지 않는다.
-    if (resource) await fetch(resource, { method: 'DELETE' }).catch(() => {});
+    // 다른 정리(소리 섞개 닫기)를 기다리기 전에 먼저 보낸다. keepalive라 그 사이 페이지가 사라져도 끝까지 간다(#31 리뷰:
+    // 휴대폰은 화면이 숨겨질 때 멈춤이 먼저 시작되고 곧바로 페이지가 사라질 수 있다).
+    const del = resource ? fetch(resource, { method: 'DELETE', keepalive: true }).catch(() => {}) : null;
+    await audioCtx?.close().catch(() => {});
+    await del;
+  }
+
+  /**
+   * 페이지를 닫거나 새로고침할 때 쓴다(#31 P14). 기다리지 않고 바로 끝낸다.
+   * keepalive로 보낸 요청은 페이지가 사라져도 브라우저가 끝까지 보낸다. 그래서 OME가 연결 끊김을 알아챌 때까지
+   * "방송 중"이 남지 않고, 곧바로 다시 송출해도 409(이미 송출 중)가 나지 않는다.
+   */
+  abandon() {
+    this.cancelled = true;
+    const { tracks, pc, resource } = this;
+    this.tracks = [];
+    this.pc = null;
+    this.resource = null;
+    for (const t of tracks) {
+      t.onended = null;
+      t.stop();
+    }
+    pc?.close();
+    if (resource) void fetch(resource, { method: 'DELETE', keepalive: true }).catch(() => {});
   }
 }
 
@@ -63,6 +85,15 @@ export class Publisher {
   onState: (s: PublishState, detail?: string) => void = () => {};
 
   private current: Attempt | null = null;
+
+  /** 페이지를 떠날 때(pagehide) 부른다. 송출 중이면 WHIP 자원에 DELETE를 보내고 장치를 끈다(#31 P14). */
+  abandon() {
+    const a = this.current;
+    this.current = null;
+    a?.abandon();
+    // 뒤로 가기 캐시로 페이지가 되살아나도 "송출 중"으로 남지 않게 대기로 돌린다(#31 리뷰)
+    if (this.state !== 'idle') this.set('idle');
+  }
 
   private set(s: PublishState, detail?: string) {
     this.state = s;
