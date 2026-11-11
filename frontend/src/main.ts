@@ -286,7 +286,10 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
       // 긴 설명은 접어 둔다(휴대폰에서 방송하기·댓글까지 한참 내려가야 하던 문제)
       const long = b.description.length > 200 || b.description.split('\n').length > 4;
       descEl.classList.toggle('folded', long);
-      moreBtn.hidden = !long;
+      // 글자가 많아도 넓은 화면에서 접힌 높이 안에 다 들어가면 접지 않는다(리뷰 지적 3)
+      const fits = long && descEl.isConnected && descEl.scrollHeight <= descEl.clientHeight + 1;
+      if (fits) descEl.classList.remove('folded');
+      moreBtn.hidden = !long || fits;
       moreBtn.textContent = '더보기';
     }
     const live = b.status === 'live' && !selfPublishing();
@@ -951,6 +954,8 @@ function ownerPanel(b: Broadcast, onChange: (b: Broadcast) => void, publisher: P
   const description = el('textarea', { value: b.description, maxLength: 1000, rows: 3, ariaLabel: '방송 설명', placeholder: '설명 (1000자 이하, 선택)' });
   const save = el('button', { type: 'button', textContent: '저장' });
   const saved = el('span', { className: 'hint', role: 'status' });
+  // 저장 뒤에 다시 고치기 시작하면 "저장했습니다"를 지운다(리뷰 지적 2)
+  title.oninput = description.oninput = () => (saved.textContent = '');
   save.onclick = action(save, error, async () => {
     saved.textContent = '';
     onChange(await updateBroadcast(b.id, title.value, description.value));
@@ -974,9 +979,10 @@ function ownerPanel(b: Broadcast, onChange: (b: Broadcast) => void, publisher: P
       el('code', { textContent: `${location.origin}${whipPath}` }),
       (() => {
         const copy = el('button', { type: 'button', className: 'small', textContent: '주소 복사' });
+        // http(보안 연결이 아닌 곳)에서는 navigator.clipboard가 없어 바로 오류가 난다. 그때도 안내가 뜨게 한다(리뷰 지적 1)
         copy.onclick = () =>
-          void navigator.clipboard
-            .writeText(`${location.origin}${whipPath}`)
+          void Promise.resolve()
+            .then(() => navigator.clipboard.writeText(`${location.origin}${whipPath}`))
             .then(() => (copy.textContent = '복사했습니다'))
             .catch(() => (copy.textContent = '복사하지 못했습니다'));
         return copy;
