@@ -163,6 +163,10 @@ pub fn client_key(headers: &HeaderMap) -> String {
 /// 한 사람이 같은 /64 안에서 주소를 바꿔 가며 횟수 제한을 피하거나 기록표를 채우지 못하게 한다.
 fn ipv6_prefix(ip: &str) -> Option<String> {
     let addr: std::net::Ipv6Addr = ip.parse().ok()?;
+    // IPv6 모양으로 적은 IPv4(::ffff:1.2.3.4)는 IPv4 그대로 센다(모두 한 /64로 묶이지 않게)
+    if let Some(v4) = addr.to_ipv4_mapped() {
+        return Some(v4.to_string());
+    }
     let s = addr.segments();
     Some(format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3]))
 }
@@ -190,6 +194,7 @@ mod tests {
         assert_ne!(key("2001:db8:1:2::1"), key("2001:db8:1:3::1"));
         assert_eq!(key("203.0.113.7"), "203.0.113.7");
         assert_eq!(key("1.1.1.1, 2001:db8:1:2::5"), "2001:db8:1:2::/64");
+        assert_eq!(key("::ffff:198.51.100.4"), "198.51.100.4");
     }
     use axum::http::HeaderValue;
 
