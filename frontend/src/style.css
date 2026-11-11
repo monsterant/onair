@@ -209,6 +209,45 @@ textarea {
   white-space: pre-wrap;
 }
 
+/* 댓글 (#37) */
+.comments {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 420px;
+  overflow-y: auto;
+}
+
+.comment {
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.comment-body {
+  margin: 4px 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.comment .row {
+  gap: 6px;
+}
+
+button.small {
+  padding: 4px 10px;
+  font-size: 0.85em;
+}
+
+.comment-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
 button.danger {
   background: #3a1d1d;
   color: var(--danger);

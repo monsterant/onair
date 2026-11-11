@@ -20,6 +20,17 @@ export type Broadcast = {
 
 export type PublishInfo = { stream_name: string; stream_key: string; whip_path: string };
 
+/** 방송별 댓글(#37) */
+export type Comment = {
+  id: number;
+  broadcast_id: number;
+  author_id: number;
+  author_username: string;
+  body: string;
+  created_at: string;
+  updated_at: string | null;
+};
+
 export class ApiError extends Error {
   constructor(
     public status: number,
@@ -71,3 +82,9 @@ export const updateBroadcast = (id: number, title: string, description: string) 
 export const deleteBroadcast = (id: number) => api<void>('DELETE', `/broadcasts/${id}`);
 export const endBroadcast = (id: number) => api<Broadcast>('POST', `/broadcasts/${id}/end`);
 export const publishInfo = (id: number) => api<PublishInfo>('GET', `/broadcasts/${id}/publish`);
+
+export const listComments = (broadcastId: number) => api<Comment[]>('GET', `/broadcasts/${broadcastId}/comments`);
+export const createComment = (broadcastId: number, body: string) =>
+  api<Comment>('POST', `/broadcasts/${broadcastId}/comments`, { body });
+export const updateComment = (id: number, body: string) => api<Comment>('PATCH', `/comments/${id}`, { body });
+export const deleteComment = (id: number) => api<void>('DELETE', `/comments/${id}`);

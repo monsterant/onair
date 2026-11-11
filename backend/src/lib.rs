@@ -4,6 +4,7 @@
 
 pub mod auth;
 pub mod broadcasts;
+pub mod comments;
 pub mod guard;
 pub mod ome;
 pub mod ome_api;
@@ -52,6 +53,14 @@ pub fn app(state: AppState) -> Router {
         )
         .route("/broadcasts/{id}/publish", get(broadcasts::publish_info))
         .route("/broadcasts/{id}/end", post(broadcasts::end))
+        .route(
+            "/broadcasts/{id}/comments",
+            get(comments::list).post(comments::create),
+        )
+        .route(
+            "/comments/{id}",
+            axum::routing::patch(comments::update).delete(comments::delete),
+        )
         .merge(limited)
         // 상태를 바꾸는 요청은 같은 사이트에서 온 것만 받는다(#24 A3). OME 웹훅(ome_routes)에는 걸지 않는다.
         .layer(axum::middleware::from_fn(guard::reject_cross_site))
