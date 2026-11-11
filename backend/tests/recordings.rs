@@ -837,6 +837,8 @@ async fn start_soon_gives_up_after_its_tries(db: PgPool) {
     let r = router(db.clone(), api.clone(), cfg.dir.clone());
     live_broadcast(&r, &db, "코덱 없음").await;
     // 코덱을 끝내 모르면 정해진 횟수만 시도하고 끝난다(15초 맞춰 보기가 이어서 맡는다)
+    // 시도 사이에는 쉰다(쉬지 않으면 OME가 코덱을 알기도 전에 10번을 다 써 버린다, #59 변이 시험)
+    let t = std::time::Instant::now();
     tokio::time::timeout(
         Duration::from_secs(2),
         start_soon(&db, &api, &cfg, Duration::from_millis(20), 5),
@@ -846,6 +848,11 @@ async fn start_soon_gives_up_after_its_tries(db: PgPool) {
     .unwrap();
     assert!(statuses(&db).await.is_empty());
     assert_eq!(*_fake.codec_calls.lock().unwrap(), 5);
+    assert!(
+        t.elapsed() >= Duration::from_millis(80),
+        "{:?}",
+        t.elapsed()
+    );
 }
 
 #[sqlx::test]
