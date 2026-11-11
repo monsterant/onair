@@ -28,8 +28,11 @@ use crate::{AppState, auth::ApiError, ome_api::OmeApi};
 
 /// 녹화 하나의 최대 길이. 넘으면 멈추고, 방송이 계속되면 새 녹화로 이어 간다.
 pub const MAX_RECORDING: Duration = Duration::from_secs(2 * 60 * 60);
-/// 다시보기 파일 전체 상한. 넘으면 오래된 것부터 지운다(서버 디스크 보호).
+/// 다시보기(다 된 녹화) 몫. 넘으면 오래된 다시보기부터 지운다.
 pub const TOTAL_CAP_BYTES: i64 = 3 * 1024 * 1024 * 1024;
+/// 녹화 폴더 전체(녹화 중인 파일 포함) 비상 한도. 넘으면 녹화 중인 것도 멈추고 새로 시작하지 않는다(서버 디스크 보호).
+/// 다시보기를 지워서 녹화 중인 파일 자리를 만들지는 않는다(#47 2바퀴).
+pub const HARD_CAP_BYTES: u64 = 4608 * 1024 * 1024;
 /// 멈춘 뒤 파일을 기다리는 시간
 pub const FINISH_WAIT: Duration = Duration::from_secs(120);
 /// 이보다 작은 파일(1초 남짓)은 다시보기로 올리지 않는다(#47 공격 사냥: 거의 빈 녹화가 목록에 뜸)
@@ -132,11 +135,12 @@ pub async fn sync(db: &sqlx::PgPool, api: &OmeApi, cfg: &RecConfig) -> Result<()
     settle_finishing(db, dir).await?;
     enforce_cap(db, dir).await?;
     remove_orphan_files(db, dir).await?;
-    // 디스크(녹화 폴더 실제 합계)가 상한 안일 때만 새 녹화를 시작한다(#47 리뷰)
-    if dir_bytes(dir) < TOTAL_CAP_BYTES as u64 {
-        start_missing(db, api).await?;
+    // 녹화 폴더 실제 합계가 비상 한도를 넘으면 녹화 중인 것도 멈추고 새로 시작하지 않는다(#47 리뷰)
+    if dir_bytes(dir) >= HARD_CAP_BYTES {
+        tracing::warn!("녹화 폴더가 비상 한도를 넘어 녹화를 멈춥니다");
+        stop_all(db, api).await?;
     } else {
-        tracing::warn!("녹화 폴더가 상한을 넘어 새 녹화를 시작하지 않습니다");
+        start_missing(db, api).await?;
     }
     Ok(())
 }
@@ -171,6 +175,26 @@ async fn forget_lost(db: &sqlx::PgPool, api: &OmeApi) -> Result<(), sqlx::Error>
     Ok(())
 }
 
+/// 디스크 비상: 녹화 중인 것을 모두 멈춘다
+async fn stop_all(db: &sqlx::PgPool, api: &OmeApi) -> Result<(), sqlx::Error> {
+    let rows: Vec<String> =
+        sqlx::query_scalar("SELECT record_id FROM recordings WHERE status = 'recording'")
+            .fetch_all(db)
+            .await?;
+    for rid in rows {
+        if api.stop_record(&rid).await {
+            sqlx::query(
+                "UPDATE recordings SET status = 'finishing', ended_at = now()
+                  WHERE record_id = $1 AND status = 'recording'",
+            )
+            .bind(&rid)
+            .execute(db)
+            .await?;
+        }
+    }
+    Ok(())
+}
+
 /// 1. 방송 중인데 녹화 중이 아닌 방송의 녹화를 시작한다(동시 녹화 수 상한 안에서)
 async fn start_missing(db: &sqlx::PgPool, api: &OmeApi) -> Result<(), sqlx::Error> {
     let active: i64 =
@@ -182,12 +206,16 @@ async fn start_missing(db: &sqlx::PgPool, api: &OmeApi) -> Result<(), sqlx::Erro
         "SELECT b.id, b.stream_name, b.title, u.username FROM broadcasts b JOIN users u ON u.id = b.owner_id
           WHERE b.status = 'live'
             AND NOT EXISTS (SELECT 1 FROM recordings r WHERE r.broadcast_id = b.id AND r.status = 'recording')
-          ORDER BY b.started_at LIMIT $1",
+          ORDER BY b.started_at",
     )
-    .bind(room)
     .fetch_all(db)
     .await?;
+    // 실제로 시작한 수만 센다. 코덱을 몰라 건너뛴 방송이 자리를 차지해 새 방송이 계속 밀리지 않게 한다(#47 2바퀴)
+    let mut started = 0_i64;
     for (bid, stream, title, owner) in rows {
+        if started >= room {
+            break;
+        }
         // 코덱을 모르면(스트림이 막 붙는 중) 다음 차례에 다시 본다
         let Some(codec) = api.video_codec(&stream).await else {
             continue;
@@ -226,6 +254,7 @@ async fn start_missing(db: &sqlx::PgPool, api: &OmeApi) -> Result<(), sqlx::Erro
                 .execute(db)
                 .await?;
         } else {
+            started += 1;
             tracing::info!(broadcast = bid, %file, "녹화 시작");
         }
     }
@@ -306,14 +335,15 @@ async fn settle_finishing(db: &sqlx::PgPool, dir: &FsPath) -> Result<(), sqlx::E
     Ok(())
 }
 
-/// 4. 녹화 폴더 실제 합계(녹화 중인 파일 포함)가 상한을 넘으면 오래된 다시보기부터 지운다
+/// 4. 다시보기 합계가 몫을 넘으면 오래된 다시보기부터 지운다
 async fn enforce_cap(db: &sqlx::PgPool, dir: &FsPath) -> Result<(), sqlx::Error> {
     let rows: Vec<(i64, String, i64)> = sqlx::query_as(
         "SELECT id, file_name, bytes FROM recordings WHERE status = 'ready' ORDER BY started_at ASC, id ASC",
     )
     .fetch_all(db)
     .await?;
-    let mut total = dir_bytes(dir).max(rows.iter().map(|r| r.2 as u64).sum()) as i64;
+    // 다시보기 몫만 센다. 녹화 중인 파일 때문에 다시보기를 지우지 않는다(그쪽은 비상 한도가 맡는다)
+    let mut total: i64 = rows.iter().map(|r| r.2).sum();
     for (id, file, bytes) in rows {
         if total <= TOTAL_CAP_BYTES {
             break;

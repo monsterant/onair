@@ -762,3 +762,27 @@ async fn too_short_recordings_are_not_listed(db: PgPool) {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[sqlx::test]
+async fn skipped_broadcasts_do_not_use_up_recording_slots(db: PgPool) {
+    let dir = temp_dir();
+    let (fake, api) = fake_ome(dir.clone()).await;
+    let cfg = RecConfig {
+        dir: Some(dir.clone()),
+    };
+    let r = router(db.clone(), api.clone(), Some(dir.clone()));
+    // 먼저 시작한 방송 3개는 녹화할 수 없는 코덱, 나중 방송 1개는 H.264
+    for i in 0..3 {
+        let (_, stream) = live_broadcast(&r, &db, &format!("H265 {i}")).await;
+        fake.streams.lock().unwrap().insert(stream, "H265".into());
+    }
+    let (late, stream) = live_broadcast(&r, &db, "나중 방송").await;
+    fake.streams.lock().unwrap().insert(stream, "H264".into());
+    sync(&db, &api, &cfg).await.unwrap();
+    let rec: Vec<i64> = sqlx::query_scalar("SELECT broadcast_id FROM recordings")
+        .fetch_all(&db)
+        .await
+        .unwrap();
+    assert_eq!(rec, [late]);
+    let _ = std::fs::remove_dir_all(dir);
+}
