@@ -238,6 +238,19 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
     b = await getBroadcast(id);
   } catch (e) {
     main.append(el('p', { className: 'error', textContent: message(e) }), el('a', { href: '#/', textContent: '방송 목록으로' }));
+    // 인터넷이 끊긴 채로 열었으면, 다시 연결될 때 이 화면을 다시 연다(#63 공격 사냥)
+    if (!(e instanceof ApiError)) {
+      const again = () => {
+        if (gen === routeGen) void route();
+      };
+      window.addEventListener('online', again, { once: true });
+      // online 알림 직후에는 아직 인터넷이 안 될 수 있다. 5초마다도 다시 연다(#63 2바퀴)
+      const later = setTimeout(again, 5_000);
+      cleanup.push(() => {
+        window.removeEventListener('online', again);
+        clearTimeout(later);
+      });
+    }
     return;
   }
   // 기다리는 사이 다른 화면으로 옮겼으면 아무것도 하지 않는다(늦게 끝난 요청이 새 화면을 건드리지 않게, #27 V17)
@@ -268,11 +281,31 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
   let retry: ReturnType<typeof setTimeout> | undefined;
   let gone = false;
 
+  // 시청자 인터넷 끊김 알림(#63). 끊기면 알리고, 다시 연결되면 멈춘 플레이어를 새로 만든다.
+  const netNote = el('p', { className: 'net-note', role: 'status', hidden: true });
+  let down = false;
+  // 다시 연결된 뒤 플레이어를 새로 만들어야 하는지. 지우고 만드는 일은 paint() 한 곳에서 한다(순서가 꼬이지 않게, #63 리뷰)
+  let restart = false;
+  // 상태 확인이 서버에 닿지 못한 연속 횟수. 한 번은 잠깐 흔들린 것일 수 있어 2번(약 10초)부터 알린다.
+  let failures = 0;
+  const setDown = (d: boolean) => {
+    if (down === d) return;
+    down = d;
+    netNote.hidden = !d;
+    // 송출하는 소유자에게는 시청 문구가 맞지 않는다(#63 공격 사냥)
+    netNote.textContent = selfPublishing()
+      ? '인터넷 연결이 끊겼습니다. 연결이 돌아오면 송출 상태를 확인해 주세요.'
+      : '인터넷 연결이 끊겼습니다. 다시 연결되면 자동으로 이어서 봅니다.';
+    // 끊긴 동안 멈춘 플레이어는 스스로 돌아오지 않을 수 있다. 이어지는 paint()가 방송 중이면 새로 만든다.
+    if (!d && playing) restart = true;
+  };
+
   // 재생 오류가 나면 3초 뒤 플레이어를 다시 만든다(#27 V2)
   const onPlayerError = () => {
     clearTimeout(retry);
     retry = setTimeout(() => {
-      if (gen !== routeGen || gone || b.status !== 'live') return;
+      // 끊긴 동안에는 다시 만들지 않는다. 다시 연결되면 setDown(false)가 새로 만든다.
+      if (gen !== routeGen || gone || down || b.status !== 'live') return;
       playing = false;
       paint();
     }, 3_000);
@@ -293,7 +326,10 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
       moreBtn.textContent = '더보기';
     }
     const live = b.status === 'live' && !selfPublishing();
-    if (live && !playing) {
+    if (live && (!playing || restart)) {
+      // startPlayer는 같은 칸의 옛 플레이어를 먼저 지운다
+      clearTimeout(retry);
+      restart = false;
       playerBox.replaceChildren(el('div', { id: 'player' }));
       soundBtn.hidden = false;
       soundBtn.textContent = '🔇 소리 켜기';
@@ -302,6 +338,7 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
       });
       playing = true;
     } else if (!live && playing) {
+      restart = false;
       clearTimeout(retry);
       player().then((p) => p.stopPlayer('player'));
       playerBox.replaceChildren();
@@ -325,6 +362,7 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
     el('p', { className: 'hint', textContent: `방송자: ${b.owner_username}` }),
     playerBox,
     soundBtn,
+    netNote,
     offAir,
   );
   // 이 화면에서 쓰는 송출기(소유자만). 화면을 떠나면 송출을 멈춘다.
@@ -357,16 +395,45 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
   paint();
 
   // 5초마다 상태를 다시 본다(방송이 시작·종료되면 플레이어를 켜고 끈다)
+  const onOffline = () => setDown(true);
+  // 다시 연결되면 5초를 기다리지 않고 바로 확인한다. 성공하면 알림을 지우고 플레이어를 새로 만든다.
+  const onOnline = () => void refresh();
+  window.addEventListener('offline', onOffline);
+  window.addEventListener('online', onOnline);
   const stop = () => {
     clearInterval(timer);
     clearTimeout(retry);
+    window.removeEventListener('offline', onOffline);
+    window.removeEventListener('online', onOnline);
     player().then((p) => p.stopPlayer('player'));
   };
-  const timer = setInterval(async () => {
+  // 상태 확인이 겹쳐 돌 수 있다(5초 차례 + 다시 연결). 늦게 도착한 옛 결과는 버린다(#63 리뷰)
+  let asked = 0;
+  let applied = 0;
+  const refresh = async () => {
+    const mine = ++asked;
     try {
-      b = await getBroadcast(id);
-      if (gen === routeGen) paint();
+      const nb = await getBroadcast(id);
+      if (gen !== routeGen || gone || mine < applied) return;
+      applied = mine;
+      b = nb;
+      failures = 0;
+      // offline 알림 직후에 도착한 응답이면 아직 끊긴 것으로 둔다
+      if (navigator.onLine) setDown(false);
+      paint();
     } catch (e) {
+      if (gen !== routeGen || gone || mine < applied) return;
+      applied = mine;
+      // 서버에 닿지 못함(fetch 자체 실패). 서버가 답한 오류(ApiError)는 인터넷이 살아 있다는 뜻이다.
+      if (!(e instanceof ApiError)) {
+        failures += 1;
+        if (failures >= 2 || !navigator.onLine) setDown(true);
+        return;
+      }
+      failures = 0;
+      if (navigator.onLine) setDown(false);
+      // 끊긴 동안 멈춘 플레이어를 바로 새로 만든다(성공 응답을 기다리지 않게, #63 2바퀴)
+      if (restart && e.status !== 404) paint();
       // 방송이 지워졌으면 멈추고 알린다(#27 V10). 그 밖의 오류는 잠깐 끊긴 것으로 보고 다음에 다시 본다.
       if (e instanceof ApiError && e.status === 404) {
         gone = true;
@@ -376,7 +443,9 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
         main.replaceChildren(el('p', { className: 'hint', textContent: '삭제된 방송입니다.' }), el('a', { href: '#/', textContent: '목록으로' }));
       }
     }
-  }, 5_000);
+  };
+  const timer = setInterval(() => void refresh(), 5_000);
+  if (!navigator.onLine) setDown(true);
   cleanup.push(stop);
   if (publisher) cleanup.push(() => void publisher.stop());
 }
