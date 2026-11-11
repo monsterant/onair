@@ -244,7 +244,12 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
         if (gen === routeGen) void route();
       };
       window.addEventListener('online', again, { once: true });
-      cleanup.push(() => window.removeEventListener('online', again));
+      // online 알림 직후에는 아직 인터넷이 안 될 수 있다. 5초마다도 다시 연다(#63 2바퀴)
+      const later = setTimeout(again, 5_000);
+      cleanup.push(() => {
+        window.removeEventListener('online', again);
+        clearTimeout(later);
+      });
     }
     return;
   }
@@ -427,6 +432,8 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
       }
       failures = 0;
       if (navigator.onLine) setDown(false);
+      // 끊긴 동안 멈춘 플레이어를 바로 새로 만든다(성공 응답을 기다리지 않게, #63 2바퀴)
+      if (restart && e.status !== 404) paint();
       // 방송이 지워졌으면 멈추고 알린다(#27 V10). 그 밖의 오류는 잠깐 끊긴 것으로 보고 다음에 다시 본다.
       if (e instanceof ApiError && e.status === 404) {
         gone = true;
