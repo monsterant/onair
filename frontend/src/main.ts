@@ -9,6 +9,10 @@ import {
   ApiError,
   type Broadcast,
   type Comment,
+  type Recording,
+  getRecording,
+  listBroadcastRecordings,
+  listRecordings,
   type Status,
   confirmDonation,
   createDonation,
@@ -85,6 +89,7 @@ function action(btn: HTMLButtonElement, error: HTMLElement, fn: () => Promise<un
 
 function header(): HTMLElement {
   const right = el('span', { className: 'who' });
+  right.append(el('a', { href: '#/recordings', className: 'button ghost', textContent: '다시보기' }));
   if (me) {
     right.append(
       el('a', { href: '#/new', className: 'button', textContent: '방송 만들기' }),
@@ -266,7 +271,7 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
   const studio = publisher ? studioPanel(() => b, publisher) : null;
   if (studio) main.append(studio.el);
   if (owner) main.append(owner.el);
-  main.append(donationsPanel(b, gen), commentsPanel(id, gen));
+  main.append(recordingsPanel(id), donationsPanel(b, gen), commentsPanel(id, gen));
   paint();
 
   // 5초마다 상태를 다시 본다(방송이 시작·종료되면 플레이어를 켜고 끈다)
@@ -292,6 +297,80 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
   }, 5_000);
   cleanup.push(stop);
   if (publisher) cleanup.push(() => void publisher.stop());
+}
+
+// ---------- 녹화·다시보기(#47) ----------
+
+/** 걸린 시간 "12분 3초" */
+function duration(r: Recording): string {
+  if (!r.ended_at) return '';
+  const s = Math.max(0, Math.round((new Date(r.ended_at).getTime() - new Date(r.started_at).getTime()) / 1000));
+  const m = Math.floor(s / 60);
+  return m > 0 ? `${m}분 ${s % 60}초` : `${s}초`;
+}
+
+function replayCard(r: Recording): HTMLElement {
+  return el(
+    'a',
+    { className: 'card', href: `#/r/${r.id}` },
+    el('div', { className: 'card-top' }, el('span', { className: 'badge ended', textContent: '다시보기' }), el('strong', { textContent: r.title })),
+    el('span', { className: 'hint', textContent: `${r.owner_username} · ${shortTime(r.started_at)} · ${duration(r)}` }),
+  );
+}
+
+/** 다시보기 목록(#/recordings). 누구나 본다. */
+async function recordingsPage(main: HTMLElement) {
+  main.append(
+    el('h2', { textContent: '다시보기' }),
+    el('p', { className: 'hint', textContent: '방송이 끝나면 녹화가 여기에 올라옵니다(끝난 뒤 30초쯤 걸립니다).' }),
+  );
+  const box = el('div', { className: 'list', textContent: '불러오는 중...' });
+  main.append(box);
+  try {
+    const items = await listRecordings();
+    box.replaceChildren(...(items.length ? items.map(replayCard) : [el('p', { className: 'hint', textContent: '아직 다시보기가 없습니다.' })]));
+  } catch (e) {
+    box.replaceChildren(el('p', { className: 'error', textContent: message(e) }));
+  }
+}
+
+/** 다시보기 상세(#/r/{id}): 녹화 영상 재생 */
+async function replayPage(main: HTMLElement, id: number) {
+  let r: Recording;
+  try {
+    r = await getRecording(id);
+  } catch (e) {
+    main.append(el('p', { className: 'error', textContent: message(e) }), el('a', { href: '#/recordings', textContent: '다시보기 목록으로' }));
+    return;
+  }
+  const video = el('video', { controls: true, preload: 'metadata', playsInline: true, className: 'replay' });
+  video.src = `/api${r.url}`;
+  main.append(
+    el('div', { className: 'detail-head' }, el('span', { className: 'badge ended', textContent: '다시보기' }), el('h2', { textContent: r.title })),
+    el('p', { className: 'hint', textContent: `방송자: ${r.owner_username} · ${shortTime(r.started_at)} · ${duration(r)} · ${(r.bytes / 1024 / 1024).toFixed(1)}MB` }),
+    el('div', { className: 'player-box' }, video),
+    el('p', {}, el('a', { href: `#/b/${r.broadcast_id}`, textContent: '방송 화면으로' }), ' · ', el('a', { href: '#/recordings', textContent: '다시보기 목록' })),
+  );
+  // 화면을 떠나면 영상 내려받기를 멈춘다
+  cleanup.push(() => {
+    video.pause();
+    video.removeAttribute('src');
+    video.load();
+  });
+}
+
+/** 방송 상세 화면의 "이 방송의 다시보기" 칸. 없으면 숨긴다. */
+function recordingsPanel(broadcastId: number): HTMLElement {
+  const list = el('div', { className: 'list' });
+  const panel = el('section', { className: 'recordings-panel panel', hidden: true }, el('h3', { textContent: '이 방송의 다시보기' }), list);
+  listBroadcastRecordings(broadcastId)
+    .then((items) => {
+      if (items.length === 0) return;
+      list.replaceChildren(...items.map(replayCard));
+      panel.hidden = false;
+    })
+    .catch(() => {});
+  return panel;
 }
 
 // ---------- 도네이션(#41) ----------
@@ -866,9 +945,12 @@ async function route() {
   }
   const hash = location.hash || '#/';
   const detail = /^#\/b\/(\d+)$/.exec(hash);
+  const replay = /^#\/r\/(\d+)$/.exec(hash);
   if (hash === '#/login') loginPage(main);
   else if (hash === '#/new') newPage(main);
   else if (detail) await detailPage(main, Number(detail[1]), gen);
+  else if (hash === '#/recordings') await recordingsPage(main);
+  else if (replay) await replayPage(main, Number(replay[1]));
   else await listPage(main);
 }
 

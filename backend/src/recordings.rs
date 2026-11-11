@@ -292,7 +292,12 @@ async fn remove_orphan_files(db: &sqlx::PgPool, dir: &FsPath) -> Result<(), sqlx
         let orphan_rec =
             valid_file_name(&name) && !known.contains(&name) && age > Duration::from_secs(600);
         let stale_tmp = name.starts_with("tmp_") && age > Duration::from_secs(3 * 60 * 60);
-        if orphan_rec || stale_tmp {
+        // OME가 남기는 녹화 정보 파일(<스트림 이름>.xml). 다시보기에는 쓰지 않는다. 녹화 중에는 바뀌므로 1시간 지난 것만.
+        let stale_info = name
+            .strip_suffix(".xml")
+            .is_some_and(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_hexdigit()))
+            && age > Duration::from_secs(60 * 60);
+        if orphan_rec || stale_tmp || stale_info {
             let _ = std::fs::remove_file(e.path());
         }
     }
