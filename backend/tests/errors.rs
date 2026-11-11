@@ -201,6 +201,7 @@ async fn unknown_path_is_json_in_the_production_router(db: PgPool) {
             secret: "test-secret-for-ome-webhook".into(),
             db,
             ome: Default::default(),
+            kick: Default::default(),
         }));
     let (status, ct, json, _) = send(&r, json_req("GET", "/no-such-path", None, "")).await;
     assert_eq!(status, StatusCode::NOT_FOUND);

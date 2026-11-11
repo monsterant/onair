@@ -32,10 +32,12 @@ async fn main() {
         Ok(s) => s.to_string(),
         Err(why) => panic!("OME_ADMISSION_SECRET 확인 실패: {why}"),
     };
+    let rec_kick = onair_backend::recordings::Kick::default();
     let mut ome_state = onair_backend::ome::OmeState {
         secret: ome_secret,
         db: db.clone(),
         ome: Default::default(),
+        kick: rec_kick.clone(),
     };
 
     // OME 관리 API(스트림 끊기, 목록). 둘 다 있을 때만 쓴다. 토큰은 OME Server.xml의 AccessToken과 같은 값이다.
@@ -118,8 +120,21 @@ async fn main() {
         let (db, api, rec) = (db.clone(), ome_api.clone(), rec.clone());
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(15));
+            // 아래 서둘러 녹화가 길어져 놓친 차례를 몰아서 돌리지 않는다
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
-                tick.tick().await;
+                tokio::select! {
+                    _ = tick.tick() => {}
+                    // 송출이 막 허락됨: 15초를 기다리지 않고 녹화를 바로 시작한다(#59).
+                    // 같은 반복문 안에서 차례로 돌아 녹화 맞춰 보기가 동시에 두 번 돌지 않는다.
+                    _ = rec_kick.wait() => {
+                        use onair_backend::recordings::{SOON_STEP, SOON_TRIES, start_soon};
+                        if let Err(e) = start_soon(&db, &api, &rec, SOON_STEP, SOON_TRIES).await {
+                            tracing::warn!(error = %e, "녹화 바로 시작 실패");
+                        }
+                        continue;
+                    }
+                }
                 if let Err(e) = onair_backend::ome::reconcile(&db, &api).await {
                     tracing::warn!(error = %e, "방송 상태 맞춰 보기 실패");
                 }

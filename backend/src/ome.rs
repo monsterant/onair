@@ -44,6 +44,8 @@ pub struct OmeState {
     pub db: sqlx::PgPool,
     /// 송출이 끊기면 그 방송의 녹화를 바로 멈추는 데 쓴다(#47). 설정하지 않으면(Default) 부르지 않는다.
     pub ome: crate::ome_api::OmeApi,
+    /// 송출을 허락하면 녹화를 바로 시작하라고 알린다(#59)
+    pub kick: crate::recordings::Kick,
 }
 
 /// OME가 알려 준 주소에서 방송 이름과 송출 키를 꺼낸다.
@@ -314,6 +316,9 @@ pub async fn admission(
             let allowed = decide_opening(&state.db, &r.direction, &r.url)
                 .await
                 .map_err(db_err)?;
+            if allowed && r.direction == "incoming" {
+                state.kick.send();
+            }
             tracing::info!(
                 direction = %r.direction, protocol = %r.protocol, url = redact(&r.url), allowed,
                 "OME opening"

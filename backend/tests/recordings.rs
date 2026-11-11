@@ -786,3 +786,51 @@ async fn skipped_broadcasts_do_not_use_up_recording_slots(db: PgPool) {
     assert_eq!(rec, [late]);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[sqlx::test]
+async fn start_soon_starts_as_soon_as_the_codec_is_known(db: PgPool) {
+    use onair_backend::recordings::start_soon;
+    use std::time::{Duration, Instant};
+    let dir = temp_dir();
+    let (fake, api) = fake_ome(dir.clone()).await;
+    let cfg = RecConfig { dir: Some(dir) };
+    let r = router(db.clone(), api.clone(), cfg.dir.clone());
+    let (_, stream) = live_broadcast(&r, &db, "바로 녹화").await;
+    // 웹훅 순간엔 OME에 스트림이 없어 코덱을 모른다. 0.15초 뒤에 생긴다.
+    let f = fake.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        f.streams.lock().unwrap().insert(stream, "H264".into());
+    });
+    let t = Instant::now();
+    start_soon(&db, &api, &cfg, Duration::from_millis(50), 20)
+        .await
+        .unwrap();
+    // 코덱이 생기자마자 녹화가 시작되고, 남은 시도는 하지 않는다
+    assert_eq!(statuses(&db).await, ["recording"]);
+    assert!(
+        t.elapsed() < Duration::from_millis(600),
+        "{:?}",
+        t.elapsed()
+    );
+}
+
+#[sqlx::test]
+async fn start_soon_gives_up_after_its_tries(db: PgPool) {
+    use onair_backend::recordings::start_soon;
+    use std::time::Duration;
+    let dir = temp_dir();
+    let (_fake, api) = fake_ome(dir.clone()).await;
+    let cfg = RecConfig { dir: Some(dir) };
+    let r = router(db.clone(), api.clone(), cfg.dir.clone());
+    live_broadcast(&r, &db, "코덱 없음").await;
+    // 코덱을 끝내 모르면 정해진 횟수만 시도하고 끝난다(15초 맞춰 보기가 이어서 맡는다)
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        start_soon(&db, &api, &cfg, Duration::from_millis(20), 5),
+    )
+    .await
+    .expect("정해진 횟수 뒤에 끝나야 한다")
+    .unwrap();
+    assert!(statuses(&db).await.is_empty());
+}

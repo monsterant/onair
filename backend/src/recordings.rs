@@ -2,6 +2,8 @@
 //!
 //! 흐름
 //! - 15초마다 도는 맞춰 보기(main.rs)에서 `sync`를 부른다.
+//! - 송출이 막 허락되면(opening 웹훅) `Kick` 신호로 15초를 기다리지 않고 바로 `start_soon`을 돌린다(#59).
+//!   그러지 않으면 방송 앞부분 0~15초가 녹화에 빠졌다.
 //!   1. 방송 중(live)인데 녹화 중이 아닌 방송 → OME에 영상 코덱을 묻고 녹화를 시작한다(H.264는 mp4, VP8은 webm).
 //!   2. 녹화 중인데 방송이 끝났거나(live 아님) 2시간이 넘은 녹화 → OME에 멈추라고 한다(finishing).
 //!   3. finishing인 녹화 → 파일이 생겼으면 ready(다시보기 가능), 2분이 지나도 없으면 failed.
@@ -39,6 +41,57 @@ pub const FINISH_WAIT: Duration = Duration::from_secs(120);
 pub const MIN_BYTES: u64 = 64 * 1024;
 /// 동시에 녹화하는 방송 수 상한(서버 디스크·CPU 보호). 넘으면 다음 차례까지 기다린다.
 pub const MAX_CONCURRENT: i64 = 3;
+
+/// "녹화를 서둘러 시작하라"는 신호(#59). 웹훅이 보내고 맞춰 보기 반복문(main.rs)이 받는다.
+/// tokio `Notify`(기다리는 쪽을 깨우는 종): 받는 쪽이 아직 기다리지 않을 때 보내도 한 번은 기억해 둔다.
+#[derive(Clone, Debug, Default)]
+pub struct Kick(std::sync::Arc<tokio::sync::Notify>);
+
+impl Kick {
+    pub fn send(&self) {
+        self.0.notify_one();
+    }
+    pub async fn wait(&self) {
+        self.0.notified().await;
+    }
+}
+
+/// 신호를 받은 뒤 녹화 시작을 다시 시도하는 간격과 횟수(#59).
+/// 웹훅 순간엔 OME에 스트림이 아직 없어 영상 코덱을 모른다. 보통 1~3초 안에 알게 된다.
+pub const SOON_STEP: Duration = Duration::from_secs(1);
+pub const SOON_TRIES: u32 = 10;
+
+/// 송출이 막 붙었을 때 부른다. `step` 간격으로 최대 `tries`번 `sync`를 돌리고,
+/// 녹화를 기다리는 방송이 없어지면 바로 멈춘다.
+pub async fn start_soon(
+    db: &sqlx::PgPool,
+    api: &OmeApi,
+    cfg: &RecConfig,
+    step: Duration,
+    tries: u32,
+) -> Result<(), sqlx::Error> {
+    if cfg.dir.is_none() || !api.is_configured() {
+        return Ok(());
+    }
+    for _ in 0..tries {
+        sync(db, api, cfg).await?;
+        if !waiting(db).await? {
+            break;
+        }
+        tokio::time::sleep(step).await;
+    }
+    Ok(())
+}
+
+/// 방송 중인데 아직 녹화가 없는 방송이 있는지
+async fn waiting(db: &sqlx::PgPool) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM broadcasts b WHERE b.status = 'live'
+            AND NOT EXISTS (SELECT 1 FROM recordings r WHERE r.broadcast_id = b.id AND r.status = 'recording'))",
+    )
+    .fetch_one(db)
+    .await
+}
 
 /// 녹화 설정. 폴더가 없으면(Default) 녹화를 하지 않는다.
 #[derive(Clone, Debug, Default)]

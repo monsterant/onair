@@ -26,6 +26,7 @@ fn router(db: PgPool) -> Router {
         secret: KEY.into(),
         db,
         ome: Default::default(),
+        kick: Default::default(),
     })
 }
 
@@ -380,4 +381,43 @@ async fn old_key_is_denied_after_rotation(db: PgPool) {
     let (_, new) = signed(&r, "incoming", "opening", &publish_url(NAME, &new_key)).await;
     assert_eq!(new, json!({ "allowed": true }));
     assert_eq!(status_of(&db).await, "live");
+}
+
+// ---------- 녹화 바로 시작 신호 (#59) ----------
+
+/// 신호가 왔는지 잠깐(0.2초) 기다려 본다
+async fn kicked(kick: &onair_backend::recordings::Kick) -> bool {
+    tokio::time::timeout(std::time::Duration::from_millis(200), kick.wait())
+        .await
+        .is_ok()
+}
+
+#[sqlx::test]
+async fn allowed_publish_kicks_recording_but_rejected_or_viewing_does_not(db: PgPool) {
+    seed(&db, "ready").await;
+    let kick = onair_backend::recordings::Kick::default();
+    let r = ome_routes(OmeState {
+        secret: KEY.into(),
+        db: db.clone(),
+        ome: Default::default(),
+        kick: kick.clone(),
+    });
+    // 틀린 키: 거절, 신호 없음
+    let (_, v) = signed(&r, "incoming", "opening", &publish_url(NAME, "wrong")).await;
+    assert_eq!(v["allowed"], false);
+    assert!(!kicked(&kick).await);
+    // 맞는 키: 허락, 신호 있음
+    let (_, v) = signed(&r, "incoming", "opening", &publish_url(NAME, SKEY)).await;
+    assert_eq!(v["allowed"], true);
+    assert!(kicked(&kick).await);
+    // 시청(outgoing)은 허락돼도 신호 없음
+    let (_, v) = signed(
+        &r,
+        "outgoing",
+        "opening",
+        &format!("https://h/app/{NAME}/llhls.m3u8"),
+    )
+    .await;
+    assert_eq!(v["allowed"], true);
+    assert!(!kicked(&kick).await);
 }
