@@ -298,6 +298,12 @@ pub async fn signup(
             "demo로 시작하는 아이디는 쓸 수 없습니다",
         ));
     }
+    // guest로 시작하는 아이디는 테스트 계정 몫이다. 24시간 뒤 정리 대상이라 일반 가입에 주지 않는다(#35)
+    if username.starts_with("guest") {
+        return Err(ApiError::BadRequest(
+            "guest로 시작하는 아이디는 쓸 수 없습니다",
+        ));
+    }
     check_password(&c.password).map_err(ApiError::BadRequest)?;
     let hash = hash_password_async(c.password).await?;
 
@@ -404,6 +410,58 @@ pub async fn demo_login(
             username: username.to_string(),
         }),
     ))
+}
+
+/// 테스트 계정 아이디 앞부분. 일반 가입에서는 `guest`로 시작하는 아이디를 쓸 수 없다(#35).
+pub const GUEST_PREFIX: &str = "guest_";
+/// 테스트 계정을 남겨 두는 시간
+pub const GUEST_KEEP_HOURS: i32 = 24;
+
+/// 심사자마다 따로 쓰는 테스트 계정으로 바로 로그인한다(#35). `DEMO_LOGIN=true`일 때만 열린다.
+/// - 부를 때마다 새 사용자 `guest_<16진수 12자>`를 만든다. 심사자끼리 방송 수 한도·송출 키·삭제가 섞이지 않는다.
+/// - 비밀번호는 쓸 수 없는 값이라 이 길로만 로그인할 수 있다.
+/// - 다른 사용자 권한을 보려면 시크릿 창에서 한 번 더 부르면 된다(쿠키가 따로라 다른 사용자가 된다).
+pub async fn guest_login(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Result<(CookieJar, Json<Me>), ApiError> {
+    if !state.auth.demo_login {
+        return Err(ApiError::NotFound);
+    }
+    // 이름이 겹칠 확률은 매우 낮지만(48비트), 겹치면 새 이름으로 몇 번 더 시도한다
+    for _ in 0..3 {
+        let username = format!("{GUEST_PREFIX}{}", crate::broadcasts::random_hex(6)?);
+        let id: Option<i64> = sqlx::query_scalar(
+            "INSERT INTO users (username, password_hash) VALUES ($1, '!guest-no-password')
+             ON CONFLICT (username) DO NOTHING RETURNING id",
+        )
+        .bind(&username)
+        .fetch_optional(&state.db)
+        .await?;
+        if let Some(id) = id {
+            let jar = start_session(&state, jar, id).await?;
+            return Ok((jar, Json(Me { id, username })));
+        }
+    }
+    Err(ApiError::Internal)
+}
+
+/// 만든 지 24시간이 지난 테스트 계정을 지운다(#35). 방송·세션은 외래 키(ON DELETE CASCADE)로 함께 지워진다.
+/// 지금 송출 중(live)인 방송이 있는 계정은 남긴다(송출 도중에 끊기지 않게).
+pub async fn cleanup_guests(db: &sqlx::PgPool) -> Result<u64, sqlx::Error> {
+    let done = sqlx::query(
+        // 이름만 보지 않고, guest_login만 쓰는 비밀번호 표시 값도 함께 본다.
+        // 이 변경 전에 guest_로 가입한 일반 회원이 있어도 지우지 않게 한다(#35 리뷰).
+        r"DELETE FROM users u
+          WHERE u.username LIKE 'guest\_%'
+            AND u.password_hash = '!guest-no-password'
+            AND u.created_at < now() - make_interval(hours => $1)
+            AND NOT EXISTS (SELECT 1 FROM broadcasts b WHERE b.owner_id = u.id AND b.status = 'live')",
+    )
+    .bind(GUEST_KEEP_HOURS)
+    .execute(db)
+    .await?;
+    Ok(done.rows_affected())
 }
 
 #[cfg(test)]

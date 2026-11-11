@@ -94,7 +94,7 @@ fn clean_description(raw: &str) -> Result<String, ApiError> {
 pub const OPEN_BROADCASTS_MAX: i64 = 5;
 
 /// 임의의 바이트를 16진수 글자로. 이름·키 만들기에 쓴다.
-fn random_hex(bytes: usize) -> Result<String, ApiError> {
+pub(crate) fn random_hex(bytes: usize) -> Result<String, ApiError> {
     let mut buf = vec![0u8; bytes];
     getrandom::fill(&mut buf).map_err(|_| ApiError::Internal)?;
     Ok(hex::encode(buf))
