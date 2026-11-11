@@ -667,3 +667,59 @@ async fn deleting_a_broadcast_stops_its_recording_and_files_are_cleaned(db: PgPo
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[sqlx::test]
+async fn cleanup_keeps_known_old_files_and_removes_stale_temp_files(db: PgPool) {
+    let dir = temp_dir();
+    let (_, api) = fake_ome(dir.clone()).await;
+    let cfg = RecConfig {
+        dir: Some(dir.clone()),
+    };
+    let r = router(db.clone(), api.clone(), Some(dir.clone()));
+    let (bid, _) = live_broadcast(&r, &db, "정리").await;
+    sqlx::query("UPDATE broadcasts SET status = 'ended' WHERE id = $1")
+        .bind(bid)
+        .execute(&db)
+        .await
+        .unwrap();
+    let ready = format!("rec-{bid}-0000000a.mp4");
+    sqlx::query(
+        "INSERT INTO recordings (broadcast_id, record_id, file_name, format, title, owner_username, status, ended_at, bytes)
+         VALUES ($1, $2, $3, 'mp4', 't', 'demo1', 'ready', now(), 1)",
+    )
+    .bind(bid)
+    .bind(format!("rec-{bid}-0000000a"))
+    .bind(&ready)
+    .execute(&db)
+    .await
+    .unwrap();
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(4 * 60 * 60);
+    for name in [
+        ready.as_str(),
+        "tmp_rec-1-00000000.mp4",
+        "00aec8f16dfeefdc.xml",
+        "rec-1-0000000b.mp4",
+    ] {
+        std::fs::write(dir.join(name), b"x").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(dir.join(name))
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+    }
+    std::fs::write(dir.join("tmp_fresh.mp4"), b"x").unwrap();
+    sync(&db, &api, &cfg).await.unwrap();
+    assert!(dir.join(&ready).exists(), "다시보기 파일은 오래돼도 남긴다");
+    assert!(!dir.join("tmp_rec-1-00000000.mp4").exists());
+    assert!(!dir.join("00aec8f16dfeefdc.xml").exists());
+    assert!(
+        !dir.join("rec-1-0000000b.mp4").exists(),
+        "기록 없는 녹화 파일"
+    );
+    assert!(
+        dir.join("tmp_fresh.mp4").exists(),
+        "쓰는 중일 수 있는 새 임시 파일은 남긴다"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
