@@ -53,6 +53,38 @@ pub fn same_origin(method: &Method, headers: &HeaderMap) -> bool {
     }
 }
 
+/// axum이 직접 만드는 오류(본문 형식 400·413·415·422, 경로 형식 400, 없는 길 404, 안 되는 방법 405)는
+/// 글자(text/plain)나 빈 본문으로 나간다. 화면이 읽을 수 있게 다른 오류와 같은 `{"error": "..."}` 모양으로 바꾼다(#25 A12).
+/// 이미 JSON이거나 영상 파일 응답은 건드리지 않는다.
+pub async fn json_errors(req: Request, next: Next) -> Response {
+    let res = next.run(req).await;
+    let msg = match res.status().as_u16() {
+        400 => "요청 형식이 맞지 않습니다",
+        404 => "찾을 수 없습니다",
+        405 => "허용되지 않는 요청 방법입니다",
+        413 => "요청이 너무 큽니다",
+        415 => "JSON(Content-Type: application/json)으로 보내야 합니다",
+        422 => "요청 내용이 맞지 않습니다",
+        _ => return res,
+    };
+    let is_json = res
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("application/json"));
+    if is_json {
+        return res;
+    }
+    let (mut parts, _) = res.into_parts();
+    parts.headers.remove(header::CONTENT_LENGTH);
+    parts.headers.insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("application/json"),
+    );
+    let body = serde_json::json!({ "error": msg }).to_string();
+    Response::from_parts(parts, axum::body::Body::from(body))
+}
+
 pub async fn reject_cross_site(req: Request, next: Next) -> Response {
     if same_origin(req.method(), req.headers()) {
         next.run(req).await

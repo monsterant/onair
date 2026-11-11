@@ -46,6 +46,7 @@ pub fn app(state: AppState) -> Router {
         ));
     Router::new()
         .route("/health", get(health))
+        .route("/config", get(config))
         .route("/auth/logout", post(auth::logout))
         .route("/auth/me", get(auth::me))
         .route(
@@ -84,6 +85,8 @@ pub fn app(state: AppState) -> Router {
         .merge(limited)
         // 상태를 바꾸는 요청은 같은 사이트에서 온 것만 받는다(#24 A3). OME 웹훅(ome_routes)에는 걸지 않는다.
         .layer(axum::middleware::from_fn(guard::reject_cross_site))
+        // 기본 오류 응답도 {"error"} 모양으로(#25 A12). 가장 바깥에 둔다.
+        .layer(axum::middleware::from_fn(guard::json_errors))
         .with_state(state)
 }
 
@@ -113,4 +116,18 @@ async fn health(State(state): State<AppState>) -> Json<Health> {
         Err(_) => "error",
     };
     Json(Health { status: "ok", db })
+}
+
+/// 화면이 켜고 끌 기능(#25 A7): 테스트 계정 버튼, 도네이션.
+#[derive(Serialize)]
+struct PublicConfig {
+    demo_login: bool,
+    donations: bool,
+}
+
+async fn config(State(state): State<AppState>) -> Json<PublicConfig> {
+    Json(PublicConfig {
+        demo_login: state.auth.demo_login,
+        donations: state.toss.is_configured(),
+    })
 }

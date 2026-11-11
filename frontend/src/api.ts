@@ -72,6 +72,8 @@ export const login = (username: string, password: string) =>
 export const logout = () => api<void>('POST', '/auth/logout');
 /** 심사자마다 따로 쓰는 테스트 계정. 부를 때마다 새 계정이 만들어진다(#35). */
 export const guestLogin = () => api<User>('POST', '/auth/guest');
+/** 켜진 기능(#25 A7) */
+export const getConfig = () => api<{ demo_login: boolean; donations: boolean }>('GET', '/config');
 
 export const listBroadcasts = () => api<Broadcast[]>('GET', '/broadcasts');
 export const getBroadcast = (id: number) => api<Broadcast>('GET', `/broadcasts/${id}`);
