@@ -13,7 +13,7 @@ import {
   createBroadcast,
   currentUser,
   deleteBroadcast,
-  demoLogin,
+  guestLogin,
   endBroadcast,
   getBroadcast,
   listBroadcasts,
@@ -151,18 +151,17 @@ function loginPage(main: HTMLElement) {
     action(loginBtn, error, async () => done(await login(username.value, password.value)))();
   };
 
+  // 심사자마다 따로 쓰는 테스트 계정(#35). 공용 계정이면 방송 수 한도·송출 키·삭제가 심사자끼리 섞인다.
   const demoError = el('p', { className: 'error', role: 'alert' });
-  const demoBtn = (n: 1 | 2) => {
-    const b = el('button', { type: 'button', textContent: `demo${n}로 로그인` });
-    b.onclick = action(b, demoError, async () => done(await demoLogin(n)));
-    return b;
-  };
+  const guestBtn = el('button', { type: 'button', textContent: '테스트 계정으로 바로 시작' });
+  guestBtn.onclick = action(guestBtn, demoError, async () => done(await guestLogin()));
   const demo = el(
     'section',
     { className: 'demo panel' },
-    el('h3', { textContent: '테스트 계정으로 바로 로그인' }),
-    el('p', { className: 'hint', textContent: '심사·시험용 공용 계정입니다. 두 계정으로 방송 소유자와 다른 사용자를 비교할 수 있습니다.' }),
-    el('div', { className: 'row' }, demoBtn(1), demoBtn(2)),
+    el('h3', { textContent: '테스트 계정으로 바로 시작' }),
+    el('p', { className: 'hint', textContent: '가입 없이 누를 때마다 새 테스트 계정이 만들어집니다. 테스트 계정은 24시간 뒤 지워집니다.' }),
+    el('p', { className: 'hint', textContent: '다른 사용자 권한(남의 방송 수정·삭제 거절)을 확인하려면 시크릿 창이나 다른 브라우저에서 한 번 더 누르세요.' }),
+    el('div', { className: 'row' }, guestBtn),
     demoError,
   );
   main.append(form, demo);
