@@ -393,14 +393,17 @@ pub async fn me(user: CurrentUser) -> Json<Me> {
 pub async fn demo_login(
     State(state): State<AppState>,
     jar: CookieJar,
-    Path(n): Path<usize>,
+    Path(n): Path<String>,
 ) -> Result<(CookieJar, Json<Me>), ApiError> {
     if !state.auth.demo_login {
         return Err(ApiError::NotFound);
     }
-    let username = *DEMO_USERS
-        .get(n.wrapping_sub(1))
-        .ok_or(ApiError::NotFound)?;
+    // "1"과 "2"만 받는다. 01, +1 같은 다른 표기는 없는 길로 본다(#25 A15). %31은 주소 규칙상 "1"과 같은 글자라 1로 받는다.
+    let username = match n.as_str() {
+        "1" => DEMO_USERS[0],
+        "2" => DEMO_USERS[1],
+        _ => return Err(ApiError::NotFound),
+    };
     // 없으면 만들고, 있으면 그대로 쓴다. 여러 번 불러도 사용자는 하나다.
     sqlx::query(
         "INSERT INTO users (username, password_hash) VALUES ($1, '!demo-no-password')
@@ -455,6 +458,16 @@ pub async fn guest_login(
         }
     }
     Err(ApiError::Internal)
+}
+
+/// 모든 사용자의 만료된 세션을 지운다(#25 A11). 한 시간마다 부른다.
+pub async fn cleanup_sessions(db: &sqlx::PgPool) -> Result<u64, sqlx::Error> {
+    Ok(
+        sqlx::query("DELETE FROM sessions WHERE expires_at <= now()")
+            .execute(db)
+            .await?
+            .rows_affected(),
+    )
 }
 
 /// 만든 지 24시간이 지난 테스트 계정을 지운다(#35). 방송·세션은 외래 키(ON DELETE CASCADE)로 함께 지워진다.

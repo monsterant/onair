@@ -91,6 +91,10 @@ async fn main() {
                     Ok(n) => tracing::info!(count = n, "지난 테스트 계정을 지웠습니다"),
                     Err(e) => tracing::warn!(error = %e, "테스트 계정 정리 실패"),
                 }
+                // 만료된 세션 정리(#25 A11)
+                if let Err(e) = onair_backend::auth::cleanup_sessions(&db).await {
+                    tracing::warn!(error = %e, "만료 세션 정리 실패");
+                }
             }
         });
     }

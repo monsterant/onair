@@ -26,6 +26,7 @@ import {
   currentUser,
   deleteBroadcast,
   guestLogin,
+  getConfig,
   endBroadcast,
   getBroadcast,
   listBroadcasts,
@@ -178,6 +179,10 @@ function loginPage(main: HTMLElement) {
     el('div', { className: 'row' }, guestBtn),
     demoError,
   );
+  // 서버에서 테스트 계정 기능이 꺼져 있으면 버튼 칸을 숨긴다(#25 A7). 물어보지 못하면 그대로 둔다.
+  getConfig()
+    .then((c) => (demo.hidden = !c.demo_login))
+    .catch(() => {});
   main.append(form, demo);
 }
 
