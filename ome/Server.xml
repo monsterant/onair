@@ -369,6 +369,13 @@
 							</CrossDomains>
 							<CreateDefaultPlaylist>true</CreateDefaultPlaylist> <!-- llhls.m3u8 -->
 						</LLHLS>
+						<!-- onair(#47): 녹화. 백엔드가 관리 API(startRecord/stopRecord)로 시작·멈추고 파일 이름을 정한다.
+						     파일은 /rec 볼륨에 쌓이고 백엔드가 같은 볼륨을 읽어 다시보기로 내보낸다. -->
+						<FILE>
+							<RootPath>/rec</RootPath>
+							<FilePath>/${Stream}_${StartTime:YYYYMMDDhhmmss}.mp4</FilePath>
+							<InfoPath>/${Stream}.xml</InfoPath>
+						</FILE>
 					</Publishers>
 				</Application>
 			</Applications>

@@ -92,17 +92,33 @@ async fn main() {
         });
     }
 
+    // 녹화 폴더(#47). 없으면 녹화를 하지 않는다.
+    let rec = onair_backend::recordings::RecConfig {
+        dir: std::env::var("RECORDINGS_DIR")
+            .ok()
+            .filter(|d| !d.trim().is_empty())
+            .map(std::path::PathBuf::from),
+    };
+    match &rec.dir {
+        Some(d) => tracing::info!(dir = %d.display(), "녹화 켜짐"),
+        None => tracing::warn!("RECORDINGS_DIR이 없어 녹화가 꺼져 있습니다"),
+    }
+
     // CORS(다른 주소에서 오는 호출 허용)는 켜지 않는다. 화면은 vite 프록시(/api)로 같은 주소에서 부르고,
     // OME 웹훅은 서버끼리 주고받으므로 필요 없다.
     // 15초마다 OME 스트림 목록과 방송 상태를 맞춘다(#10: opening/closing 알림만으로는 상태가 어긋날 수 있다).
     if ome_api.is_configured() {
-        let (db, api) = (db.clone(), ome_api.clone());
+        let (db, api, rec) = (db.clone(), ome_api.clone(), rec.clone());
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(15));
             loop {
                 tick.tick().await;
                 if let Err(e) = onair_backend::ome::reconcile(&db, &api).await {
                     tracing::warn!(error = %e, "방송 상태 맞춰 보기 실패");
+                }
+                // 녹화 시작·멈춤·정리(#47)
+                if let Err(e) = onair_backend::recordings::sync(&db, &api, &rec).await {
+                    tracing::warn!(error = %e, "녹화 맞춰 보기 실패");
                 }
             }
         });
@@ -139,6 +155,7 @@ async fn main() {
         auth,
         ome: ome_api,
         toss,
+        rec: rec.clone(),
     })
     .merge(onair_backend::ome_routes(ome_state));
 

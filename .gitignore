@@ -10,3 +10,5 @@ my-notes/
 
 # 리뷰 에이전트의 임시 작업 사본(worktree)
 .claude/worktrees/
+# 로컬 녹화 파일(#47)
+recordings/
