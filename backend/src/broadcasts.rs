@@ -297,6 +297,51 @@ pub async fn publish_info(
     ))
 }
 
+/// 송출 키를 새로 만든다(#28). 소유자만. 키가 샜을 때 방송을 새로 만들지 않고 바꿀 수 있다.
+/// - 옛 키로 지금 송출 중이면 끊는다. 다시 붙으려 해도 웹훅이 새 키와 비교해 거절한다.
+/// - 종료된 방송은 송출할 수 없으니 바꾸지 않는다(409).
+pub async fn rotate_key(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Path(id): Path<i64>,
+) -> Result<([(header::HeaderName, &'static str); 1], Json<PublishInfo>), ApiError> {
+    let b = owned(&state, id, &user).await?;
+    if b.status == "ended" {
+        return Err(ApiError::Conflict(
+            "종료된 방송은 송출 키를 바꿀 수 없습니다",
+        ));
+    }
+    let key = random_hex(32)?;
+    // 소유자 조건을 UPDATE에도 넣는다(확인과 바꾸기 사이에 무슨 일이 있어도 남의 방송을 바꾸지 않게)
+    let changed = sqlx::query(
+        "UPDATE broadcasts SET stream_key = $1, updated_at = now()
+          WHERE id = $2 AND owner_id = $3 AND status <> 'ended'",
+    )
+    .bind(&key)
+    .bind(id)
+    .bind(user.id)
+    .execute(&state.db)
+    .await?;
+    if changed.rows_affected() == 0 {
+        // 그 사이 지워졌으면 404(find가 돌려준다), 종료됐으면 409(#28 리뷰)
+        find(&state, id).await?;
+        return Err(ApiError::Conflict(
+            "종료된 방송은 송출 키를 바꿀 수 없습니다",
+        ));
+    }
+    // 옛 키로 붙어 있는 송출을 끊는다
+    state.ome.stop_stream(&b.stream_name).await;
+    let whip_path = format!("/app/{}?direction=whip&key={key}", b.stream_name);
+    Ok((
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(PublishInfo {
+            stream_name: b.stream_name,
+            stream_key: key,
+            whip_path,
+        }),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

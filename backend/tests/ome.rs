@@ -362,3 +362,22 @@ async fn opening_sets_started_at_once_and_keeps_it_while_live(db: PgPool) {
     assert_eq!(started().await.unwrap(), before);
     assert!(before < first);
 }
+
+#[sqlx::test]
+async fn old_key_is_denied_after_rotation(db: PgPool) {
+    // 송출 키를 새로 만든 뒤에는 옛 키로 송출할 수 없고 새 키로는 된다(#28)
+    seed(&db, "ready").await;
+    let r = router(db.clone());
+    let new_key = format!("{}2", &SKEY[..SKEY.len() - 1]);
+    sqlx::query("UPDATE broadcasts SET stream_key = $1")
+        .bind(&new_key)
+        .execute(&db)
+        .await
+        .unwrap();
+    let (_, old) = signed(&r, "incoming", "opening", &publish_url(NAME, SKEY)).await;
+    assert_eq!(old, json!({ "allowed": false }));
+    assert_eq!(status_of(&db).await, "ready");
+    let (_, new) = signed(&r, "incoming", "opening", &publish_url(NAME, &new_key)).await;
+    assert_eq!(new, json!({ "allowed": true }));
+    assert_eq!(status_of(&db).await, "live");
+}
