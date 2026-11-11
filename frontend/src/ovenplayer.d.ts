@@ -4,6 +4,10 @@ declare module 'ovenplayer' {
   type Player = {
     remove(): void;
     on(event: string, cb: (data: unknown) => void): void;
+    getMute(): boolean;
+    setMute(muted: boolean): void;
+    getVolume(): number;
+    setVolume(volume: number): void;
   };
   const OvenPlayer: {
     create(containerId: string, options: Record<string, unknown> & { sources: Source[] }): Player;

@@ -410,3 +410,50 @@ a.button.ghost {
   background: transparent;
   border: 1px solid rgba(255, 255, 255, 0.2);
 }
+
+/* 심사 시뮬레이션 다듬기 (#55) */
+button.primary {
+  background: var(--accent);
+  color: #06281d;
+}
+
+a.button.ghost {
+  color: var(--text);
+}
+
+.topbar a.button,
+.topbar button,
+.who span {
+  white-space: nowrap;
+}
+
+.who .username {
+  max-width: 14ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sound-toggle {
+  align-self: flex-start;
+  margin: 8px 0;
+}
+
+.intro h2 {
+  margin: 0;
+}
+
+@media (max-width: 480px) {
+  .who {
+    gap: 6px;
+    font-size: 0.9rem;
+  }
+
+  .who .username {
+    max-width: 8ch;
+  }
+
+  .topbar a.button,
+  .topbar button {
+    padding: 6px 8px;
+  }
+}

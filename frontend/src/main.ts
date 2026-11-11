@@ -94,7 +94,7 @@ function header(): HTMLElement {
   if (me) {
     right.append(
       el('a', { href: '#/new', className: 'button', textContent: '방송 만들기' }),
-      el('span', { textContent: `${me.username}님` }),
+      el('span', { className: 'username', textContent: `${me.username}님` }),
       el('button', {
         type: 'button',
         textContent: '로그아웃',
@@ -114,6 +114,25 @@ function header(): HTMLElement {
 // ---------- 목록 ----------
 
 async function listPage(main: HTMLElement) {
+  if (!me) {
+    // 처음 온 사람(심사자)이 무엇을 할지 바로 알 수 있게 한 줄 소개와 시작 버튼
+    const err = el('p', { className: 'error', role: 'alert' });
+    const start = el('button', { type: 'button', className: 'primary', textContent: '테스트 계정으로 바로 시작' });
+    start.onclick = action(start, err, async () => {
+      me = await guestLogin();
+      go('#/new');
+    });
+    main.append(
+      el(
+        'section',
+        { className: 'panel intro' },
+        el('h2', { textContent: '브라우저만으로 방송하고, 누구나 바로 시청하세요' }),
+        el('p', { className: 'hint', textContent: 'PC 화면 공유·휴대폰 카메라로 방송하고, 시청은 로그인 없이 됩니다. 댓글·후원(테스트 결제)·다시보기도 있습니다.' }),
+        el('div', { className: 'row' }, start, el('a', { href: '#/login', className: 'button ghost', textContent: '로그인 · 회원가입' })),
+        err,
+      ),
+    );
+  }
   main.append(el('h2', { textContent: '방송 목록' }));
   const box = el('div', { className: 'list', textContent: '불러오는 중...' });
   main.append(box);
@@ -168,7 +187,7 @@ function loginPage(main: HTMLElement) {
 
   // 심사자마다 따로 쓰는 테스트 계정(#35). 공용 계정이면 방송 수 한도·송출 키·삭제가 심사자끼리 섞인다.
   const demoError = el('p', { className: 'error', role: 'alert' });
-  const guestBtn = el('button', { type: 'button', textContent: '테스트 계정으로 바로 시작' });
+  const guestBtn = el('button', { type: 'button', className: 'primary', textContent: '테스트 계정으로 바로 시작' });
   guestBtn.onclick = action(guestBtn, demoError, async () => done(await guestLogin()));
   const demo = el(
     'section',
@@ -197,7 +216,7 @@ function newPage(main: HTMLElement) {
   const description = el('textarea', { name: 'description', placeholder: '설명 (1000자 이하, 선택)', maxLength: 1000, rows: 4 });
   const error = el('p', { className: 'error', role: 'alert' });
   const submit = el('button', { type: 'submit', textContent: '만들기' });
-  const form = el('form', { className: 'panel' }, el('h2', { textContent: '방송 만들기' }), title, description, submit, error);
+  const form = el('form', { className: 'panel', noValidate: true }, el('h2', { textContent: '방송 만들기' }), title, description, submit, error);
   form.onsubmit = (ev) => {
     ev.preventDefault();
     action(submit, error, async () => {
@@ -227,6 +246,16 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
   const descEl = el('p', { className: 'description' });
   const playerBox = el('div', { className: 'player-box' });
   const offAir = el('p', { className: 'hint' });
+  // 브라우저는 소리 있는 자동 재생을 막아 음소거로 시작한다. 켜는 방법이 눈에 띄게 버튼을 둔다(심사 시뮬레이션: "소리가 안 난다"로 보임)
+  const soundBtn = el('button', { type: 'button', className: 'sound-toggle', textContent: '🔇 소리 켜기', hidden: true });
+  soundBtn.onclick = () => {
+    void player().then((p) => {
+      const on = p.toggleMute('player');
+      if (on !== null) soundBtn.textContent = on ? '🔊 소리 끄기' : '🔇 소리 켜기';
+    });
+  };
+  // 소유자가 이 화면에서 송출하는 동안에는 자기 방송을 플레이어로 다시 보지 않는다(미리보기가 따로 있다)
+  const selfPublishing = () => !!publisher && publisher.state !== 'idle';
   let playing = false;
   let retry: ReturnType<typeof setTimeout> | undefined;
   let gone = false;
@@ -245,9 +274,11 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
     statusBox.replaceChildren(badge(b.status));
     titleEl.textContent = b.title;
     descEl.textContent = b.description;
-    const live = b.status === 'live';
+    const live = b.status === 'live' && !selfPublishing();
     if (live && !playing) {
       playerBox.replaceChildren(el('div', { id: 'player' }));
+      soundBtn.hidden = false;
+      soundBtn.textContent = '🔇 소리 켜기';
       player().then((p) => {
         if (gen === routeGen && b.status === 'live') p.startPlayer('player', b.stream_name, onPlayerError);
       });
@@ -256,9 +287,17 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
       clearTimeout(retry);
       player().then((p) => p.stopPlayer('player'));
       playerBox.replaceChildren();
+      soundBtn.hidden = true;
       playing = false;
     }
-    offAir.textContent = live ? '' : b.status === 'ended' ? '종료된 방송입니다.' : '아직 방송 전입니다. 방송이 시작되면 자동으로 재생됩니다.';
+    offAir.textContent =
+      b.status === 'live'
+        ? selfPublishing()
+          ? '지금 이 화면에서 송출하고 있습니다. 시청자 화면은 다른 창(시크릿 창)에서 확인하세요.'
+          : ''
+        : b.status === 'ended'
+          ? '종료된 방송입니다.'
+          : '아직 방송 전입니다. 방송이 시작되면 자동으로 재생됩니다.';
     owner?.update(b);
     studio?.update(b);
   };
@@ -267,6 +306,7 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
     el('div', { className: 'detail-head' }, statusBox, titleEl),
     el('p', { className: 'hint', textContent: `방송자: ${b.owner_username}` }),
     playerBox,
+    soundBtn,
     offAir,
     descEl,
   );
@@ -274,6 +314,24 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
   const publisher = isOwner ? new Publisher() : null;
   const owner = publisher ? ownerPanel(b, (nb) => { b = nb; paint(); }, publisher) : null;
   const studio = publisher ? studioPanel(() => b, publisher) : null;
+  // 송출이 시작·멈추면 방송 상태를 바로 다시 읽어 위쪽 표시(대기/방송 중)를 맞춘다. 5초 새로고침을 기다리지 않는다.
+  if (publisher) {
+    const showStudio = publisher.onState;
+    publisher.onState = (s, d) => {
+      showStudio(s, d);
+      if (s === 'live' || s === 'idle') {
+        setTimeout(() => {
+          if (gen !== routeGen || gone) return;
+          void getBroadcast(id)
+            .then((nb) => {
+              b = nb;
+              if (gen === routeGen) paint();
+            })
+            .catch(() => {});
+        }, 800);
+      }
+    };
+  }
   if (studio) main.append(studio.el);
   if (owner) main.append(owner.el);
   main.append(recordingsPanel(id), donationsPanel(b, gen), commentsPanel(id, gen));
@@ -843,8 +901,8 @@ function studioPanel(current: () => Broadcast, publisher: Publisher): { el: HTML
     'section',
     { className: 'panel studio' },
     el('h3', { textContent: '방송하기' }),
-    screenRow,
-    cameraRow,
+    // 휴대폰(터치 화면)에서는 카메라 방송을 먼저 보여 준다
+    ...(matchMedia('(pointer: coarse)').matches ? [cameraRow, screenRow] : [screenRow, cameraRow]),
     el('div', { className: 'row' }, stop, state),
     preview,
     warn,
@@ -948,7 +1006,8 @@ async function route() {
   app.replaceChildren(header(), main, status);
   fetch('/api/health')
     .then((r) => r.json())
-    .then((h: { status: string; db: string }) => (status.textContent = `서버 ${h.status}, DB ${h.db}`))
+    // 정상이면 아무것도 보이지 않는다. 문제가 있을 때만 알린다.
+    .then((h: { status: string; db: string }) => (status.textContent = h.db === 'ok' ? '' : `서버 ${h.status}, DB ${h.db}`))
     .catch(() => (status.textContent = '백엔드에 연결하지 못했습니다'));
 
   // 토스 결제창에서 돌아온 주소(/donate/success?..., /donate/fail?...)는 주소 # 대신 경로로 온다(#41)
