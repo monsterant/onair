@@ -303,7 +303,15 @@ async fn start_missing(db: &sqlx::PgPool, api: &OmeApi) -> Result<(), sqlx::Erro
         .bind(&owner)
         .bind(seen)
         .execute(db)
-        .await?;
+        .await;
+        // 그 사이 방송이 지워졌으면(외래 키 오류) 이 방송만 건너뛰고 다른 방송은 계속 본다(#59 공격 사냥)
+        let inserted = match inserted {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, broadcast = bid, "녹화 기록을 넣지 못해 건너뜀");
+                continue;
+            }
+        };
         if inserted.rows_affected() == 0 {
             continue;
         }

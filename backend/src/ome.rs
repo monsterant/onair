@@ -172,14 +172,14 @@ async fn decide_opening(
 }
 
 /// 송출이 닫히면 `live`였던 방송을 `ready`로 돌린다(종료된 방송은 그대로 둔다).
+/// 멈춰야 할 녹화 id를 돌려준다. 멈추는 일은 웹훅에 답한 뒤에 한다(`stop_after_closing`).
 async fn on_closing(
     db: &sqlx::PgPool,
-    api: &crate::ome_api::OmeApi,
     direction: &str,
     url: &str,
-) -> Result<(), sqlx::Error> {
+) -> Result<Vec<String>, sqlx::Error> {
     if direction != "incoming" {
-        return Ok(());
+        return Ok(Vec::new());
     }
     if let Some((name, _)) = parse_stream(url) {
         sqlx::query(
@@ -191,26 +191,47 @@ async fn on_closing(
         .await?;
         // 송출이 끊기면 그 방송의 녹화를 바로 멈춘다(#47 공격 사냥).
         // 15초 맞춰 보기를 기다리면, 그 사이 다시 붙은 송출을 OME가 같은 녹화·같은 파일에 이어 써서 앞부분을 덮어쓴다.
-        let recording: Vec<String> = sqlx::query_scalar(
+        return sqlx::query_scalar(
             "SELECT r.record_id FROM recordings r JOIN broadcasts b ON b.id = r.broadcast_id
               WHERE b.stream_name = $1 AND r.status = 'recording'",
         )
         .bind(&name)
         .fetch_all(db)
-        .await?;
-        for rid in recording {
+        .await;
+    }
+    Ok(Vec::new())
+}
+
+/// 송출이 닫힌 방송의 녹화를 멈춘다. 웹훅에 답한 뒤 따로 돈다(#59 공격 사냥).
+/// - 우리가 OME에 "송출 끊어"(키 다시 만들기·종료·삭제)라고 하면 OME는 그 호출 안에서 closing 웹훅을 보내고 답을 기다린다.
+///   웹훅 안에서 OME에 녹화 멈춤을 부르면 OME가 답하지 못해 둘 다 3초 뒤 실패했다.
+///   그러면 녹화가 "녹화 중"으로 남아, 곧바로 다시 붙은 송출은 녹화되지 않았다.
+/// - 실패하면 1초 쉬고 3번까지 다시 한다. 멈추면 녹화 서둘러 신호를 보낸다(그 사이 다시 붙었으면 바로 새 녹화).
+pub async fn stop_after_closing(
+    db: sqlx::PgPool,
+    api: crate::ome_api::OmeApi,
+    kick: crate::recordings::Kick,
+    record_ids: Vec<String>,
+) {
+    for rid in record_ids {
+        for _ in 0..3 {
             if api.stop_record(&rid).await {
-                sqlx::query(
+                if let Err(e) = sqlx::query(
                     "UPDATE recordings SET status = 'finishing', ended_at = now()
                       WHERE record_id = $1 AND status = 'recording'",
                 )
                 .bind(&rid)
-                .execute(db)
-                .await?;
+                .execute(&db)
+                .await
+                {
+                    tracing::warn!(error = %e, record_id = %rid, "녹화 멈춤 기록 실패");
+                }
+                break;
             }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
     }
-    Ok(())
+    kick.send();
 }
 
 /// OME에 실제로 있는 스트림과 DB 상태를 맞춘다(15초마다 main.rs에서 부른다).
@@ -307,9 +328,17 @@ pub async fn admission(
         // 닫힘 알림에는 빈 JSON으로 답한다(OME 문서).
         "closing" => {
             tracing::info!(direction = %r.direction, protocol = %r.protocol, url = redact(&r.url), "OME closing");
-            on_closing(&state.db, &state.ome, &r.direction, &r.url)
+            let stop = on_closing(&state.db, &r.direction, &r.url)
                 .await
                 .map_err(db_err)?;
+            if !stop.is_empty() {
+                tokio::spawn(stop_after_closing(
+                    state.db.clone(),
+                    state.ome.clone(),
+                    state.kick.clone(),
+                    stop,
+                ));
+            }
             Ok(Json(json!({})))
         }
         "opening" => {
