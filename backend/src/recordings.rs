@@ -32,6 +32,8 @@ pub const MAX_RECORDING: Duration = Duration::from_secs(2 * 60 * 60);
 pub const TOTAL_CAP_BYTES: i64 = 3 * 1024 * 1024 * 1024;
 /// 멈춘 뒤 파일을 기다리는 시간
 pub const FINISH_WAIT: Duration = Duration::from_secs(120);
+/// 동시에 녹화하는 방송 수 상한(서버 디스크·CPU 보호). 넘으면 다음 차례까지 기다린다.
+pub const MAX_CONCURRENT: i64 = 3;
 
 /// 녹화 설정. 폴더가 없으면(Default) 녹화를 하지 않는다.
 #[derive(Clone, Debug, Default)]
@@ -122,21 +124,65 @@ pub async fn sync(db: &sqlx::PgPool, api: &OmeApi, cfg: &RecConfig) -> Result<()
     if !api.is_configured() {
         return Ok(());
     }
-    start_missing(db, api).await?;
+    // OME가 다시 켜지면 녹화 목록을 잊는다. 우리 기록은 녹화 중인데 OME에 없으면 끝난 것으로 보고 새로 시작하게 한다.
+    forget_lost(db, api).await?;
     stop_finished(db, api).await?;
     settle_finishing(db, dir).await?;
     enforce_cap(db, dir).await?;
     remove_orphan_files(db, dir).await?;
+    // 디스크(녹화 폴더 실제 합계)가 상한 안일 때만 새 녹화를 시작한다(#47 리뷰)
+    if dir_bytes(dir) < TOTAL_CAP_BYTES as u64 {
+        start_missing(db, api).await?;
+    } else {
+        tracing::warn!("녹화 폴더가 상한을 넘어 새 녹화를 시작하지 않습니다");
+    }
     Ok(())
 }
 
-/// 1. 방송 중인데 녹화 중이 아닌 방송의 녹화를 시작한다
+/// 녹화 폴더의 실제 파일 합계(녹화 중인 파일 포함)
+fn dir_bytes(dir: &FsPath) -> u64 {
+    std::fs::read_dir(dir)
+        .map(|it| {
+            it.flatten()
+                .filter_map(|e| e.metadata().ok())
+                .filter(|m| m.is_file())
+                .map(|m| m.len())
+                .sum()
+        })
+        .unwrap_or(0)
+}
+
+/// 우리 기록은 녹화 중인데 OME에 그 녹화가 없으면(OME 재시작 등) 끝난 것으로 본다(#47 리뷰)
+async fn forget_lost(db: &sqlx::PgPool, api: &OmeApi) -> Result<(), sqlx::Error> {
+    let Some(present) = api.records().await else {
+        return Ok(());
+    };
+    let present: Vec<String> = present.into_iter().collect();
+    sqlx::query(
+        "UPDATE recordings SET status = 'finishing', ended_at = now()
+          WHERE status = 'recording' AND started_at < now() - interval '30 seconds'
+            AND NOT (record_id = ANY($1))",
+    )
+    .bind(&present)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+/// 1. 방송 중인데 녹화 중이 아닌 방송의 녹화를 시작한다(동시 녹화 수 상한 안에서)
 async fn start_missing(db: &sqlx::PgPool, api: &OmeApi) -> Result<(), sqlx::Error> {
+    let active: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM recordings WHERE status = 'recording'")
+            .fetch_one(db)
+            .await?;
+    let room = (MAX_CONCURRENT - active).max(0);
     let rows: Vec<(i64, String, String, String)> = sqlx::query_as(
         "SELECT b.id, b.stream_name, b.title, u.username FROM broadcasts b JOIN users u ON u.id = b.owner_id
           WHERE b.status = 'live'
-            AND NOT EXISTS (SELECT 1 FROM recordings r WHERE r.broadcast_id = b.id AND r.status = 'recording')",
+            AND NOT EXISTS (SELECT 1 FROM recordings r WHERE r.broadcast_id = b.id AND r.status = 'recording')
+          ORDER BY b.started_at LIMIT $1",
     )
+    .bind(room)
     .fetch_all(db)
     .await?;
     for (bid, stream, title, owner) in rows {
@@ -195,7 +241,11 @@ async fn stop_finished(db: &sqlx::PgPool, api: &OmeApi) -> Result<(), sqlx::Erro
     .fetch_all(db)
     .await?;
     for record_id in rows {
-        api.stop_record(&record_id).await;
+        // OME가 멈췄다고 답할 때만 넘어간다. 실패하면 녹화 중으로 두고 다음 차례에 다시 멈춘다(#47 리뷰:
+        // 넘어가 버리면 OME는 계속 쓰는데 새 녹화가 옆에서 또 시작된다)
+        if !api.stop_record(&record_id).await {
+            continue;
+        }
         sqlx::query(
             "UPDATE recordings SET status = 'finishing', ended_at = now()
               WHERE record_id = $1 AND status = 'recording'",
@@ -246,17 +296,20 @@ async fn settle_finishing(db: &sqlx::PgPool, dir: &FsPath) -> Result<(), sqlx::E
     Ok(())
 }
 
-/// 4. 합계가 상한을 넘으면 오래된 다시보기부터 지운다
+/// 4. 녹화 폴더 실제 합계(녹화 중인 파일 포함)가 상한을 넘으면 오래된 다시보기부터 지운다
 async fn enforce_cap(db: &sqlx::PgPool, dir: &FsPath) -> Result<(), sqlx::Error> {
     let rows: Vec<(i64, String, i64)> = sqlx::query_as(
-        "SELECT id, file_name, bytes FROM recordings WHERE status = 'ready' ORDER BY started_at DESC, id DESC",
+        "SELECT id, file_name, bytes FROM recordings WHERE status = 'ready' ORDER BY started_at ASC, id ASC",
     )
     .fetch_all(db)
     .await?;
-    let mut total = 0_i64;
+    let mut total = dir_bytes(dir).max(rows.iter().map(|r| r.2 as u64).sum()) as i64;
     for (id, file, bytes) in rows {
-        total += bytes;
-        if total > TOTAL_CAP_BYTES {
+        if total <= TOTAL_CAP_BYTES {
+            break;
+        }
+        total -= bytes;
+        {
             tracing::info!(%file, "디스크 상한을 넘어 오래된 다시보기를 지움");
             sqlx::query("DELETE FROM recordings WHERE id = $1")
                 .bind(id)

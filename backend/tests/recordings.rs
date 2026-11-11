@@ -37,6 +37,10 @@ struct FakeOme {
     fail_start: Arc<Mutex<bool>>,
     /// 멈출 때 파일을 만들지 않는다(파일이 안 생기는 경우)
     no_file: Arc<Mutex<bool>>,
+    /// 녹화 멈춤이 실패한다(OME 잠깐 끊김)
+    fail_stop: Arc<Mutex<bool>>,
+    /// 녹화 목록 조회가 실패한다
+    records_unavailable: Arc<Mutex<bool>>,
     dir: Arc<PathBuf>,
 }
 
@@ -72,10 +76,27 @@ async fn fake_ome(dir: PathBuf) -> (FakeOme, OmeApi) {
             "/v1/vhosts/default/apps/{action}",
             post(|State(f): State<FakeOme>, Path(action): Path<String>, Json(b): Json<Value>| async move {
                 let id = b["id"].as_str().unwrap_or_default().to_string();
+                let ok = |c: StatusCode| (c, Json(json!({ "statusCode": c.as_u16() })));
                 match action.as_str() {
+                    // 지금 들고 있는 녹화 목록(멈추지 않은 것)
+                    "app:records" => {
+                        if *f.records_unavailable.lock().unwrap() {
+                            return ok(StatusCode::INTERNAL_SERVER_ERROR);
+                        }
+                        let stopped = f.stopped.lock().unwrap().clone();
+                        let list: Vec<Value> = f
+                            .records
+                            .lock()
+                            .unwrap()
+                            .keys()
+                            .filter(|k| !stopped.contains(k))
+                            .map(|k| json!({ "id": k, "state": "recording" }))
+                            .collect();
+                        (StatusCode::OK, Json(json!({ "statusCode": 200, "response": list })))
+                    }
                     "app:startRecord" => {
                         if *f.fail_start.lock().unwrap() {
-                            return StatusCode::INTERNAL_SERVER_ERROR;
+                            return ok(StatusCode::INTERNAL_SERVER_ERROR);
                         }
                         let variants = b["stream"]["variantNames"]
                             .as_array()
@@ -89,9 +110,12 @@ async fn fake_ome(dir: PathBuf) -> (FakeOme, OmeApi) {
                                 variants,
                             ),
                         );
-                        StatusCode::OK
+                        ok(StatusCode::OK)
                     }
                     "app:stopRecord" => {
+                        if *f.fail_stop.lock().unwrap() {
+                            return ok(StatusCode::INTERNAL_SERVER_ERROR);
+                        }
                         f.stopped.lock().unwrap().push(id.clone());
                         if let Some((_, path, _)) = f.records.lock().unwrap().get(&id)
                                 && !*f.no_file.lock().unwrap()
@@ -99,9 +123,9 @@ async fn fake_ome(dir: PathBuf) -> (FakeOme, OmeApi) {
                                 let file = f.dir.join(path.trim_start_matches('/'));
                                 std::fs::write(file, b"0123456789abcdefghij").unwrap();
                         }
-                        StatusCode::OK
+                        ok(StatusCode::OK)
                     }
-                    _ => StatusCode::NOT_FOUND,
+                    _ => ok(StatusCode::NOT_FOUND),
                 }
             }),
         )
@@ -508,5 +532,138 @@ async fn recording_is_off_without_a_folder(db: PgPool) {
     sync(&db, &api, &RecConfig::default()).await.unwrap();
     assert!(statuses(&db).await.is_empty());
     assert!(fake.records.lock().unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[sqlx::test]
+async fn failed_stop_keeps_recording_and_retries(db: PgPool) {
+    let dir = temp_dir();
+    let (fake, api) = fake_ome(dir.clone()).await;
+    let cfg = RecConfig {
+        dir: Some(dir.clone()),
+    };
+    let r = router(db.clone(), api.clone(), Some(dir.clone()));
+    let (bid, stream) = live_broadcast(&r, &db, "멈춤 실패").await;
+    fake.streams.lock().unwrap().insert(stream, "H264".into());
+    sync(&db, &api, &cfg).await.unwrap();
+    sqlx::query("UPDATE broadcasts SET status = 'ended' WHERE id = $1")
+        .bind(bid)
+        .execute(&db)
+        .await
+        .unwrap();
+    // OME가 멈춤을 거절하면 녹화 중으로 남는다(새 녹화가 옆에서 시작되지 않는다)
+    *fake.fail_stop.lock().unwrap() = true;
+    sync(&db, &api, &cfg).await.unwrap();
+    assert_eq!(statuses(&db).await, ["recording"]);
+    // 다음 차례에 다시 멈춘다
+    *fake.fail_stop.lock().unwrap() = false;
+    sync(&db, &api, &cfg).await.unwrap();
+    sync(&db, &api, &cfg).await.unwrap();
+    assert_eq!(statuses(&db).await, ["ready"]);
+    assert_eq!(fake.records.lock().unwrap().len(), 1);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[sqlx::test]
+async fn recording_lost_by_ome_is_restarted(db: PgPool) {
+    let dir = temp_dir();
+    let (fake, api) = fake_ome(dir.clone()).await;
+    let cfg = RecConfig {
+        dir: Some(dir.clone()),
+    };
+    let r = router(db.clone(), api.clone(), Some(dir.clone()));
+    let (_, stream) = live_broadcast(&r, &db, "OME 재시작").await;
+    fake.streams.lock().unwrap().insert(stream, "H264".into());
+    sync(&db, &api, &cfg).await.unwrap();
+    // OME가 다시 켜져서 녹화 목록을 잊었다
+    sqlx::query("UPDATE recordings SET started_at = now() - interval '1 minute'")
+        .execute(&db)
+        .await
+        .unwrap();
+    fake.records.lock().unwrap().clear();
+    // 목록을 물어볼 수 없으면 아무것도 바꾸지 않는다
+    *fake.records_unavailable.lock().unwrap() = true;
+    sync(&db, &api, &cfg).await.unwrap();
+    assert_eq!(statuses(&db).await, ["recording"]);
+    *fake.records_unavailable.lock().unwrap() = false;
+    sync(&db, &api, &cfg).await.unwrap();
+    // 잃어버린 녹화는 끝난 것으로 보고, 방송이 계속되므로 새 녹화를 시작한다
+    let s = statuses(&db).await;
+    assert_eq!(s.len(), 2, "{s:?}");
+    assert_eq!(s[1], "recording");
+    assert!(s[0] == "finishing" || s[0] == "failed", "{s:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[sqlx::test]
+async fn at_most_three_recordings_at_once(db: PgPool) {
+    let dir = temp_dir();
+    let (fake, api) = fake_ome(dir.clone()).await;
+    let cfg = RecConfig {
+        dir: Some(dir.clone()),
+    };
+    let r = router(db.clone(), api.clone(), Some(dir.clone()));
+    for i in 0..4 {
+        let (_, stream) = live_broadcast(&r, &db, &format!("방송 {i}")).await;
+        fake.streams.lock().unwrap().insert(stream, "H264".into());
+    }
+    sync(&db, &api, &cfg).await.unwrap();
+    assert_eq!(statuses(&db).await.len(), 3);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[sqlx::test]
+async fn deleting_a_broadcast_stops_its_recording_and_files_are_cleaned(db: PgPool) {
+    let dir = temp_dir();
+    let (fake, api) = fake_ome(dir.clone()).await;
+    let cfg = RecConfig {
+        dir: Some(dir.clone()),
+    };
+    let r = router(db.clone(), api.clone(), Some(dir.clone()));
+    let cookie = call(&r, "POST", "/auth/demo/1", None, None, None)
+        .await
+        .3
+        .unwrap();
+    let (bid, stream) = live_broadcast(&r, &db, "삭제").await;
+    fake.streams.lock().unwrap().insert(stream, "H264".into());
+    sync(&db, &api, &cfg).await.unwrap();
+    assert_eq!(
+        call(
+            &r,
+            "DELETE",
+            &format!("/broadcasts/{bid}"),
+            None,
+            Some(&cookie),
+            None
+        )
+        .await
+        .0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(fake.stopped.lock().unwrap().len(), 1, "녹화를 먼저 멈춘다");
+    assert!(statuses(&db).await.is_empty());
+    // 기록 없는 녹화 파일: 10분이 지나면 지운다. 방금 생긴 파일은 남긴다(쓰는 중일 수 있다)
+    let file = std::fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .find(|e| e.file_name().to_string_lossy().starts_with("rec-"))
+        .unwrap()
+        .path();
+    sync(&db, &api, &cfg).await.unwrap();
+    assert!(file.exists());
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(11 * 60);
+    std::fs::File::options()
+        .write(true)
+        .open(&file)
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+    std::fs::write(dir.join("notes.txt"), b"keep").unwrap();
+    sync(&db, &api, &cfg).await.unwrap();
+    assert!(!file.exists());
+    assert!(
+        dir.join("notes.txt").exists(),
+        "규칙에 맞지 않는 파일은 건드리지 않는다"
+    );
     let _ = std::fs::remove_dir_all(dir);
 }

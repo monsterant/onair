@@ -164,18 +164,52 @@ impl OmeApi {
         }
     }
 
-    /// 녹화를 멈춘다(#47). 이미 멈췄거나 없는 녹화여도 오류로 보지 않는다.
-    pub async fn stop_record(&self, id: &str) {
-        let Some(i) = &self.inner else { return };
-        let res = i
+    /// 녹화를 멈춘다(#47). 멈췄으면(또는 이미 없는 녹화면) true. OME에 닿지 못했거나 거절하면 false(다음에 다시 시도).
+    pub async fn stop_record(&self, id: &str) -> bool {
+        let Some(i) = &self.inner else { return false };
+        match i
             .http
             .post(Self::app_url(&i.base, "stopRecord"))
             .header("Authorization", &i.auth)
             .json(&serde_json::json!({ "id": id }))
             .send()
-            .await;
-        if let Err(e) = res {
-            tracing::warn!(error = %e, id, "OME API에 닿지 못함(녹화 멈춤)");
+            .await
+        {
+            Ok(r) if r.status().is_success() || r.status() == reqwest::StatusCode::NOT_FOUND => {
+                true
+            }
+            Ok(r) => {
+                tracing::warn!(status = %r.status(), id, "OME 녹화 멈춤 실패");
+                false
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, id, "OME API에 닿지 못함(녹화 멈춤)");
+                false
+            }
         }
+    }
+
+    /// OME가 지금 들고 있는 녹화 id들(#47). 물어볼 수 없으면 None(그때는 아무것도 바꾸지 않는다).
+    pub async fn records(&self) -> Option<HashSet<String>> {
+        let i = self.inner.as_ref()?;
+        let r = i
+            .http
+            .post(Self::app_url(&i.base, "records"))
+            .header("Authorization", &i.auth)
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .ok()?;
+        if !r.status().is_success() {
+            return None;
+        }
+        let v: serde_json::Value = r.json().await.ok()?;
+        Some(
+            v["response"]
+                .as_array()?
+                .iter()
+                .filter_map(|x| x["id"].as_str().map(str::to_string))
+                .collect(),
+        )
     }
 }

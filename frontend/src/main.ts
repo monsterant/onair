@@ -319,7 +319,7 @@ function replayCard(r: Recording): HTMLElement {
 }
 
 /** 다시보기 목록(#/recordings). 누구나 본다. */
-async function recordingsPage(main: HTMLElement) {
+async function recordingsPage(main: HTMLElement, gen: number) {
   main.append(
     el('h2', { textContent: '다시보기' }),
     el('p', { className: 'hint', textContent: '방송이 끝나면 녹화가 여기에 올라옵니다(끝난 뒤 30초쯤 걸립니다).' }),
@@ -328,6 +328,7 @@ async function recordingsPage(main: HTMLElement) {
   main.append(box);
   try {
     const items = await listRecordings();
+    if (gen !== routeGen) return;
     box.replaceChildren(...(items.length ? items.map(replayCard) : [el('p', { className: 'hint', textContent: '아직 다시보기가 없습니다.' })]));
   } catch (e) {
     box.replaceChildren(el('p', { className: 'error', textContent: message(e) }));
@@ -335,14 +336,17 @@ async function recordingsPage(main: HTMLElement) {
 }
 
 /** 다시보기 상세(#/r/{id}): 녹화 영상 재생 */
-async function replayPage(main: HTMLElement, id: number) {
+async function replayPage(main: HTMLElement, id: number, gen: number) {
   let r: Recording;
   try {
     r = await getRecording(id);
   } catch (e) {
+    if (gen !== routeGen) return;
     main.append(el('p', { className: 'error', textContent: message(e) }), el('a', { href: '#/recordings', textContent: '다시보기 목록으로' }));
     return;
   }
+  // 기다리는 사이 다른 화면으로 옮겼으면 영상을 만들지 않는다(#47 리뷰)
+  if (gen !== routeGen) return;
   const video = el('video', { controls: true, preload: 'metadata', playsInline: true, className: 'replay' });
   video.src = `/api${r.url}`;
   main.append(
@@ -949,8 +953,8 @@ async function route() {
   if (hash === '#/login') loginPage(main);
   else if (hash === '#/new') newPage(main);
   else if (detail) await detailPage(main, Number(detail[1]), gen);
-  else if (hash === '#/recordings') await recordingsPage(main);
-  else if (replay) await replayPage(main, Number(replay[1]));
+  else if (hash === '#/recordings') await recordingsPage(main, gen);
+  else if (replay) await replayPage(main, Number(replay[1]), gen);
   else await listPage(main);
 }
 
