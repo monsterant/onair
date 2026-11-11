@@ -83,12 +83,15 @@ pub async fn start_soon(
     Ok(())
 }
 
-/// 방송 중인데 아직 녹화가 없는 방송이 있는지
+/// 방송 중인데 아직 녹화가 없는 방송이 있고, 동시 녹화 자리도 남았는지.
+/// 자리가 없으면 다시 시도해도 시작할 수 없으니 기다리지 않는다(#59 리뷰).
 async fn waiting(db: &sqlx::PgPool) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM broadcasts b WHERE b.status = 'live'
-            AND NOT EXISTS (SELECT 1 FROM recordings r WHERE r.broadcast_id = b.id AND r.status = 'recording'))",
+        "SELECT (SELECT count(*) FROM recordings WHERE status = 'recording') < $1
+            AND EXISTS (SELECT 1 FROM broadcasts b WHERE b.status = 'live'
+              AND NOT EXISTS (SELECT 1 FROM recordings r WHERE r.broadcast_id = b.id AND r.status = 'recording'))",
     )
+    .bind(MAX_CONCURRENT)
     .fetch_one(db)
     .await
 }
@@ -255,8 +258,9 @@ async fn start_missing(db: &sqlx::PgPool, api: &OmeApi) -> Result<(), sqlx::Erro
             .fetch_one(db)
             .await?;
     let room = (MAX_CONCURRENT - active).max(0);
-    let rows: Vec<(i64, String, String, String)> = sqlx::query_as(
-        "SELECT b.id, b.stream_name, b.title, u.username FROM broadcasts b JOIN users u ON u.id = b.owner_id
+    // updated_at: 송출이 열리거나 닫힐 때마다 바뀐다. 아래에서 "그 사이 송출이 바뀌었는지" 보는 데 쓴다(#59 리뷰)
+    let rows: Vec<(i64, String, String, String, OffsetDateTime)> = sqlx::query_as(
+        "SELECT b.id, b.stream_name, b.title, u.username, b.updated_at FROM broadcasts b JOIN users u ON u.id = b.owner_id
           WHERE b.status = 'live'
             AND NOT EXISTS (SELECT 1 FROM recordings r WHERE r.broadcast_id = b.id AND r.status = 'recording')
           ORDER BY b.started_at",
@@ -265,7 +269,7 @@ async fn start_missing(db: &sqlx::PgPool, api: &OmeApi) -> Result<(), sqlx::Erro
     .await?;
     // 실제로 시작한 수만 센다. 코덱을 몰라 건너뛴 방송이 자리를 차지해 새 방송이 계속 밀리지 않게 한다(#47 2바퀴)
     let mut started = 0_i64;
-    for (bid, stream, title, owner) in rows {
+    for (bid, stream, title, owner, seen) in rows {
         if started >= room {
             break;
         }
@@ -283,9 +287,13 @@ async fn start_missing(db: &sqlx::PgPool, api: &OmeApi) -> Result<(), sqlx::Erro
         let record_id = format!("rec-{bid}-{hex}");
         let file = format!("{record_id}.{ext}");
         // 기록을 먼저 남긴다(같은 방송에 녹화 중은 하나뿐이라는 DB 규칙이 겹침을 막는다). OME가 거절하면 지운다.
+        // 위에서 읽은 뒤 송출이 닫혔으면(updated_at이 바뀜) 넣지 않는다. 닫히는 송출에 녹화를 걸면
+        // 곧바로 다시 붙은 송출까지 같은 파일에 이어 써질 수 있다(#47 R1과 같은 문제, #59 리뷰).
         let inserted = sqlx::query(
             "INSERT INTO recordings (broadcast_id, record_id, file_name, format, title, owner_username)
-             VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING",
+             SELECT $1, $2, $3, $4, $5, $6
+              WHERE EXISTS (SELECT 1 FROM broadcasts WHERE id = $1 AND status = 'live' AND updated_at = $7)
+             ON CONFLICT DO NOTHING",
         )
         .bind(bid)
         .bind(&record_id)
@@ -293,6 +301,7 @@ async fn start_missing(db: &sqlx::PgPool, api: &OmeApi) -> Result<(), sqlx::Erro
         .bind(ext)
         .bind(&title)
         .bind(&owner)
+        .bind(seen)
         .execute(db)
         .await?;
         if inserted.rows_affected() == 0 {
@@ -309,6 +318,25 @@ async fn start_missing(db: &sqlx::PgPool, api: &OmeApi) -> Result<(), sqlx::Erro
         } else {
             started += 1;
             tracing::info!(broadcast = bid, %file, "녹화 시작");
+            // 녹화를 거는 동안 송출이 닫혔거나 다시 열렸으면 바로 멈춘다(같은 이유, #59 리뷰).
+            // 다음 맞춰 보기가 지금 송출로 새 녹화를 시작한다.
+            let same: Option<bool> = sqlx::query_scalar(
+                "SELECT status = 'live' AND updated_at = $2 FROM broadcasts WHERE id = $1",
+            )
+            .bind(bid)
+            .bind(seen)
+            .fetch_optional(db)
+            .await?;
+            if same != Some(true) && api.stop_record(&record_id).await {
+                sqlx::query(
+                    "UPDATE recordings SET status = 'finishing', ended_at = now()
+                      WHERE record_id = $1 AND status = 'recording'",
+                )
+                .bind(&record_id)
+                .execute(db)
+                .await?;
+                tracing::info!(broadcast = bid, %file, "녹화 거는 사이 송출이 바뀌어 멈춤");
+            }
         }
     }
     Ok(())

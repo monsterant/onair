@@ -41,6 +41,10 @@ struct FakeOme {
     fail_stop: Arc<Mutex<bool>>,
     /// 녹화 목록 조회가 실패한다
     records_unavailable: Arc<Mutex<bool>>,
+    /// 영상 코덱을 물어본 횟수
+    codec_calls: Arc<Mutex<u32>>,
+    /// 녹화를 거는 순간 송출이 닫힌 것처럼 방송을 ready로 바꾼다(#59 리뷰)
+    close_on_start: Arc<Mutex<Option<PgPool>>>,
     dir: Arc<PathBuf>,
 }
 
@@ -60,6 +64,7 @@ async fn fake_ome(dir: PathBuf) -> (FakeOme, OmeApi) {
         .route(
             "/v1/vhosts/default/apps/app/streams/{name}",
             get(|State(f): State<FakeOme>, Path(name): Path<String>| async move {
+                *f.codec_calls.lock().unwrap() += 1;
                 match f.streams.lock().unwrap().get(&name) {
                     Some(codec) => (
                         StatusCode::OK,
@@ -97,6 +102,13 @@ async fn fake_ome(dir: PathBuf) -> (FakeOme, OmeApi) {
                     "app:startRecord" => {
                         if *f.fail_start.lock().unwrap() {
                             return ok(StatusCode::INTERNAL_SERVER_ERROR);
+                        }
+                        let close = f.close_on_start.lock().unwrap().clone();
+                        if let Some(db) = close {
+                            sqlx::query("UPDATE broadcasts SET status = 'ready', updated_at = now()")
+                                .execute(&db)
+                                .await
+                                .unwrap();
                         }
                         let variants = b["stream"]["variantNames"]
                             .as_array()
@@ -833,4 +845,41 @@ async fn start_soon_gives_up_after_its_tries(db: PgPool) {
     .expect("정해진 횟수 뒤에 끝나야 한다")
     .unwrap();
     assert!(statuses(&db).await.is_empty());
+    assert_eq!(*_fake.codec_calls.lock().unwrap(), 5);
+}
+
+#[sqlx::test]
+async fn start_soon_does_not_wait_when_all_recording_slots_are_full(db: PgPool) {
+    use onair_backend::recordings::start_soon;
+    use std::time::Duration;
+    let dir = temp_dir();
+    let (fake, api) = fake_ome(dir.clone()).await;
+    let cfg = RecConfig { dir: Some(dir) };
+    let r = router(db.clone(), api.clone(), cfg.dir.clone());
+    for i in 0..4 {
+        let (_, s) = live_broadcast(&r, &db, &format!("방송{i}")).await;
+        fake.streams.lock().unwrap().insert(s, "H264".into());
+    }
+    // 4개 중 3개만 녹화할 수 있다. 남은 1개를 위해 헛되이 10번 돌지 않는다.
+    start_soon(&db, &api, &cfg, Duration::from_millis(20), 10)
+        .await
+        .unwrap();
+    assert_eq!(statuses(&db).await.len(), 3);
+    assert_eq!(*fake.codec_calls.lock().unwrap(), 3);
+}
+
+#[sqlx::test]
+async fn recording_started_while_the_stream_closes_is_stopped_at_once(db: PgPool) {
+    let dir = temp_dir();
+    let (fake, api) = fake_ome(dir.clone()).await;
+    let cfg = RecConfig { dir: Some(dir) };
+    let r = router(db.clone(), api.clone(), cfg.dir.clone());
+    let (_, stream) = live_broadcast(&r, &db, "닫히는 송출").await;
+    fake.streams.lock().unwrap().insert(stream, "H264".into());
+    // 녹화를 거는 순간 송출이 닫힌다 → 그 녹화는 바로 멈춘다(다시 붙은 송출이 같은 파일에 이어 써지지 않게)
+    *fake.close_on_start.lock().unwrap() = Some(db.clone());
+    sync(&db, &api, &cfg).await.unwrap();
+    assert_eq!(fake.stopped.lock().unwrap().len(), 1);
+    let s = statuses(&db).await;
+    assert!(s == ["finishing"] || s == ["ready"], "{s:?}");
 }

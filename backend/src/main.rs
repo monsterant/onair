@@ -124,6 +124,8 @@ async fn main() {
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 tokio::select! {
+                    // 15초 차례를 먼저 본다. 신호가 계속 와도 방송 상태 맞춰 보기가 밀리지 않게(#59 리뷰)
+                    biased;
                     _ = tick.tick() => {}
                     // 송출이 막 허락됨: 15초를 기다리지 않고 녹화를 바로 시작한다(#59).
                     // 같은 반복문 안에서 차례로 돌아 녹화 맞춰 보기가 동시에 두 번 돌지 않는다.
