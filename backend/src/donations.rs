@@ -211,8 +211,9 @@ async fn settle(state: &AppState, d: &Donation, p: &Payment) -> Result<Donation,
         mark_failed(state, d.id).await?;
         return Err(ApiError::BadRequest("결제 정보가 주문과 맞지 않습니다"));
     }
-    // 적립한 결제가 나중에 취소(환불)됐으면 합계에서 뺀다(같은 결제 키일 때만, #41 리뷰)
-    if matches!(p.status.as_str(), "CANCELED" | "PARTIAL_CANCELED")
+    // 적립한 결제가 나중에 전액 취소(환불)됐으면 합계에서 뺀다(같은 결제 키일 때만, #41 리뷰).
+    // 부분 취소(PARTIAL_CANCELED)는 전액을 빼면 틀리므로 그대로 둔다. 부분 환불은 이 서비스에서 일어나지 않는다.
+    if p.status == "CANCELED"
         && d.status == "paid"
         && d.payment_key.as_deref() == Some(p.payment_key.as_str())
     {

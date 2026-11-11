@@ -163,17 +163,26 @@ async fn read(res: reqwest::Result<reqwest::Response>) -> Result<Payment, TossEr
             TossError::Unreachable
         });
     }
-    // 키·권한 문제(401, 403)와 요청이 너무 많음(429)은 결제 자체의 거절이 아니다. 주문을 실패로 만들지 않고 다시 시도하게 한다(#41 리뷰)
-    if matches!(r.status().as_u16(), 401 | 403 | 429) {
-        tracing::warn!(status = %r.status(), "토스가 키·권한·횟수 문제로 거절함");
+    let status = r.status().as_u16();
+    // 키 문제(401)와 요청이 너무 많음(429)은 결제 자체의 거절이 아니다. 주문을 실패로 만들지 않고 다시 시도하게 한다(#41 리뷰)
+    if matches!(status, 401 | 429) {
+        tracing::warn!(status, "토스가 키·횟수 문제로 거절함");
         return Err(TossError::Unreachable);
     }
     if r.status().is_server_error() {
-        tracing::warn!(status = %r.status(), "토스 서버 오류");
+        tracing::warn!(status, "토스 서버 오류");
         return Err(TossError::Unreachable);
     }
     match r.json::<ErrorBody>().await {
         Ok(e) if e.code == "ALREADY_PROCESSED_PAYMENT" => Err(TossError::AlreadyProcessed),
+        // 403 중에서 키·권한 문제만 다시 시도로 보고, 카드사 거절(REJECT_CARD_... 등)은 결제 거절로 본다(#41 2바퀴)
+        Ok(e)
+            if status == 403
+                && matches!(e.code.as_str(), "FORBIDDEN_REQUEST" | "UNAUTHORIZED_KEY") =>
+        {
+            tracing::warn!(code = %e.code, "토스가 권한 문제로 거절함");
+            Err(TossError::Unreachable)
+        }
         Ok(e) => Err(TossError::Rejected {
             code: e.code,
             message: e.message,
