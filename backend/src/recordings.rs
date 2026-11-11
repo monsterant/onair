@@ -2,6 +2,8 @@
 //!
 //! 흐름
 //! - 15초마다 도는 맞춰 보기(main.rs)에서 `sync`를 부른다.
+//! - 송출이 막 허락되면(opening 웹훅) `Kick` 신호로 15초를 기다리지 않고 바로 `start_soon`을 돌린다(#59).
+//!   그러지 않으면 방송 앞부분 0~15초가 녹화에 빠졌다.
 //!   1. 방송 중(live)인데 녹화 중이 아닌 방송 → OME에 영상 코덱을 묻고 녹화를 시작한다(H.264는 mp4, VP8은 webm).
 //!   2. 녹화 중인데 방송이 끝났거나(live 아님) 2시간이 넘은 녹화 → OME에 멈추라고 한다(finishing).
 //!   3. finishing인 녹화 → 파일이 생겼으면 ready(다시보기 가능), 2분이 지나도 없으면 failed.
@@ -39,6 +41,60 @@ pub const FINISH_WAIT: Duration = Duration::from_secs(120);
 pub const MIN_BYTES: u64 = 64 * 1024;
 /// 동시에 녹화하는 방송 수 상한(서버 디스크·CPU 보호). 넘으면 다음 차례까지 기다린다.
 pub const MAX_CONCURRENT: i64 = 3;
+
+/// "녹화를 서둘러 시작하라"는 신호(#59). 웹훅이 보내고 맞춰 보기 반복문(main.rs)이 받는다.
+/// tokio `Notify`(기다리는 쪽을 깨우는 종): 받는 쪽이 아직 기다리지 않을 때 보내도 한 번은 기억해 둔다.
+#[derive(Clone, Debug, Default)]
+pub struct Kick(std::sync::Arc<tokio::sync::Notify>);
+
+impl Kick {
+    pub fn send(&self) {
+        self.0.notify_one();
+    }
+    pub async fn wait(&self) {
+        self.0.notified().await;
+    }
+}
+
+/// 신호를 받은 뒤 녹화 시작을 다시 시도하는 간격과 횟수(#59).
+/// 웹훅 순간엔 OME에 스트림이 아직 없어 영상 코덱을 모른다. 보통 1~3초 안에 알게 된다.
+pub const SOON_STEP: Duration = Duration::from_secs(1);
+pub const SOON_TRIES: u32 = 10;
+
+/// 송출이 막 붙었을 때 부른다. `step` 간격으로 최대 `tries`번 `sync`를 돌리고,
+/// 녹화를 기다리는 방송이 없어지면 바로 멈춘다.
+pub async fn start_soon(
+    db: &sqlx::PgPool,
+    api: &OmeApi,
+    cfg: &RecConfig,
+    step: Duration,
+    tries: u32,
+) -> Result<(), sqlx::Error> {
+    if cfg.dir.is_none() || !api.is_configured() {
+        return Ok(());
+    }
+    for _ in 0..tries {
+        sync(db, api, cfg).await?;
+        if !waiting(db).await? {
+            break;
+        }
+        tokio::time::sleep(step).await;
+    }
+    Ok(())
+}
+
+/// 방송 중인데 아직 녹화가 없는 방송이 있고, 동시 녹화 자리도 남았는지.
+/// 자리가 없으면 다시 시도해도 시작할 수 없으니 기다리지 않는다(#59 리뷰).
+async fn waiting(db: &sqlx::PgPool) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT (SELECT count(*) FROM recordings WHERE status = 'recording') < $1
+            AND EXISTS (SELECT 1 FROM broadcasts b WHERE b.status = 'live'
+              AND NOT EXISTS (SELECT 1 FROM recordings r WHERE r.broadcast_id = b.id AND r.status = 'recording'))",
+    )
+    .bind(MAX_CONCURRENT)
+    .fetch_one(db)
+    .await
+}
 
 /// 녹화 설정. 폴더가 없으면(Default) 녹화를 하지 않는다.
 #[derive(Clone, Debug, Default)]
@@ -202,8 +258,9 @@ async fn start_missing(db: &sqlx::PgPool, api: &OmeApi) -> Result<(), sqlx::Erro
             .fetch_one(db)
             .await?;
     let room = (MAX_CONCURRENT - active).max(0);
-    let rows: Vec<(i64, String, String, String)> = sqlx::query_as(
-        "SELECT b.id, b.stream_name, b.title, u.username FROM broadcasts b JOIN users u ON u.id = b.owner_id
+    // updated_at: 송출이 열리거나 닫힐 때마다 바뀐다. 아래에서 "그 사이 송출이 바뀌었는지" 보는 데 쓴다(#59 리뷰)
+    let rows: Vec<(i64, String, String, String, OffsetDateTime)> = sqlx::query_as(
+        "SELECT b.id, b.stream_name, b.title, u.username, b.updated_at FROM broadcasts b JOIN users u ON u.id = b.owner_id
           WHERE b.status = 'live'
             AND NOT EXISTS (SELECT 1 FROM recordings r WHERE r.broadcast_id = b.id AND r.status = 'recording')
           ORDER BY b.started_at",
@@ -212,7 +269,7 @@ async fn start_missing(db: &sqlx::PgPool, api: &OmeApi) -> Result<(), sqlx::Erro
     .await?;
     // 실제로 시작한 수만 센다. 코덱을 몰라 건너뛴 방송이 자리를 차지해 새 방송이 계속 밀리지 않게 한다(#47 2바퀴)
     let mut started = 0_i64;
-    for (bid, stream, title, owner) in rows {
+    for (bid, stream, title, owner, seen) in rows {
         if started >= room {
             break;
         }
@@ -230,9 +287,13 @@ async fn start_missing(db: &sqlx::PgPool, api: &OmeApi) -> Result<(), sqlx::Erro
         let record_id = format!("rec-{bid}-{hex}");
         let file = format!("{record_id}.{ext}");
         // 기록을 먼저 남긴다(같은 방송에 녹화 중은 하나뿐이라는 DB 규칙이 겹침을 막는다). OME가 거절하면 지운다.
+        // 위에서 읽은 뒤 송출이 닫혔으면(updated_at이 바뀜) 넣지 않는다. 닫히는 송출에 녹화를 걸면
+        // 곧바로 다시 붙은 송출까지 같은 파일에 이어 써질 수 있다(#47 R1과 같은 문제, #59 리뷰).
         let inserted = sqlx::query(
             "INSERT INTO recordings (broadcast_id, record_id, file_name, format, title, owner_username)
-             VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING",
+             SELECT $1, $2, $3, $4, $5, $6
+              WHERE EXISTS (SELECT 1 FROM broadcasts WHERE id = $1 AND status = 'live' AND updated_at = $7)
+             ON CONFLICT DO NOTHING",
         )
         .bind(bid)
         .bind(&record_id)
@@ -240,8 +301,17 @@ async fn start_missing(db: &sqlx::PgPool, api: &OmeApi) -> Result<(), sqlx::Erro
         .bind(ext)
         .bind(&title)
         .bind(&owner)
+        .bind(seen)
         .execute(db)
-        .await?;
+        .await;
+        // 그 사이 방송이 지워졌으면(외래 키 오류) 이 방송만 건너뛰고 다른 방송은 계속 본다(#59 공격 사냥)
+        let inserted = match inserted {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, broadcast = bid, "녹화 기록을 넣지 못해 건너뜀");
+                continue;
+            }
+        };
         if inserted.rows_affected() == 0 {
             continue;
         }
@@ -256,6 +326,25 @@ async fn start_missing(db: &sqlx::PgPool, api: &OmeApi) -> Result<(), sqlx::Erro
         } else {
             started += 1;
             tracing::info!(broadcast = bid, %file, "녹화 시작");
+            // 녹화를 거는 동안 송출이 닫혔거나 다시 열렸으면 바로 멈춘다(같은 이유, #59 리뷰).
+            // 다음 맞춰 보기가 지금 송출로 새 녹화를 시작한다.
+            let same: Option<bool> = sqlx::query_scalar(
+                "SELECT status = 'live' AND updated_at = $2 FROM broadcasts WHERE id = $1",
+            )
+            .bind(bid)
+            .bind(seen)
+            .fetch_optional(db)
+            .await?;
+            if same != Some(true) && api.stop_record(&record_id).await {
+                sqlx::query(
+                    "UPDATE recordings SET status = 'finishing', ended_at = now()
+                      WHERE record_id = $1 AND status = 'recording'",
+                )
+                .bind(&record_id)
+                .execute(db)
+                .await?;
+                tracing::info!(broadcast = bid, %file, "녹화 거는 사이 송출이 바뀌어 멈춤");
+            }
         }
     }
     Ok(())

@@ -41,6 +41,12 @@ struct FakeOme {
     fail_stop: Arc<Mutex<bool>>,
     /// 녹화 목록 조회가 실패한다
     records_unavailable: Arc<Mutex<bool>>,
+    /// 영상 코덱을 물어본 횟수
+    codec_calls: Arc<Mutex<u32>>,
+    /// 녹화 멈춤에 답하기 전에 기다리는 시간(ms). 진짜 OME가 웹훅 답을 기다리는 동안 늦게 답하는 것을 흉내 낸다.
+    stop_delay_ms: Arc<Mutex<u64>>,
+    /// 녹화를 거는 순간 송출이 닫힌 것처럼 방송을 ready로 바꾼다(#59 리뷰)
+    close_on_start: Arc<Mutex<Option<PgPool>>>,
     dir: Arc<PathBuf>,
 }
 
@@ -60,6 +66,7 @@ async fn fake_ome(dir: PathBuf) -> (FakeOme, OmeApi) {
         .route(
             "/v1/vhosts/default/apps/app/streams/{name}",
             get(|State(f): State<FakeOme>, Path(name): Path<String>| async move {
+                *f.codec_calls.lock().unwrap() += 1;
                 match f.streams.lock().unwrap().get(&name) {
                     Some(codec) => (
                         StatusCode::OK,
@@ -98,6 +105,13 @@ async fn fake_ome(dir: PathBuf) -> (FakeOme, OmeApi) {
                         if *f.fail_start.lock().unwrap() {
                             return ok(StatusCode::INTERNAL_SERVER_ERROR);
                         }
+                        let close = f.close_on_start.lock().unwrap().clone();
+                        if let Some(db) = close {
+                            sqlx::query("UPDATE broadcasts SET status = 'ready', updated_at = now()")
+                                .execute(&db)
+                                .await
+                                .unwrap();
+                        }
                         let variants = b["stream"]["variantNames"]
                             .as_array()
                             .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
@@ -113,6 +127,8 @@ async fn fake_ome(dir: PathBuf) -> (FakeOme, OmeApi) {
                         ok(StatusCode::OK)
                     }
                     "app:stopRecord" => {
+                        let delay = *f.stop_delay_ms.lock().unwrap();
+                        tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
                         if *f.fail_stop.lock().unwrap() {
                             return ok(StatusCode::INTERNAL_SERVER_ERROR);
                         }
@@ -785,4 +801,165 @@ async fn skipped_broadcasts_do_not_use_up_recording_slots(db: PgPool) {
         .unwrap();
     assert_eq!(rec, [late]);
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[sqlx::test]
+async fn start_soon_starts_as_soon_as_the_codec_is_known(db: PgPool) {
+    use onair_backend::recordings::start_soon;
+    use std::time::{Duration, Instant};
+    let dir = temp_dir();
+    let (fake, api) = fake_ome(dir.clone()).await;
+    let cfg = RecConfig { dir: Some(dir) };
+    let r = router(db.clone(), api.clone(), cfg.dir.clone());
+    let (_, stream) = live_broadcast(&r, &db, "바로 녹화").await;
+    // 웹훅 순간엔 OME에 스트림이 없어 코덱을 모른다. 0.15초 뒤에 생긴다.
+    let f = fake.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        f.streams.lock().unwrap().insert(stream, "H264".into());
+    });
+    let t = Instant::now();
+    start_soon(&db, &api, &cfg, Duration::from_millis(50), 20)
+        .await
+        .unwrap();
+    // 코덱이 생기자마자 녹화가 시작되고, 남은 시도는 하지 않는다
+    assert_eq!(statuses(&db).await, ["recording"]);
+    assert!(
+        t.elapsed() < Duration::from_millis(600),
+        "{:?}",
+        t.elapsed()
+    );
+}
+
+#[sqlx::test]
+async fn start_soon_gives_up_after_its_tries(db: PgPool) {
+    use onair_backend::recordings::start_soon;
+    use std::time::Duration;
+    let dir = temp_dir();
+    let (_fake, api) = fake_ome(dir.clone()).await;
+    let cfg = RecConfig { dir: Some(dir) };
+    let r = router(db.clone(), api.clone(), cfg.dir.clone());
+    live_broadcast(&r, &db, "코덱 없음").await;
+    // 코덱을 끝내 모르면 정해진 횟수만 시도하고 끝난다(15초 맞춰 보기가 이어서 맡는다)
+    // 시도 사이에는 쉰다(쉬지 않으면 OME가 코덱을 알기도 전에 10번을 다 써 버린다, #59 변이 시험)
+    let t = std::time::Instant::now();
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        start_soon(&db, &api, &cfg, Duration::from_millis(20), 5),
+    )
+    .await
+    .expect("정해진 횟수 뒤에 끝나야 한다")
+    .unwrap();
+    assert!(statuses(&db).await.is_empty());
+    assert_eq!(*_fake.codec_calls.lock().unwrap(), 5);
+    assert!(
+        t.elapsed() >= Duration::from_millis(80),
+        "{:?}",
+        t.elapsed()
+    );
+}
+
+#[sqlx::test]
+async fn start_soon_does_not_wait_when_all_recording_slots_are_full(db: PgPool) {
+    use onair_backend::recordings::start_soon;
+    use std::time::Duration;
+    let dir = temp_dir();
+    let (fake, api) = fake_ome(dir.clone()).await;
+    let cfg = RecConfig { dir: Some(dir) };
+    let r = router(db.clone(), api.clone(), cfg.dir.clone());
+    for i in 0..4 {
+        let (_, s) = live_broadcast(&r, &db, &format!("방송{i}")).await;
+        fake.streams.lock().unwrap().insert(s, "H264".into());
+    }
+    // 4개 중 3개만 녹화할 수 있다. 남은 1개를 위해 헛되이 10번 돌지 않는다.
+    // 자리가 없으면 쉬지 않고 바로 끝난다(전에는 100ms씩 9번 더 쉬어 0.9초 넘게 걸렸다, #59 2바퀴)
+    let t = std::time::Instant::now();
+    start_soon(&db, &api, &cfg, Duration::from_millis(100), 10)
+        .await
+        .unwrap();
+    assert_eq!(statuses(&db).await.len(), 3);
+    assert!(
+        t.elapsed() < Duration::from_millis(500),
+        "{:?}",
+        t.elapsed()
+    );
+    assert_eq!(*fake.codec_calls.lock().unwrap(), 3);
+}
+
+#[sqlx::test]
+async fn recording_started_while_the_stream_closes_is_stopped_at_once(db: PgPool) {
+    let dir = temp_dir();
+    let (fake, api) = fake_ome(dir.clone()).await;
+    let cfg = RecConfig { dir: Some(dir) };
+    let r = router(db.clone(), api.clone(), cfg.dir.clone());
+    let (_, stream) = live_broadcast(&r, &db, "닫히는 송출").await;
+    fake.streams.lock().unwrap().insert(stream, "H264".into());
+    // 녹화를 거는 순간 송출이 닫힌다 → 그 녹화는 바로 멈춘다(다시 붙은 송출이 같은 파일에 이어 써지지 않게)
+    *fake.close_on_start.lock().unwrap() = Some(db.clone());
+    sync(&db, &api, &cfg).await.unwrap();
+    assert_eq!(fake.stopped.lock().unwrap().len(), 1);
+    let s = statuses(&db).await;
+    assert!(s == ["finishing"] || s == ["ready"], "{s:?}");
+}
+
+#[sqlx::test]
+async fn closing_webhook_answers_at_once_and_stops_the_recording_afterwards(db: PgPool) {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use hmac::{Hmac, KeyInit, Mac};
+    use std::time::{Duration, Instant};
+    let dir = temp_dir();
+    let (fake, api) = fake_ome(dir.clone()).await;
+    let cfg = RecConfig { dir: Some(dir) };
+    let r = router(db.clone(), api.clone(), cfg.dir.clone());
+    let (_, stream) = live_broadcast(&r, &db, "닫힘 시험").await;
+    fake.streams
+        .lock()
+        .unwrap()
+        .insert(stream.clone(), "H264".into());
+    sync(&db, &api, &cfg).await.unwrap();
+    assert_eq!(statuses(&db).await, ["recording"]);
+
+    // OME가 녹화 멈춤에 늦게 답한다(웹훅 답을 기다리는 동안). 웹훅은 그걸 기다리지 않고 바로 답해야 한다.
+    *fake.stop_delay_ms.lock().unwrap() = 700;
+    let kick = onair_backend::recordings::Kick::default();
+    let secret = "test-secret-for-ome-webhook";
+    let hooks = onair_backend::ome_routes(onair_backend::ome::OmeState {
+        secret: secret.into(),
+        db: db.clone(),
+        ome: api.clone(),
+        kick: kick.clone(),
+    });
+    let body = json!({
+        "client": {"address": "1.2.3.4", "port": 1},
+        "request": {"direction": "incoming", "protocol": "webrtc", "status": "closing",
+                    "url": format!("http://h:3333/app/{stream}"), "time": "2026-11-11T00:00:00.000+09:00"}
+    })
+    .to_string();
+    let mut mac = Hmac::<sha1::Sha1>::new_from_slice(secret.as_bytes()).unwrap();
+    mac.update(body.as_bytes());
+    let sig = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
+    let t = Instant::now();
+    let res = hooks
+        .oneshot(
+            Request::post("/ome/admission")
+                .header("content-type", "application/json")
+                .header("X-OME-Signature", sig)
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert!(
+        t.elapsed() < Duration::from_millis(500),
+        "{:?}",
+        t.elapsed()
+    );
+    // 답한 뒤에 녹화가 멈추고, 멈춘 뒤 녹화 서둘러 신호가 온다(그 사이 다시 붙은 송출을 바로 녹화)
+    tokio::time::timeout(Duration::from_secs(3), kick.wait())
+        .await
+        .expect("멈춘 뒤 신호");
+    assert_eq!(fake.stopped.lock().unwrap().len(), 1);
+    let s = statuses(&db).await;
+    assert!(s == ["finishing"] || s == ["ready"], "{s:?}");
 }
