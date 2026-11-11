@@ -31,6 +31,7 @@ pub fn app(state: AppState) -> Router {
         .route("/auth/signup", post(auth::signup))
         .route("/auth/login", post(auth::login))
         .route("/auth/demo/{n}", post(auth::demo_login))
+        .route("/auth/guest", post(auth::guest_login))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             guard::limit_auth,

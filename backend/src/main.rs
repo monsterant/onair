@@ -74,6 +74,19 @@ async fn main() {
     };
     if auth.demo_login {
         tracing::info!("테스트 계정 로그인(DEMO_LOGIN)이 켜져 있습니다");
+        // 한 시간마다 24시간 지난 테스트 계정(guest_)을 지운다(#35)
+        let db = db.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(3600));
+            loop {
+                tick.tick().await;
+                match onair_backend::auth::cleanup_guests(&db).await {
+                    Ok(0) => {}
+                    Ok(n) => tracing::info!(count = n, "지난 테스트 계정을 지웠습니다"),
+                    Err(e) => tracing::warn!(error = %e, "테스트 계정 정리 실패"),
+                }
+            }
+        });
     }
 
     // CORS(다른 주소에서 오는 호출 허용)는 켜지 않는다. 화면은 vite 프록시(/api)로 같은 주소에서 부르고,
