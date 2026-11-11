@@ -317,6 +317,7 @@ function commentsPanel(broadcastId: number, gen: number): HTMLElement {
   let seq = 0;
   let applied = 0;
   let firstPaint = true;
+  let wantBottom = false;
 
   const row = (c: Comment): HTMLElement => {
     const head = el(
@@ -368,6 +369,8 @@ function commentsPanel(broadcastId: number, gen: number): HTMLElement {
   /** 목록을 다시 불러와 그린다. toBottom이면 맨 아래(최신 댓글)로 내린다. */
   const load = async (toBottom = false) => {
     const my = ++seq;
+    // 내가 쓴 직후 요청이 옛 응답으로 버려져도, 다음에 그려질 때 맨 아래로 내린다
+    if (toBottom) wantBottom = true;
     try {
       const items = await listComments(broadcastId);
       if (stopped || gen !== routeGen || my < applied) return;
@@ -389,12 +392,17 @@ function commentsPanel(broadcastId: number, gen: number): HTMLElement {
           editing.delete(id);
         }
       }
-      // 필요한 곳만 옮기거나 끼워 넣는다. 제자리에 있는 요소는 건드리지 않아 포커스가 유지된다.
+      // 1) 필요 없는 요소(지워졌거나 내용이 바뀐 댓글의 옛 요소)를 먼저 뺀다.
+      // 2) 새 요소만 제자리에 끼워 넣는다. 남은 요소는 순서가 그대로라(댓글은 id 순) 옮기지 않는다.
+      //    수정 중인 칸을 옮기면 커서가 빠지므로, 기존 요소는 절대 옮기지 않는 것이 핵심이다(#37 2바퀴).
+      const keep = new Set<Element>(wanted);
+      for (const child of [...list.children]) if (!keep.has(child)) child.remove();
       wanted.forEach((li, i) => {
-        if (list.children[i] !== li) list.insertBefore(li, list.children[i] ?? null);
+        const cur = list.children[i];
+        if (cur !== li) list.insertBefore(li, cur ?? null);
       });
-      while (list.children.length > wanted.length) list.lastElementChild?.remove();
-      if (toBottom || firstPaint || nearBottom) list.scrollTop = list.scrollHeight;
+      if (wantBottom || firstPaint || nearBottom) list.scrollTop = list.scrollHeight;
+      wantBottom = false;
       firstPaint = false;
     } catch (e) {
       // 방송이 지워졌으면(404) 멈춘다. 그 밖에는 잠깐 끊긴 것으로 보고 다음에 다시 부른다.
