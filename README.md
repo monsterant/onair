@@ -59,10 +59,10 @@ cp .env.example .env
 # 2. DB와 미디어 서버(OvenMediaEngine) 띄우기
 docker compose up -d
 
-# 3. 백엔드 (http://localhost:8080)
+# 3. 백엔드 (http://localhost:8080) — 계속 실행되므로 터미널 하나를 쓴다
 cd backend && cargo run
 
-# 4. 프론트엔드 (http://localhost:5173)
+# 4. 프론트엔드 (http://localhost:5173) — 저장소 맨 위 폴더에서 새 터미널로
 cd frontend && npm install && npm run dev
 ```
 
@@ -95,7 +95,7 @@ cd backend && DATABASE_URL=postgres://onair:onair-local-only@localhost:55432/ona
 ```bash
 docker compose -f deploy/docker-compose.yml --env-file deploy/.env up -d --build
 ```
-- 열어야 하는 포트: 80·443(TCP), 10000~10003(UDP, 영상), 10000·3478(TCP, 영상 우회).
+- 열어야 하는 포트: 80·443(TCP), 443(UDP, HTTP/3 선택), 10000~10003(UDP, 영상), 10000·3478(TCP, 영상 우회).
 
 ## 기능
 
@@ -189,7 +189,7 @@ docker compose -f deploy/docker-compose.yml --env-file deploy/.env up -d --build
 
 - 송출(WHIP)은 송출 키가 맞아야 한다. 미디어 서버가 서명된 요청으로 백엔드에 묻고, 백엔드가 키와 방송 상태(종료된 방송은 거절)를 확인한다.
 - 로그인 상태는 서버 세션 + HttpOnly·Secure·SameSite 쿠키로 둔다. DB에는 세션 토큰의 해시만 저장한다.
-- 비밀번호는 argon2로 저장한다. 로그인·가입·테스트 계정은 IP당 1분 20번, 댓글·후원 주문은 사용자당 1분 20번으로 제한한다.
+- 비밀번호는 argon2로 저장한다. 로그인·가입·테스트 계정·방송 만들기는 IP당 1분 20번(합쳐서), 댓글·후원 주문은 사용자당 1분 20번으로 제한한다. 넘으면 429와 "요청이 너무 많습니다" 안내가 나온다.
 - 상태를 바꾸는 요청은 같은 사이트에서 온 것만 받는다(다른 사이트가 몰래 보내는 요청 거절).
 - 권한 검사는 모두 서버에서 한다. 화면에서 버튼을 숨기는 것은 편의일 뿐이고, API로 직접 보내도 위 표대로 거절된다(`backend/tests/`).
 
