@@ -238,6 +238,14 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
     b = await getBroadcast(id);
   } catch (e) {
     main.append(el('p', { className: 'error', textContent: message(e) }), el('a', { href: '#/', textContent: '방송 목록으로' }));
+    // 인터넷이 끊긴 채로 열었으면, 다시 연결될 때 이 화면을 다시 연다(#63 공격 사냥)
+    if (!(e instanceof ApiError)) {
+      const again = () => {
+        if (gen === routeGen) void route();
+      };
+      window.addEventListener('online', again, { once: true });
+      cleanup.push(() => window.removeEventListener('online', again));
+    }
     return;
   }
   // 기다리는 사이 다른 화면으로 옮겼으면 아무것도 하지 않는다(늦게 끝난 요청이 새 화면을 건드리지 않게, #27 V17)
@@ -269,27 +277,22 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
   let gone = false;
 
   // 시청자 인터넷 끊김 알림(#63). 끊기면 알리고, 다시 연결되면 멈춘 플레이어를 새로 만든다.
-  const netNote = el('p', {
-    className: 'net-note',
-    role: 'status',
-    hidden: true,
-    textContent: '인터넷 연결이 끊겼습니다. 다시 연결되면 자동으로 이어서 봅니다.',
-  });
+  const netNote = el('p', { className: 'net-note', role: 'status', hidden: true });
   let down = false;
+  // 다시 연결된 뒤 플레이어를 새로 만들어야 하는지. 지우고 만드는 일은 paint() 한 곳에서 한다(순서가 꼬이지 않게, #63 리뷰)
+  let restart = false;
   // 상태 확인이 서버에 닿지 못한 연속 횟수. 한 번은 잠깐 흔들린 것일 수 있어 2번(약 10초)부터 알린다.
   let failures = 0;
   const setDown = (d: boolean) => {
     if (down === d) return;
     down = d;
     netNote.hidden = !d;
-    if (!d && playing) {
-      // 끊긴 동안 멈춘 플레이어는 스스로 돌아오지 않을 수 있다. 지우고, 이어지는 paint()가 방송 중이면 새로 만든다.
-      clearTimeout(retry);
-      player().then((p) => p.stopPlayer('player'));
-      playerBox.replaceChildren();
-      soundBtn.hidden = true;
-      playing = false;
-    }
+    // 송출하는 소유자에게는 시청 문구가 맞지 않는다(#63 공격 사냥)
+    netNote.textContent = selfPublishing()
+      ? '인터넷 연결이 끊겼습니다. 연결이 돌아오면 송출 상태를 확인해 주세요.'
+      : '인터넷 연결이 끊겼습니다. 다시 연결되면 자동으로 이어서 봅니다.';
+    // 끊긴 동안 멈춘 플레이어는 스스로 돌아오지 않을 수 있다. 이어지는 paint()가 방송 중이면 새로 만든다.
+    if (!d && playing) restart = true;
   };
 
   // 재생 오류가 나면 3초 뒤 플레이어를 다시 만든다(#27 V2)
@@ -318,7 +321,10 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
       moreBtn.textContent = '더보기';
     }
     const live = b.status === 'live' && !selfPublishing();
-    if (live && !playing) {
+    if (live && (!playing || restart)) {
+      // startPlayer는 같은 칸의 옛 플레이어를 먼저 지운다
+      clearTimeout(retry);
+      restart = false;
       playerBox.replaceChildren(el('div', { id: 'player' }));
       soundBtn.hidden = false;
       soundBtn.textContent = '🔇 소리 켜기';
@@ -327,6 +333,7 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
       });
       playing = true;
     } else if (!live && playing) {
+      restart = false;
       clearTimeout(retry);
       player().then((p) => p.stopPlayer('player'));
       playerBox.replaceChildren();
@@ -395,22 +402,31 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
     window.removeEventListener('online', onOnline);
     player().then((p) => p.stopPlayer('player'));
   };
+  // 상태 확인이 겹쳐 돌 수 있다(5초 차례 + 다시 연결). 늦게 도착한 옛 결과는 버린다(#63 리뷰)
+  let asked = 0;
+  let applied = 0;
   const refresh = async () => {
+    const mine = ++asked;
     try {
       const nb = await getBroadcast(id);
-      if (gen !== routeGen || gone) return;
+      if (gen !== routeGen || gone || mine < applied) return;
+      applied = mine;
       b = nb;
       failures = 0;
-      setDown(false);
+      // offline 알림 직후에 도착한 응답이면 아직 끊긴 것으로 둔다
+      if (navigator.onLine) setDown(false);
       paint();
     } catch (e) {
-      if (gen !== routeGen || gone) return;
-      // 서버에 닿지 못함(fetch 자체 실패). 서버가 답한 오류(ApiError)는 시청자 인터넷 문제가 아니다.
+      if (gen !== routeGen || gone || mine < applied) return;
+      applied = mine;
+      // 서버에 닿지 못함(fetch 자체 실패). 서버가 답한 오류(ApiError)는 인터넷이 살아 있다는 뜻이다.
       if (!(e instanceof ApiError)) {
         failures += 1;
         if (failures >= 2 || !navigator.onLine) setDown(true);
         return;
       }
+      failures = 0;
+      if (navigator.onLine) setDown(false);
       // 방송이 지워졌으면 멈추고 알린다(#27 V10). 그 밖의 오류는 잠깐 끊긴 것으로 보고 다음에 다시 본다.
       if (e instanceof ApiError && e.status === 404) {
         gone = true;
