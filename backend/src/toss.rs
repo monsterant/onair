@@ -71,25 +71,31 @@ pub fn install_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
+/// 이 프로그램이 쓰는 HTTP 클라이언트. ring 암호 + 프로그램에 들어 있는 루트 인증서 목록(webpki-roots)을 쓴다.
+/// 운영체제 인증서 저장소를 찾지 않는다. 배포 이미지(debian-slim)에는 인증서 저장소가 없어서,
+/// 기본 방식으로 만들면 시작하자마자 멈춘다(#44, 2026-11-11 배포 장애).
+pub fn http_client(timeout: Duration) -> reqwest::Client {
+    install_crypto_provider();
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let tls = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .expect("TLS 설정 실패")
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    reqwest::Client::builder()
+        .use_preconfigured_tls(tls)
+        .timeout(timeout)
+        .build()
+        .expect("HTTP 클라이언트를 만들지 못했습니다")
+}
+
 impl Toss {
     /// `base`: 예) https://api.tosspayments.com, `secret_key`: test_gsk_... , `client_key`: test_gck_...
     pub fn new(base: &str, secret_key: &str, client_key: &str) -> Self {
-        install_crypto_provider();
-        // https: ring 암호 + 프로그램에 들어 있는 루트 인증서 목록(webpki-roots)
-        let mut roots = rustls::RootCertStore::empty();
-        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-        let tls = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
-            rustls::crypto::ring::default_provider(),
-        ))
-        .with_safe_default_protocol_versions()
-        .expect("TLS 설정 실패")
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-        let http = reqwest::Client::builder()
-            .use_preconfigured_tls(tls)
-            .timeout(Duration::from_secs(10))
-            .build()
-            .expect("HTTP 클라이언트를 만들지 못했습니다");
+        let http = http_client(Duration::from_secs(10));
         Self {
             inner: Some(Inner {
                 base: base.trim_end_matches('/').to_string(),
