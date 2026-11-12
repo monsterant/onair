@@ -841,6 +841,13 @@ function studioPanel(current: () => Broadcast, publisher: Publisher): { el: HTML
   const warn = el('p', { className: 'warn', role: 'alert' });
   const preview = el('video', { className: 'preview', muted: true, autoplay: true, playsInline: true });
   preview.hidden = true;
+  // 보내는 소리 크기(#80)
+  const levelLabel = el('span', { className: 'level-label', textContent: '보내는 소리' });
+  const levelBar = el('i');
+  const level = el('div', { className: 'level', role: 'meter', ariaLabel: '보내는 소리 크기' }, levelLabel, el('span', { className: 'level-bar' }, levelBar));
+  level.setAttribute('aria-valuemin', '0');
+  level.setAttribute('aria-valuemax', '100');
+  level.hidden = true;
   const withMic = el('input', { type: 'checkbox', checked: true, id: 'with-mic' });
   const startScreen = el('button', { type: 'button', className: 'start-screen', textContent: '화면 공유로 방송 시작' });
   const facing = el(
@@ -885,6 +892,65 @@ function studioPanel(current: () => Broadcast, publisher: Publisher): { el: HTML
   };
   publisher.onState = paint;
 
+  /**
+   * 보내는 소리 크기 막대(#80). 송출하는 사람이 소리가 실제로 나가는지 볼 수 있게 한다.
+   * 소리 트랙이 없으면 "소리 없이 송출 중"을 보여 준다. 돌려준 함수를 부르면 분석을 멈추고 막대를 숨긴다.
+   */
+  const setLevel = (pct: number) => {
+    levelBar.style.width = `${pct}%`;
+    level.dataset.level = String(pct);
+    level.setAttribute('aria-valuenow', String(pct));
+  };
+  const startMeter = (track: MediaStreamTrack | undefined): (() => void) => {
+    level.hidden = false;
+    setLevel(0);
+    const hide = () => {
+      level.hidden = true;
+      setLevel(0);
+    };
+    if (!track) {
+      levelLabel.textContent = '소리 없이 송출 중';
+      level.setAttribute('aria-valuetext', '소리 없음');
+      return hide;
+    }
+    levelLabel.textContent = '보내는 소리';
+    level.removeAttribute('aria-valuetext');
+    // 막대는 송출을 돕는 표시일 뿐이다. 무엇이 실패해도 송출과 뒷처리(화면 숨김 감시 등)는 그대로 가게 여기서 오류를 삼킨다(#80 리뷰)
+    let ctx: AudioContext | null = null;
+    try {
+      ctx = new AudioContext();
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 512;
+      ctx.createMediaStreamSource(new MediaStream([track])).connect(analyser);
+      const buf = new Float32Array(analyser.fftSize);
+      const c = ctx;
+      // 클릭 직후가 아니라서 브라우저(특히 사파리)가 소리 분석을 막을 수 있다. 그러면 막대가 0에 멈춰
+      // 소리가 안 나가는 것처럼 보이므로, 잴 수 없다고 따로 알린다(소리는 그대로 보낸다).
+      void c
+        .resume()
+        .catch(() => {})
+        .finally(() => {
+          if (c.state !== 'running' && !level.hidden) levelLabel.textContent = '소리 크기를 잴 수 없습니다(소리는 보내는 중)';
+        });
+      // 화면 그리기 신호(requestAnimationFrame)는 탭을 가리면 멈추므로 0.1초 간격으로 잰다
+      const timer = setInterval(() => {
+        analyser.getFloatTimeDomainData(buf);
+        let sum = 0;
+        for (const v of buf) sum += v * v;
+        setLevel(Math.min(100, Math.round(Math.sqrt(sum / buf.length) * 300)));
+      }, 100);
+      return () => {
+        clearInterval(timer);
+        void c.close().catch(() => {});
+        hide();
+      };
+    } catch {
+      void ctx?.close().catch(() => {});
+      hide();
+      return () => {};
+    }
+  };
+
   /** 두 시작 버튼이 함께 쓰는 흐름. 누르자마자 막고(#30 P8), 장치 켜기를 서버 요청보다 먼저 한다(#30 P4). */
   const begin = async (
     getTracks: Parameters<Publisher['start']>[0],
@@ -897,10 +963,13 @@ function studioPanel(current: () => Broadcast, publisher: Publisher): { el: HTML
     note.textContent = '';
     try {
       const stream = await publisher.start(getTracks, async () => (await publishInfo(current().id)).whip_path, endedReason);
-      preview.srcObject = stream;
+      // 미리보기에는 영상만 넣는다(소리 트랙을 붙이지 않아 되울림 걱정이 없게, #80 리뷰)
+      preview.srcObject = new MediaStream(stream.getVideoTracks());
       preview.hidden = false;
       releases.push(keepScreenOn());
+      // 송출 뒷처리를 먼저 하고 막대는 그다음에 켠다(막대에서 무엇이 실패해도 뒷처리는 빠지지 않게)
       afterStart(stream);
+      releases.push(startMeter(stream.getAudioTracks()[0]));
     } catch (e) {
       // 멈춰서 취소된 시도는 조용히 넘긴다(새 시도나 멈춘 이유를 덮지 않게, #30 P7)
       if (e instanceof CancelledError) return;
@@ -1107,6 +1176,7 @@ function studioPanel(current: () => Broadcast, publisher: Publisher): { el: HTML
     ...(matchMedia('(pointer: coarse)').matches ? [cameraRow, screenRow] : [screenRow, cameraRow]),
     el('div', { className: 'row' }, stop, flip, state),
     preview,
+    level,
     warn,
     note,
   );

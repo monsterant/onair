@@ -223,7 +223,8 @@ export class Publisher {
           void this.stop('송출 서버와 영상 연결이 20초 안에 되지 않아 멈췄습니다. 네트워크(방화벽)를 확인하거나 다른 네트워크에서 다시 시도하세요');
         }
       }, CONNECT_TIMEOUT_MS);
-      return new MediaStream([video]);
+      // 나가는 소리(섞은 결과)도 함께 돌려준다. 화면이 소리 크기 막대를 그린다(#80). 미리보기에는 영상만 넣는다.
+      return new MediaStream(mixed ? [video, mixed] : [video]);
     } catch (e) {
       // 이 시도가 들고 있던 것을 정리한다(이미 멈춰서 정리됐더라도, 그 뒤에 생긴 자원까지)
       await a.close();

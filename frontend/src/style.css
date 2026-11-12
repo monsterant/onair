@@ -355,6 +355,37 @@ select {
   color: var(--text);
 }
 
+/* 보내는 소리 크기 막대(#80) */
+.level {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.level[hidden] {
+  display: none;
+}
+
+.level-bar {
+  flex: 1;
+  height: 8px;
+  max-width: 320px;
+  background: #2c313c;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.level-bar i {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: var(--accent, #10b981);
+  transition: width 0.1s linear;
+}
+
 /* 앞 카메라 미리보기는 거울처럼(송출 영상은 그대로) */
 .preview.mirror {
   transform: scaleX(-1);
