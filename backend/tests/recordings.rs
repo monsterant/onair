@@ -1097,6 +1097,27 @@ async fn republishing_while_recording_starts_stops_that_recording(db: PgPool) {
 }
 
 #[sqlx::test]
+async fn editing_the_title_before_insert_still_records(db: PgPool) {
+    // #62 L1(기록 넣는 쪽): 방송을 읽은 뒤 기록을 넣기 전에 제목만 고쳐도 녹화한다
+    let dir = temp_dir();
+    let (fake, api) = fake_ome(dir.clone()).await;
+    let cfg = RecConfig {
+        dir: Some(dir.clone()),
+    };
+    let r = router(db.clone(), api.clone(), Some(dir.clone()));
+    let (_, stream) = live_broadcast(&r, &db, "넣기 전 제목 수정").await;
+    fake.streams.lock().unwrap().insert(stream, "H264".into());
+    *fake.sql_on_codec.lock().unwrap() = Some((
+        db.clone(),
+        "UPDATE broadcasts SET title = '바뀐 제목', updated_at = now() + interval '1 second'",
+    ));
+    sync(&db, &api, &cfg).await.unwrap();
+    assert_eq!(statuses(&db).await, ["recording"]);
+    assert!(fake.stopped.lock().unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[sqlx::test]
 async fn broadcast_changed_before_insert_gets_no_recording(db: PgPool) {
     // #62 L2: 방송을 읽은 뒤 기록을 넣기 전에 송출이 다시 열리면 기록을 넣지 않는다(녹화도 걸지 않는다)
     let dir = temp_dir();
@@ -1109,7 +1130,7 @@ async fn broadcast_changed_before_insert_gets_no_recording(db: PgPool) {
     fake.streams.lock().unwrap().insert(stream, "H264".into());
     *fake.sql_on_codec.lock().unwrap() = Some((
         db.clone(),
-        "UPDATE broadcasts SET started_at = now() + interval '1 second', updated_at = now()",
+        "UPDATE broadcasts SET started_at = now() + interval '1 second'",
     ));
     sync(&db, &api, &cfg).await.unwrap();
     assert!(statuses(&db).await.is_empty());

@@ -261,6 +261,9 @@ async fn start_missing(db: &sqlx::PgPool, api: &OmeApi) -> Result<(), sqlx::Erro
     // started_at: 송출이 새로 열릴 때(live가 아니다가 live가 될 때)만 바뀐다. 아래에서 "그 사이 송출이 바뀌었는지" 보는 데 쓴다(#59 리뷰).
     // 송출이 닫히면 status가 바뀐다. 예전에는 updated_at을 봤는데, 제목만 고쳐도 바뀌어서
     // 막 건 녹화를 멈추고 다시 거는 일이 있었다(#62 L1). 그래서 status와 started_at을 함께 본다.
+    // 못 잡는 경우: 이미 live인 방송에 closing 없이 opening이 다시 오면 started_at이 그대로다(ome.rs, #27 V18).
+    // closing이 늦게라도 오면 on_closing이 녹화를 멈추므로, closing이 아예 사라진 때(백엔드 재시작 중 등)만 남는다.
+    // 그때는 이미 돌던 녹화도 같은 문제라(#62 리뷰) 이 검사로 따로 막지 않는다.
     let rows: Vec<(i64, String, String, String, OffsetDateTime)> = sqlx::query_as(
         "SELECT b.id, b.stream_name, b.title, u.username, b.started_at FROM broadcasts b JOIN users u ON u.id = b.owner_id
           WHERE b.status = 'live' AND b.started_at IS NOT NULL
