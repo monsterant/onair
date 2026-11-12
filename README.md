@@ -87,9 +87,10 @@ cd frontend && npm install && npm run dev
 ### 시험
 ```bash
 # 백엔드 API 시험(시험마다 빈 DB를 새로 만든다. docker compose의 DB가 떠 있어야 한다)
-cd backend && DATABASE_URL=postgres://onair:onair-local-only@localhost:55432/onair cargo test
+cd backend && DATABASE_URL=postgres://onair:onair-local-only@127.0.0.1:55432/onair cargo test
 ```
 - 권한(비로그인·소유자·다른 사용자), 방송 상태, 송출 허락, 테스트 계정, 댓글, 도네이션(가짜 토스 서버로 중복 적립·동시 요청·금액 바꿔치기) 등 100개가 넘는 시험이 있다. GitHub Actions에서 PR마다 돈다.
+- 주소는 `localhost` 대신 `127.0.0.1`을 쓴다. Windows에서 `localhost`로 붙으면 연결마다 몇 초씩 기다려, 1분 안에 끝나야 하는 횟수 제한 시험이 실패할 수 있다.
 
 ### 배포 (실제 서비스)
 - AWS EC2 한 대(ARM, Ubuntu 24.04)에 Docker로 올렸다. 도메인은 DuckDNS, HTTPS 인증서는 Caddy가 Let's Encrypt에서 자동으로 받는다.

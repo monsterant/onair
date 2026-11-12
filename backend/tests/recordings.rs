@@ -672,7 +672,12 @@ async fn recording_lost_by_ome_is_restarted(db: PgPool) {
     let (_, stream) = live_broadcast(&r, &db, "OME 재시작").await;
     fake.streams.lock().unwrap().insert(stream, "H264".into());
     sync(&db, &api, &cfg).await.unwrap();
-    // OME가 다시 켜져서 녹화 목록을 잊었다
+    // OME가 다시 켜져서 녹화 목록을 잊었다. 같은 송출 안에서 1분째 녹화 중이었다
+    // (방송 시작 시각도 함께 당긴다. 녹화가 방송보다 먼저 시작했으면 지난 송출의 녹화로 보고 멈춘다, #62)
+    sqlx::query("UPDATE broadcasts SET started_at = now() - interval '2 minutes'")
+        .execute(&db)
+        .await
+        .unwrap();
     sqlx::query("UPDATE recordings SET started_at = now() - interval '1 minute'")
         .execute(&db)
         .await
