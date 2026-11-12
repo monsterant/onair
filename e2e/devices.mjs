@@ -110,6 +110,7 @@ try {
   check('flip hidden before start', await owner.$eval('.flip-camera', (b) => b.hidden));
   await owner.click('.start-camera');
   check('camera without mic goes live', await waitFor(() => isLive(owner), 15000), await text(owner, '.studio .hint[role=status]'));
+  check('meter says no sound without mic (#80)', (await text(owner, '.level')).includes('소리 없이 송출 중') && (await owner.$eval('.level', (e) => !e.hidden)), await text(owner, '.level'));
   const w1 = await text(owner, '.studio .warn');
   check('mic warning says stop and restart (#68 R6)', w1.includes('마이크를 쓸 수 없어') && w1.includes('송출을 멈추고 다시 시작') && !w1.includes('()'), w1);
   check('retried video, then audio once', await owner.evaluate(() => window.__calls.join(',') === 'video+audio,video,audio'), await owner.evaluate(() => window.__calls.join(',')));

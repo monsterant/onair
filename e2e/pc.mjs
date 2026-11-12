@@ -117,6 +117,8 @@ try {
   await owner.click('.start-screen').catch(() => {});
   const s1 = await waitFor(() => pubState(owner), '송출 중');
   check('publishing live', s1 === '송출 중', s1);
+  // 보내는 소리 크기 막대가 보이고 움직인다(#80, 가짜 마이크는 주기적으로 삐 소리를 낸다)
+  check('sound level meter moves', await (async () => { const end = Date.now() + 8000; while (Date.now() < end) { const v = await owner.$eval('.level', (e) => (e.hidden ? -1 : Number(e.dataset.level ?? 0))); if (v > 0) return true; await sleep(200); } return false; })(), await owner.$eval('.level', (e) => e.outerHTML).catch(() => 'none'));
   check('preview visible', await owner.$eval('.preview', (v) => !v.hidden && !!v.srcObject));
   check('only one peer connection', (await owner.evaluate(() => window.__pcs.filter((p) => p.connectionState !== 'closed').length)) === 1);
   const kinds = await waitFor(() => outboundKinds(owner), 'audio,video', 5000);

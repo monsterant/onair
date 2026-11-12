@@ -841,6 +841,11 @@ function studioPanel(current: () => Broadcast, publisher: Publisher): { el: HTML
   const warn = el('p', { className: 'warn', role: 'alert' });
   const preview = el('video', { className: 'preview', muted: true, autoplay: true, playsInline: true });
   preview.hidden = true;
+  // 보내는 소리 크기(#80)
+  const levelLabel = el('span', { className: 'level-label', textContent: '보내는 소리' });
+  const levelBar = el('i');
+  const level = el('div', { className: 'level', role: 'meter', ariaLabel: '보내는 소리 크기' }, levelLabel, el('span', { className: 'level-bar' }, levelBar));
+  level.hidden = true;
   const withMic = el('input', { type: 'checkbox', checked: true, id: 'with-mic' });
   const startScreen = el('button', { type: 'button', className: 'start-screen', textContent: '화면 공유로 방송 시작' });
   const facing = el(
@@ -885,6 +890,51 @@ function studioPanel(current: () => Broadcast, publisher: Publisher): { el: HTML
   };
   publisher.onState = paint;
 
+  /**
+   * 보내는 소리 크기 막대(#80). 송출하는 사람이 소리가 실제로 나가는지 볼 수 있게 한다.
+   * 소리 트랙이 없으면 "소리 없이 송출 중"을 보여 준다. 돌려준 함수를 부르면 분석을 멈추고 막대를 숨긴다.
+   */
+  const startMeter = (track: MediaStreamTrack | undefined): (() => void) => {
+    level.hidden = false;
+    levelBar.style.width = '0%';
+    if (!track) {
+      levelLabel.textContent = '소리 없이 송출 중';
+      level.dataset.level = '0';
+      return () => {
+        level.hidden = true;
+      };
+    }
+    levelLabel.textContent = '보내는 소리';
+    let ctx: AudioContext;
+    try {
+      ctx = new AudioContext();
+    } catch {
+      // 소리 분석을 못 하는 브라우저면 막대 없이 송출만 한다
+      level.hidden = true;
+      return () => {};
+    }
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 512;
+    ctx.createMediaStreamSource(new MediaStream([track])).connect(analyser);
+    const buf = new Float32Array(analyser.fftSize);
+    void ctx.resume().catch(() => {});
+    // 화면 그리기 신호(requestAnimationFrame)는 탭을 가리면 멈추므로 0.1초 간격으로 잰다
+    const timer = setInterval(() => {
+      analyser.getFloatTimeDomainData(buf);
+      let sum = 0;
+      for (const v of buf) sum += v * v;
+      const pct = Math.min(100, Math.round(Math.sqrt(sum / buf.length) * 300));
+      levelBar.style.width = `${pct}%`;
+      level.dataset.level = String(pct);
+    }, 100);
+    return () => {
+      clearInterval(timer);
+      void ctx.close().catch(() => {});
+      level.hidden = true;
+      levelBar.style.width = '0%';
+    };
+  };
+
   /** 두 시작 버튼이 함께 쓰는 흐름. 누르자마자 막고(#30 P8), 장치 켜기를 서버 요청보다 먼저 한다(#30 P4). */
   const begin = async (
     getTracks: Parameters<Publisher['start']>[0],
@@ -900,6 +950,7 @@ function studioPanel(current: () => Broadcast, publisher: Publisher): { el: HTML
       preview.srcObject = stream;
       preview.hidden = false;
       releases.push(keepScreenOn());
+      releases.push(startMeter(stream.getAudioTracks()[0]));
       afterStart(stream);
     } catch (e) {
       // 멈춰서 취소된 시도는 조용히 넘긴다(새 시도나 멈춘 이유를 덮지 않게, #30 P7)
@@ -1107,6 +1158,7 @@ function studioPanel(current: () => Broadcast, publisher: Publisher): { el: HTML
     ...(matchMedia('(pointer: coarse)').matches ? [cameraRow, screenRow] : [screenRow, cameraRow]),
     el('div', { className: 'row' }, stop, flip, state),
     preview,
+    level,
     warn,
     note,
   );
