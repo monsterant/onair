@@ -1,0 +1,12 @@
+{
+  "name": "onair-e2e",
+  "private": true,
+  "type": "module",
+  "description": "onair 브라우저 시험(puppeteer). 로컬 스택이나 실제 서버 주소에 대고 돌린다.",
+  "scripts": {
+    "test": "node run-all.mjs"
+  },
+  "devDependencies": {
+    "puppeteer-core": "24.43.1"
+  }
+}
