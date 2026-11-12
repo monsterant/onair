@@ -40,7 +40,19 @@ import {
 // 플레이어(OvenPlayer+hls.js, 약 1MB)는 상세 화면에서만 불러온다. 목록 화면을 가볍게 하려는 것이다.
 const player = () => import('./player');
 import { mountWidget } from './toss';
-import { CancelledError, type Facing, Publisher, type PublishState, cameraAndMic, keepScreenOn, screenAndMic } from './publisher';
+import {
+  CancelledError,
+  type Facing,
+  Publisher,
+  type PublishState,
+  cameraAndMic,
+  cameraCount,
+  keepScreenOn,
+  message as deviceMessage,
+  otherCamera,
+  sameCamera,
+  screenAndMic,
+} from './publisher';
 
 const app = document.querySelector<HTMLElement>('#app')!;
 let me: User | null = null;
@@ -48,6 +60,24 @@ let me: User | null = null;
 let cleanup: (() => void)[] = [];
 /** 로그인 화면에 오기 직전에 보던 화면. 로그인하면 그리로 돌아간다(심사 시뮬레이션 2차) */
 let backAfterLogin = '#/';
+
+/**
+ * 칸 안 영상의 실제 비율에 맞춰 칸 크기를 바꾼다(#67, #34 M10: 휴대폰 세로 영상이 16:9 칸 가운데에 작게 보이던 문제).
+ * 영상 크기를 알게 될 때(loadedmetadata)와 바뀔 때(resize: 송출 중 휴대폰을 돌린 경우)마다 맞춘다.
+ * 두 이벤트는 위로 퍼지지 않아서(bubble 안 함) 캡처 단계로 듣는다. 그래야 플레이어가 안에 새로 만든 video도 잡힌다.
+ */
+function fitToVideo(box: HTMLElement): HTMLElement {
+  const fit = (ev: Event) => {
+    const v = ev.target;
+    if (!(v instanceof HTMLVideoElement) || !v.videoWidth || !v.videoHeight) return;
+    box.style.setProperty('--vw', String(v.videoWidth));
+    box.style.setProperty('--vh', String(v.videoHeight));
+    box.classList.add('fitted');
+  };
+  box.addEventListener('loadedmetadata', fit, true);
+  box.addEventListener('resize', fit, true);
+  return box;
+}
 
 function el<K extends keyof HTMLElementTagNameMap>(
   tag: K,
@@ -265,7 +295,7 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
     const folded = descEl.classList.toggle('folded');
     moreBtn.textContent = folded ? '더보기' : '접기';
   };
-  const playerBox = el('div', { className: 'player-box' });
+  const playerBox = fitToVideo(el('div', { className: 'player-box' }));
   const offAir = el('p', { className: 'hint' });
   // 브라우저는 소리 있는 자동 재생을 막아 음소거로 시작한다. 켜는 방법이 눈에 띄게 버튼을 둔다(심사 시뮬레이션: "소리가 안 난다"로 보임)
   const soundBtn = el('button', { type: 'button', className: 'sound-toggle', textContent: '🔇 소리 켜기', hidden: true });
@@ -331,6 +361,8 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
       clearTimeout(retry);
       restart = false;
       playerBox.replaceChildren(el('div', { id: 'player' }));
+      // 옛 영상의 비율이 새 플레이어로 이어지지 않게 지운다. 새 영상 크기를 알면 다시 맞춘다(#68 R5).
+      playerBox.classList.remove('fitted');
       soundBtn.hidden = false;
       soundBtn.textContent = '🔇 소리 켜기';
       player().then((p) => {
@@ -503,7 +535,7 @@ async function replayPage(main: HTMLElement, id: number, gen: number) {
   main.append(
     el('div', { className: 'detail-head' }, el('span', { className: 'badge ended', textContent: '다시보기' }), el('h2', { textContent: r.title })),
     el('p', { className: 'hint', textContent: `방송자: ${r.owner_username} · ${shortTime(r.started_at)} · ${duration(r)} · ${(r.bytes / 1024 / 1024).toFixed(1)}MB` }),
-    el('div', { className: 'player-box' }, video),
+    fitToVideo(el('div', { className: 'player-box' }, video)),
     el('p', {}, el('a', { href: `#/b/${r.broadcast_id}`, textContent: '방송 화면으로' }), ' · ', el('a', { href: '#/recordings', textContent: '다시보기 목록' })),
   );
   // 화면을 떠나면 영상 내려받기를 멈춘다
@@ -820,6 +852,9 @@ function studioPanel(current: () => Broadcast, publisher: Publisher): { el: HTML
   const startCamera = el('button', { type: 'button', className: 'start-camera', textContent: '카메라로 방송 시작' });
   const stop = el('button', { type: 'button', className: 'danger stop-publish', textContent: '송출 멈춤' });
   stop.hidden = true;
+  // 송출 중 앞·뒤 카메라 전환(#67). 카메라 방송 중에만 보인다.
+  const flip = el('button', { type: 'button', className: 'flip-camera', textContent: '카메라 전환' });
+  flip.hidden = true;
   const screenSupported = !!navigator.mediaDevices?.getDisplayMedia;
   const cameraSupported = !!navigator.mediaDevices?.getUserMedia;
   /** 송출하는 동안만 거는 것들(화면 꺼짐 막기, 카메라 방송의 화면 숨김 감시 등). 멈추면 모두 푼다. */
@@ -836,6 +871,8 @@ function studioPanel(current: () => Broadcast, publisher: Publisher): { el: HTML
     stop.hidden = idle;
     // 멈추는 중에는 멈춤을 다시 누를 수 없다(#30 P2)
     stop.disabled = s === 'stopping';
+    // 연결이 다 된 뒤에만 전환할 수 있다
+    flip.disabled = s !== 'live';
     if (idle) {
       preview.hidden = true;
       preview.srcObject = null;
@@ -878,44 +915,119 @@ function studioPanel(current: () => Broadcast, publisher: Publisher): { el: HTML
 
   startScreen.onclick = () => {
     let screenAudio = 0;
+    let micError = '';
     void begin(
       async (register) => {
         const t = await screenAndMic(register, withMic.checked);
         screenAudio = t.screenAudio;
+        micError = t.micError;
         return t;
       },
       '화면 공유가 끝났습니다',
       () => {
+        const warns = [micError];
         if (screenAudio === 0) {
-          warn.textContent = '화면 소리가 함께 가지 않습니다. 공유 창에서 "탭 오디오 공유" 또는 "시스템 오디오 공유"를 켰는지 확인하세요(Chrome·Edge만 되고, "창" 공유에는 소리 칸이 없습니다).';
+          warns.push('화면 소리가 함께 가지 않습니다. 공유 창에서 "탭 오디오 공유" 또는 "시스템 오디오 공유"를 켰는지 확인하세요(Chrome·Edge만 되고, "창" 공유에는 소리 칸이 없습니다).');
         }
+        warn.textContent = warns.filter(Boolean).join(' ');
       },
     );
   };
   startCamera.onclick = () => {
     const f = facing.value as Facing;
     let mic: MediaStreamTrack | undefined;
+    let micError = '';
     void begin(
       async (register) => {
         const t = await cameraAndMic(register, f);
         mic = t.audio[0];
+        micError = t.micError;
         return t;
       },
       '카메라가 꺼져 송출을 멈췄습니다',
       (stream) => {
-        const video = stream.getVideoTracks()[0];
         // 경고는 종류별로 따로 들고 이어 붙여 보여 준다. 하나가 풀려도 다른 경고가 지워지지 않게(#33 2바퀴).
-        const warns = { facing: '', mute: '', mic: '' };
+        const warns = { facing: '', mute: '', mic: micError };
         const showWarns = () => {
           if (publisher.state !== 'idle') warn.textContent = Object.values(warns).filter(Boolean).join(' ');
         };
-        // 실제로 켜진 카메라 방향(브라우저가 알려 줄 때). 고른 카메라가 없으면 브라우저가 다른 카메라를 켠다(#33 M4).
-        const actual = video?.getSettings().facingMode as Facing | undefined;
-        if (actual && actual !== f) {
-          warns.facing = `고른 ${f === 'user' ? '앞' : '뒤'} 카메라가 없어 다른 카메라로 보냅니다.`;
-        }
-        // 앞 카메라는 거울처럼 보여야 자연스럽다. 미리보기만 뒤집는다(시청자에게 가는 영상은 그대로).
-        preview.classList.toggle('mirror', (actual ?? f) === 'user');
+        // 지금 보내는 카메라 방향. 전환 버튼이 바꾼다(#67).
+        let want = f;
+        /** 새 영상 트랙을 미리보기에 붙이고 방향·멈춤을 살핀다. 처음 시작과 카메라 전환이 함께 쓴다. */
+        const watch = (video: MediaStreamTrack | undefined, flipped = false) => {
+          // 실제로 켜진 카메라 방향(브라우저가 알려 줄 때). 고른 카메라가 없으면 브라우저가 다른 카메라를 켠다(#33 M4).
+          const actual = video?.getSettings().facingMode as Facing | undefined;
+          warns.facing =
+            actual && actual !== want ? `고른 ${want === 'user' ? '앞' : '뒤'} 카메라가 없어 다른 카메라로 보냅니다.` : '';
+          // 앞 카메라는 거울처럼 보여야 자연스럽다. 미리보기만 뒤집는다(시청자에게 가는 영상은 그대로).
+          // 방향을 알려 주지 않는 카메라(PC 웹캠)는 전환해도 거울 여부를 바꾸지 않는다(#68 R3: 좌우만 뒤집혀 보이던 문제)
+          if (actual || !flipped) preview.classList.toggle('mirror', (actual ?? want) === 'user');
+          warns.mute = '';
+          if (video) {
+            video.onmute = () => {
+              warns.mute = '카메라 영상이 잠시 멈췄습니다. 이 화면을 켜 두세요.';
+              showWarns();
+            };
+            video.onunmute = () => {
+              warns.mute = '';
+              showWarns();
+            };
+            // 준비하는 사이에 이미 멈춰 있었으면 지금 알린다
+            if (video.muted) warns.mute = '카메라 영상이 잠시 멈췄습니다. 이 화면을 켜 두세요.';
+          }
+        };
+        watch(stream.getVideoTracks()[0]);
+
+        // 송출 중 앞·뒤 카메라 전환(#67). 새 방향을 못 켜면 원래 방향으로 되돌린다. 그것도 안 되면 Publisher가 송출을 멈춘다.
+        // 카메라가 2개 이상일 때만 버튼을 보인다(#68 R3). 개수는 권한을 받은 지금 세야 정확하다.
+        let alive = true;
+        flip.hidden = true;
+        flip.disabled = publisher.state !== 'live';
+        void cameraCount().then((n) => {
+          if (alive) flip.hidden = n < 2;
+        });
+        flip.onclick = async () => {
+          flip.disabled = true;
+          const from = want;
+          const to: Facing = from === 'user' ? 'environment' : 'user';
+          const fromSettings = (preview.srcObject as MediaStream | null)?.getVideoTracks()[0]?.getSettings();
+          const fromId = fromSettings?.deviceId;
+          // 방향을 알려 주는 카메라(휴대폰)만 앞·뒤로 바꾼다. 모르면(PC) 다른 카메라로 돌아가며 바꾼다.
+          const knows = !!fromSettings?.facingMode;
+          const label = knows ? `${to === 'user' ? '앞' : '뒤'} 카메라` : '다른 카메라';
+          let note = '';
+          try {
+            const t = await publisher.switchVideo(async () => {
+              try {
+                return await otherCamera(knows ? to : undefined, fromId, () => publisher.state === 'live');
+              } catch (e) {
+                // 그사이 송출을 멈췄으면 원래 카메라를 다시 켜지 않는다(#68 R4)
+                if (publisher.state !== 'live') throw e;
+                note = `${label}를 켜지 못해 원래 카메라로 돌아왔습니다(${deviceMessage(e)}).`;
+                return sameCamera(from, fromId);
+              }
+            }, '카메라가 꺼져 송출을 멈췄습니다');
+            // 실제 방향을 알 때만 고른 방향을 바꾼다. 모르면 그대로 둬서 다음 송출의 거울 여부가 바뀌지 않게(2바퀴 리뷰 2)
+            const now = t.getSettings().facingMode as Facing | undefined;
+            if (now === 'user' || now === 'environment') {
+              want = now;
+              facing.value = now;
+            }
+            preview.srcObject = new MediaStream([t]);
+            watch(t, true);
+            if (note) warns.facing = note;
+            showWarns();
+          } catch {
+            // 실패하면 Publisher가 이유와 함께 송출을 멈춘다(멈춘 이유는 아래 안내 칸에 나온다)
+          } finally {
+            flip.disabled = publisher.state !== 'live';
+          }
+        };
+        releases.push(() => {
+          alive = false;
+          flip.hidden = true;
+          flip.onclick = null;
+        });
 
         // 휴대폰은 다른 앱으로 가거나 화면이 꺼질 때 카메라를 끝내지 않고 잠시 멈추기(mute)만 하는 경우가 많다.
         // 그러면 검은 화면이 나가고 마이크가 계속 갈 수도 있어서, 카메라 방송은 화면이 숨겨지면 송출을 멈춘다(#33 M1).
@@ -927,18 +1039,6 @@ function studioPanel(current: () => Broadcast, publisher: Publisher): { el: HTML
         };
         document.addEventListener('visibilitychange', onHidden);
         releases.push(() => document.removeEventListener('visibilitychange', onHidden));
-        if (video) {
-          video.onmute = () => {
-            warns.mute = '카메라 영상이 잠시 멈췄습니다. 이 화면을 켜 두세요.';
-            showWarns();
-          };
-          video.onunmute = () => {
-            warns.mute = '';
-            showWarns();
-          };
-          // 준비하는 사이에 이미 멈춰 있었으면 지금 알린다
-          if (video.muted) warns.mute = '카메라 영상이 잠시 멈췄습니다. 이 화면을 켜 두세요.';
-        }
         // 마이크만 끊기면(전화 등) 소리 없이 계속 가므로 알린다(#33 M6)
         if (mic) {
           mic.onended = () => {
@@ -991,7 +1091,7 @@ function studioPanel(current: () => Broadcast, publisher: Publisher): { el: HTML
     el('h3', { textContent: '방송하기' }),
     // 휴대폰(터치 화면)에서는 카메라 방송을 먼저 보여 준다
     ...(matchMedia('(pointer: coarse)').matches ? [cameraRow, screenRow] : [screenRow, cameraRow]),
-    el('div', { className: 'row' }, stop, state),
+    el('div', { className: 'row' }, stop, flip, state),
     preview,
     warn,
     note,

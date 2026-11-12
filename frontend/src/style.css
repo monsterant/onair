@@ -205,6 +205,23 @@ textarea {
   display: none;
 }
 
+/* 영상 비율에 맞춘 칸(#67). 세로 영상은 화면 높이의 75%를 넘지 않게 너비를 줄이고 가운데에 둔다. */
+.player-box.fitted {
+  aspect-ratio: var(--vw) / var(--vh);
+  width: min(100%, calc(75vh * var(--vw) / var(--vh)));
+  margin-inline: auto;
+}
+
+/* OvenPlayer는 안쪽 칸(.op-ratio)의 padding으로 높이를 16:9로 정한다. 같은 비율로 바꾼다. */
+.player-box.fitted .op-ratio {
+  padding-bottom: calc(100% * var(--vh) / var(--vw)) !important;
+}
+
+.player-box.fitted video.replay {
+  height: 100%;
+  max-height: none;
+}
+
 .description {
   white-space: pre-wrap;
 }
