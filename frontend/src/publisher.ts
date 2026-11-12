@@ -60,7 +60,9 @@ class Attempt {
     // 휴대폰은 화면이 숨겨질 때 멈춤이 먼저 시작되고 곧바로 페이지가 사라질 수 있다).
     const del = resource ? fetch(resource, { method: 'DELETE', keepalive: true }).catch(() => {}) : null;
     await audioCtx?.close().catch(() => {});
-    await del;
+    // 서버가 답하지 않으면(연결이 끊긴 채 멈춤 등) "멈추는 중"에 오래 머물지 않게 2초까지만 기다린다(#31 P11).
+    // 기다리지 않아도 keepalive 요청은 브라우저가 끝까지 보낸다.
+    if (del) await Promise.race([del, new Promise((r) => setTimeout(r, 2_000))]);
   }
 
   /**
@@ -82,6 +84,13 @@ class Attempt {
     if (resource) void fetch(resource, { method: 'DELETE', keepalive: true }).catch(() => {});
   }
 }
+
+/** 송출 요청(WHIP)에 서버가 답하기를 기다리는 시간 */
+const WHIP_TIMEOUT_MS = 15_000;
+/** 송출 요청이 받아들여진 뒤 영상 통로가 연결되기를 기다리는 시간 */
+const CONNECT_TIMEOUT_MS = 20_000;
+/** 송출 중 연결이 끊긴(disconnected) 채 기다리는 시간. 잠깐 흔들린 것은 스스로 돌아오기도 한다. */
+const LOST_TIMEOUT_MS = 15_000;
 
 export class Publisher {
   state: PublishState = 'idle';
@@ -147,22 +156,44 @@ export class Publisher {
       const vt = pc.addTransceiver(video, { direction: 'sendonly' });
       preferH264(vt);
       if (mixed) pc.addTransceiver(mixed, { direction: 'sendonly' });
+      // 연결이 끊긴 채 오래가면 멈춘다(#31 P11). 'disconnected'는 브라우저가 스스로 다시 붙기도 해서 바로 멈추지 않는다.
+      let lost: ReturnType<typeof setTimeout> | undefined;
       pc.onconnectionstatechange = () => {
         if (this.current !== a) return;
-        if (pc.connectionState === 'connected' && this.state === 'starting') this.set('live');
-        if (pc.connectionState === 'failed') void this.stop('연결이 끊겼습니다');
+        const s = pc.connectionState;
+        if (s !== 'disconnected') {
+          clearTimeout(lost);
+          lost = undefined;
+        }
+        if (s === 'connected' && this.state === 'starting') this.set('live');
+        if (s === 'failed') void this.stop('연결이 끊겨 송출을 멈췄습니다. 네트워크를 확인하고 다시 시작하세요');
+        if (s === 'disconnected' && !lost) {
+          lost = setTimeout(() => {
+            if (this.current === a && pc.connectionState === 'disconnected') {
+              void this.stop('연결이 15초 넘게 끊겨 송출을 멈췄습니다. 네트워크를 확인하고 다시 시작하세요');
+            }
+          }, LOST_TIMEOUT_MS);
+        }
       };
 
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
       a.check();
+      // 서버가 답하지 않으면 "준비 중"에 멈춰 있지 않게 시간 제한을 둔다(#31 P11)
+      const ctl = new AbortController();
+      const whipTimer = setTimeout(() => ctl.abort(), WHIP_TIMEOUT_MS);
       const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/sdp' },
         body: offer.sdp,
-      }).catch(() => {
-        throw new PublishError('송출 서버에 연결하지 못했습니다');
-      });
+        signal: ctl.signal,
+      })
+        .catch(() => {
+          throw new PublishError(
+            ctl.signal.aborted ? '송출 서버가 15초 동안 답하지 않았습니다. 잠시 뒤 다시 시도하세요' : '송출 서버에 연결하지 못했습니다',
+          );
+        })
+        .finally(() => clearTimeout(whipTimer));
       // 취소 여부를 보기 전에 자원 주소부터 받아 둔다. 취소됐어도 close()가 DELETE를 보낼 수 있게(#30 P1).
       if (res.ok) a.resource = sameOriginPath(res.headers.get('Location'));
       a.check();
@@ -177,6 +208,12 @@ export class Publisher {
       }
       await pc.setRemoteDescription({ type: 'answer', sdp: await res.text() });
       a.check();
+      // 송출 요청은 받아들여졌는데 영상 통로가 연결되지 않으면(회사·학교 망이 막는 경우 등) 멈추고 알린다(#31 P11)
+      setTimeout(() => {
+        if (this.current === a && this.state === 'starting') {
+          void this.stop('송출 서버와 영상 연결이 20초 안에 되지 않아 멈췄습니다. 네트워크(방화벽)를 확인하거나 다른 네트워크에서 다시 시도하세요');
+        }
+      }, CONNECT_TIMEOUT_MS);
       return new MediaStream([video]);
     } catch (e) {
       // 이 시도가 들고 있던 것을 정리한다(이미 멈춰서 정리됐더라도, 그 뒤에 생긴 자원까지)
@@ -313,16 +350,18 @@ export async function screenAndMic(register: Register, withMic: boolean) {
   const audio = [...screen.getAudioTracks()];
   // 마이크가 없거나 막혀도 화면은 보낸다. 이유는 화면에 경고로 보여 준다(#67, #31 P10).
   let micError = '';
+  let micTrack: MediaStreamTrack | undefined;
   if (withMic && keep) {
     try {
       const mic = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
       register(mic.getTracks());
       audio.push(...mic.getAudioTracks());
+      micTrack = mic.getAudioTracks()[0];
     } catch (e) {
       micError = micFailed(e);
     }
   }
-  return { video: screen.getVideoTracks()[0], audio, screenAudio: screen.getAudioTracks().length, micError };
+  return { video: screen.getVideoTracks()[0], audio, screenAudio: screen.getAudioTracks().length, micError, micTrack };
 }
 
 /** 마이크를 못 켰을 때 보여 줄 문장. 이미 송출 중이라 "다시 시도"가 아니라 멈추고 다시 시작하라고 쓴다(#68 R6). */
