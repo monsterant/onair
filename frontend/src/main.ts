@@ -970,6 +970,8 @@ function studioPanel(current: () => Broadcast, publisher: Publisher): { el: HTML
       // 송출 뒷처리를 먼저 하고 막대는 그다음에 켠다(막대에서 무엇이 실패해도 뒷처리는 빠지지 않게)
       afterStart(stream);
       releases.push(startMeter(stream.getAudioTracks()[0]));
+      // 휴대폰(터치 화면)에서는 송출 멈춤 버튼과 미리보기가 첫 화면 아래로 밀려 있다. 시작하면 그 자리로 내려간다(심사자 시뮬레이션 3차)
+      if (matchMedia('(pointer: coarse)').matches) stop.scrollIntoView({ block: 'start', behavior: 'smooth' });
     } catch (e) {
       // 멈춰서 취소된 시도는 조용히 넘긴다(새 시도나 멈춘 이유를 덮지 않게, #30 P7)
       if (e instanceof CancelledError) return;
