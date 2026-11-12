@@ -192,8 +192,7 @@ export class Publisher {
           throw new PublishError(
             ctl.signal.aborted ? '송출 서버가 15초 동안 답하지 않았습니다. 잠시 뒤 다시 시도하세요' : '송출 서버에 연결하지 못했습니다',
           );
-        })
-        .finally(() => clearTimeout(whipTimer));
+        });
       // 취소 여부를 보기 전에 자원 주소부터 받아 둔다. 취소됐어도 close()가 DELETE를 보낼 수 있게(#30 P1).
       if (res.ok) a.resource = sameOriginPath(res.headers.get('Location'));
       a.check();
@@ -206,7 +205,17 @@ export class Publisher {
               : `송출 서버 오류 (${res.status})`,
         );
       }
-      await pc.setRemoteDescription({ type: 'answer', sdp: await res.text() });
+      // 응답 본문을 다 받을 때까지 같은 시간 제한을 둔다. 본문을 보내다 멈추는 경우도 15초 뒤 끝난다(#31 리뷰).
+      const answer = await res
+        .text()
+        .catch(() => {
+          throw new PublishError(
+            ctl.signal.aborted ? '송출 서버가 15초 동안 답하지 않았습니다. 잠시 뒤 다시 시도하세요' : '송출 서버에 연결하지 못했습니다',
+          );
+        })
+        .finally(() => clearTimeout(whipTimer));
+      a.check();
+      await pc.setRemoteDescription({ type: 'answer', sdp: answer });
       a.check();
       // 송출 요청은 받아들여졌는데 영상 통로가 연결되지 않으면(회사·학교 망이 막는 경우 등) 멈추고 알린다(#31 P11)
       setTimeout(() => {
