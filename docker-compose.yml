@@ -34,6 +34,8 @@ services:
     volumes:
       # 기본 설정에 AdmissionWebhooks를 더하고 인증서(TLS) 칸을 뺀 onair용 설정
       - ./ome/Server.xml:/opt/ovenmediaengine/bin/origin_conf/Server.xml:ro
+      # 로그에 송출 키가 남지 않게 한 로그 설정(#28 V11)
+      - ./ome/Logger.xml:/opt/ovenmediaengine/bin/origin_conf/Logger.xml:ro
       # 녹화 파일(#47). 로컬 백엔드(cargo run)가 같은 폴더를 RECORDINGS_DIR로 읽는다
       - ./recordings:/rec
     extra_hosts:
