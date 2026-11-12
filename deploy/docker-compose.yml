@@ -64,6 +64,7 @@ services:
       OME_API_TOKEN: ${OME_API_TOKEN}
     volumes:
       - ../ome/Server.xml:/opt/ovenmediaengine/bin/origin_conf/Server.xml:ro
+      - ../ome/Logger.xml:/opt/ovenmediaengine/bin/origin_conf/Logger.xml:ro
       - rec-data:/rec
     ports:
       - "3478:3478"                    # WebRTC TCP 중계 (TURN)
