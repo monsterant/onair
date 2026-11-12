@@ -91,6 +91,32 @@ cd backend && DATABASE_URL=postgres://onair:onair-local-only@localhost:55432/ona
 ```
 - 권한(비로그인·소유자·다른 사용자), 방송 상태, 송출 허락, 테스트 계정, 댓글, 도네이션(가짜 토스 서버로 중복 적립·동시 요청·금액 바꿔치기) 등 100개가 넘는 시험이 있다. GitHub Actions에서 PR마다 돈다.
 
+브라우저 시험(`e2e/`, puppeteer)은 진짜 Chrome을 자동으로 움직여 화면에서 송출하고 시청한다. 카메라·마이크·화면 공유는 Chrome의 가짜 장치를 쓴다.
+```bash
+# 위 "로컬에서 실행"의 DB·미디어 서버·백엔드(DEMO_LOGIN=true)·프론트엔드를 먼저 띄운다
+cd e2e && npm install
+node run-all.mjs                      # 모두 (http://localhost:5173)
+node pc.mjs                           # 하나만
+node run-all.mjs https://<배포 주소>/ --gap 60   # 실제 서버. 같은 IP 요청 제한(분당 20회) 때문에 시험 사이를 띄운다
+```
+- Node.js 20.11 이상이 필요하다. Chrome 위치가 다르면 `CHROME_PATH` 환경변수로 알려 준다.
+- `recording.mjs`는 `.env`의 `RECORDINGS_DIR`, `donate.mjs`는 `TOSS_CLIENT_KEY`·`TOSS_SECRET_KEY`(토스 **테스트** 키)가 있어야 통과한다. 비어 있으면 그 기능이 꺼져 실패로 나온다.
+- 시험 하나를 따로 돌리면 실패가 있어도 끝 코드는 0이다. 실패 여부는 `FAIL` 줄로 본다(`run-all.mjs`는 실패가 있으면 1).
+- CI에서는 돌리지 않는다. 미디어 서버(OME)와 진짜 브라우저가 필요해서, 기능을 바꿀 때마다 로컬과 실제 서버에서 돌렸다.
+
+| 파일 | 확인하는 것 |
+|---|---|
+| `auth.mjs` | 회원가입·로그인·로그아웃, 테스트 계정 |
+| `pc.mjs` | PC 화면 공유 송출 → 시청(영상·소리), 멈춤·다시 시작, 마이크 없을 때 |
+| `mobile.mjs` | 휴대폰 화면 크기의 카메라 송출(앞·뒤), 휴대폰 시청, 화면을 떠나면 송출 멈춤 |
+| `comments.mjs` | 댓글 쓰기·고치기·지우기, 다른 사람·비로그인에게 보이는 것과 권한 |
+| `donate.mjs` | 도네이션 화면(토스 테스트 결제위젯이 뜨는지까지. 결제창 안은 사람이 확인) |
+| `recording.mjs` | 방송 → 종료 → 다시보기 재생·탐색 |
+| `reload.mjs` | 송출 중 새로고침 뒤 바로 대기로 |
+| `ux.mjs`, `ux2.mjs` | 첫 화면 안내, 소리 켜기, 긴 설명 접기, 로그인 뒤 보던 화면으로 등 |
+| `offline.mjs` | 시청자 인터넷 끊김 알림, 다시 연결되면 이어 보기 |
+| `devices.mjs` | 마이크 없이 송출, 영상 비율에 맞춘 시청 칸, 송출 중 카메라 전환 |
+
 ### 배포 (실제 서비스)
 - AWS EC2 한 대(ARM, Ubuntu 24.04)에 Docker로 올렸다. 도메인은 DuckDNS, HTTPS 인증서는 Caddy가 Let's Encrypt에서 자동으로 받는다.
 - 서버에서 `deploy/.env.example`을 `deploy/.env`로 복사하고 비밀값을 채운 뒤 아래를 실행한다.
@@ -224,6 +250,7 @@ flowchart LR
 |---|---|
 | `backend/` | Rust(axum, sqlx) 백엔드. `migrations/`는 DB 구조, `tests/`는 API 시험 |
 | `frontend/` | Vite + TypeScript 화면(프레임워크 없이 DOM으로 그림) |
+| `e2e/` | 브라우저 시험(puppeteer) |
 | `ome/` | OvenMediaEngine 설정(송출 허락 웹훅, WebRTC·LL-HLS) |
 | `deploy/` | 배포용 docker compose, Caddy 설정, 화면 이미지, 환경변수 예시 |
 | `docker-compose.yml` | 로컬용 PostgreSQL, OvenMediaEngine |
@@ -250,6 +277,7 @@ flowchart LR
 | OvenPlayer (MIT) | 시청 플레이어(WebRTC, LL-HLS) | https://github.com/AirenSoft/OvenPlayer |
 | hls.js (Apache-2.0) | LL-HLS 재생 | https://github.com/video-dev/hls.js |
 | Caddy | 배포 서버 HTTPS·프록시 | https://caddyserver.com |
+| puppeteer-core (Apache-2.0) | 브라우저 시험 | https://github.com/puppeteer/puppeteer |
 | argon2, reqwest, rustls | 비밀번호 저장, 토스 API 호출(https) | https://github.com/RustCrypto/password-hashes, https://github.com/seanmonstar/reqwest, https://github.com/rustls/rustls |
 | 토스페이먼츠 결제위젯 v2 (테스트 모드) | 도네이션 결제 화면 | https://docs.tosspayments.com |
 
