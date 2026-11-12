@@ -1,5 +1,5 @@
-// 송출 시간 제한 시험 (#31 P11): 송출 요청에 답이 없음, 영상 연결이 안 됨, 송출 중 연결이 오래 끊김, 화면 공유 중 마이크 꺼짐
-// node timeouts.mjs [BASE] [--pause-ome 컨테이너이름]   (3번은 로컬에서 OME 컨테이너를 잠시 멈춰 끊김을 만든다)
+// 송출 시간 제한 시험 (#31 P11): 1) 송출 요청에 답이 없음 2) 영상 연결이 안 됨 3) 화면 공유 중 마이크 꺼짐 4) 송출 중 연결이 오래 끊김
+// node timeouts.mjs [BASE] [--pause-ome 컨테이너이름]   (4번은 로컬에서 OME 컨테이너를 잠시 멈춰 끊김을 만든다)
 import puppeteer from 'puppeteer-core';
 import { CHROME } from './chrome.mjs';
 import { execSync } from 'node:child_process';
