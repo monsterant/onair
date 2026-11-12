@@ -46,9 +46,11 @@ import {
   Publisher,
   type PublishState,
   cameraAndMic,
-  cameraOnly,
+  cameraCount,
   keepScreenOn,
   message as deviceMessage,
+  otherCamera,
+  sameCamera,
   screenAndMic,
 } from './publisher';
 
@@ -359,6 +361,8 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
       clearTimeout(retry);
       restart = false;
       playerBox.replaceChildren(el('div', { id: 'player' }));
+      // 옛 영상의 비율이 새 플레이어로 이어지지 않게 지운다. 새 영상 크기를 알면 다시 맞춘다(#68 R5).
+      playerBox.classList.remove('fitted');
       soundBtn.hidden = false;
       soundBtn.textContent = '🔇 소리 켜기';
       player().then((p) => {
@@ -950,13 +954,14 @@ function studioPanel(current: () => Broadcast, publisher: Publisher): { el: HTML
         // 지금 보내는 카메라 방향. 전환 버튼이 바꾼다(#67).
         let want = f;
         /** 새 영상 트랙을 미리보기에 붙이고 방향·멈춤을 살핀다. 처음 시작과 카메라 전환이 함께 쓴다. */
-        const watch = (video: MediaStreamTrack | undefined) => {
+        const watch = (video: MediaStreamTrack | undefined, flipped = false) => {
           // 실제로 켜진 카메라 방향(브라우저가 알려 줄 때). 고른 카메라가 없으면 브라우저가 다른 카메라를 켠다(#33 M4).
           const actual = video?.getSettings().facingMode as Facing | undefined;
           warns.facing =
             actual && actual !== want ? `고른 ${want === 'user' ? '앞' : '뒤'} 카메라가 없어 다른 카메라로 보냅니다.` : '';
           // 앞 카메라는 거울처럼 보여야 자연스럽다. 미리보기만 뒤집는다(시청자에게 가는 영상은 그대로).
-          preview.classList.toggle('mirror', (actual ?? want) === 'user');
+          // 방향을 알려 주지 않는 카메라(PC 웹캠)는 전환해도 거울 여부를 바꾸지 않는다(#68 R3: 좌우만 뒤집혀 보이던 문제)
+          if (actual || !flipped) preview.classList.toggle('mirror', (actual ?? want) === 'user');
           warns.mute = '';
           if (video) {
             video.onmute = () => {
@@ -974,26 +979,34 @@ function studioPanel(current: () => Broadcast, publisher: Publisher): { el: HTML
         watch(stream.getVideoTracks()[0]);
 
         // 송출 중 앞·뒤 카메라 전환(#67). 새 방향을 못 켜면 원래 방향으로 되돌린다. 그것도 안 되면 Publisher가 송출을 멈춘다.
-        flip.hidden = false;
+        // 카메라가 2개 이상일 때만 버튼을 보인다(#68 R3). 개수는 권한을 받은 지금 세야 정확하다.
+        let alive = true;
+        flip.hidden = true;
         flip.disabled = publisher.state !== 'live';
+        void cameraCount().then((n) => {
+          if (alive) flip.hidden = n < 2;
+        });
         flip.onclick = async () => {
           flip.disabled = true;
           const from = want;
           const to: Facing = from === 'user' ? 'environment' : 'user';
+          const fromId = (preview.srcObject as MediaStream | null)?.getVideoTracks()[0]?.getSettings().deviceId;
           let note = '';
           try {
             const t = await publisher.switchVideo(async () => {
               try {
-                return await cameraOnly(to);
+                return await otherCamera(to, fromId);
               } catch (e) {
+                // 그사이 송출을 멈췄으면 원래 카메라를 다시 켜지 않는다(#68 R4)
+                if (publisher.state !== 'live') throw e;
                 note = `${to === 'user' ? '앞' : '뒤'} 카메라를 켜지 못해 원래 카메라로 돌아왔습니다(${deviceMessage(e)}).`;
-                return cameraOnly(from);
+                return sameCamera(from, fromId);
               }
             }, '카메라가 꺼져 송출을 멈췄습니다');
             want = note ? from : to;
             facing.value = want;
             preview.srcObject = new MediaStream([t]);
-            watch(t);
+            watch(t, true);
             if (note) warns.facing = note;
             showWarns();
           } catch {
@@ -1003,6 +1016,7 @@ function studioPanel(current: () => Broadcast, publisher: Publisher): { el: HTML
           }
         };
         releases.push(() => {
+          alive = false;
           flip.hidden = true;
           flip.onclick = null;
         });
