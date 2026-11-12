@@ -990,21 +990,29 @@ function studioPanel(current: () => Broadcast, publisher: Publisher): { el: HTML
           flip.disabled = true;
           const from = want;
           const to: Facing = from === 'user' ? 'environment' : 'user';
-          const fromId = (preview.srcObject as MediaStream | null)?.getVideoTracks()[0]?.getSettings().deviceId;
+          const fromSettings = (preview.srcObject as MediaStream | null)?.getVideoTracks()[0]?.getSettings();
+          const fromId = fromSettings?.deviceId;
+          // 방향을 알려 주는 카메라(휴대폰)만 앞·뒤로 바꾼다. 모르면(PC) 다른 카메라로 돌아가며 바꾼다.
+          const knows = !!fromSettings?.facingMode;
+          const label = knows ? `${to === 'user' ? '앞' : '뒤'} 카메라` : '다른 카메라';
           let note = '';
           try {
             const t = await publisher.switchVideo(async () => {
               try {
-                return await otherCamera(to, fromId);
+                return await otherCamera(knows ? to : undefined, fromId, () => publisher.state === 'live');
               } catch (e) {
                 // 그사이 송출을 멈췄으면 원래 카메라를 다시 켜지 않는다(#68 R4)
                 if (publisher.state !== 'live') throw e;
-                note = `${to === 'user' ? '앞' : '뒤'} 카메라를 켜지 못해 원래 카메라로 돌아왔습니다(${deviceMessage(e)}).`;
+                note = `${label}를 켜지 못해 원래 카메라로 돌아왔습니다(${deviceMessage(e)}).`;
                 return sameCamera(from, fromId);
               }
             }, '카메라가 꺼져 송출을 멈췄습니다');
-            want = note ? from : to;
-            facing.value = want;
+            // 실제 방향을 알 때만 고른 방향을 바꾼다. 모르면 그대로 둬서 다음 송출의 거울 여부가 바뀌지 않게(2바퀴 리뷰 2)
+            const now = t.getSettings().facingMode as Facing | undefined;
+            if (now === 'user' || now === 'environment') {
+              want = now;
+              facing.value = now;
+            }
             preview.srcObject = new MediaStream([t]);
             watch(t, true);
             if (note) warns.facing = note;

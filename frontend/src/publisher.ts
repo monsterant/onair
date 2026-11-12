@@ -27,10 +27,14 @@ class Attempt {
   resource: string | null = null;
   audioCtx: AudioContext | null = null;
 
-  /** 켠 장치를 맡긴다. 이미 취소됐으면 바로 끈다. */
-  add(t: MediaStreamTrack[]) {
-    if (this.cancelled) t.forEach((x) => x.stop());
-    else this.tracks.push(...t);
+  /** 켠 장치를 맡긴다. 이미 취소됐으면 바로 끄고 false를 돌려준다(더 켜지 말라는 뜻). */
+  add(t: MediaStreamTrack[]): boolean {
+    if (this.cancelled) {
+      t.forEach((x) => x.stop());
+      return false;
+    }
+    this.tracks.push(...t);
+    return true;
   }
 
   /** 취소됐으면 더 진행하지 않는다 */
@@ -107,7 +111,7 @@ export class Publisher {
    * @param whipUrl  송출 주소(같은 사이트의 /app/... 경로)를 돌려주는 함수
    */
   async start(
-    getTracks: (register: (t: MediaStreamTrack[]) => void) => Promise<{ video: MediaStreamTrack; audio: MediaStreamTrack[] }>,
+    getTracks: (register: Register) => Promise<{ video: MediaStreamTrack; audio: MediaStreamTrack[] }>,
     whipUrl: () => Promise<string>,
     /** 영상 트랙이 끝났을 때 보여 줄 이유(화면 공유 끝남, 카메라 꺼짐 등) */
     endedReason = '화면 공유가 끝났습니다',
@@ -283,7 +287,10 @@ export function message(e: unknown): string {
 }
 
 /** PC 화면 공유 + (선택) 마이크 */
-export async function screenAndMic(register: (t: MediaStreamTrack[]) => void, withMic: boolean) {
+/** 켠 트랙을 시도에 맡긴다. false면 이미 멈춘 시도라 더 켜지 않는다. */
+export type Register = (t: MediaStreamTrack[]) => boolean;
+
+export async function screenAndMic(register: Register, withMic: boolean) {
   if (!navigator.mediaDevices?.getDisplayMedia) {
     throw new PublishError('이 브라우저는 화면 공유를 지원하지 않습니다. PC의 Chrome이나 Edge를 쓰세요');
   }
@@ -302,11 +309,11 @@ export async function screenAndMic(register: (t: MediaStreamTrack[]) => void, wi
     }
     throw new PublishError(message(e));
   }
-  register(screen.getTracks());
+  const keep = register(screen.getTracks());
   const audio = [...screen.getAudioTracks()];
   // 마이크가 없거나 막혀도 화면은 보낸다. 이유는 화면에 경고로 보여 준다(#67, #31 P10).
   let micError = '';
-  if (withMic) {
+  if (withMic && keep) {
     try {
       const mic = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
       register(mic.getTracks());
@@ -321,7 +328,12 @@ export async function screenAndMic(register: (t: MediaStreamTrack[]) => void, wi
 /** 마이크를 못 켰을 때 보여 줄 문장. 이미 송출 중이라 "다시 시도"가 아니라 멈추고 다시 시작하라고 쓴다(#68 R6). */
 function micFailed(e: unknown): string {
   const why = message(e).split('. ')[0] || (e instanceof DOMException ? e.name : '알 수 없는 이유');
-  return `마이크를 쓸 수 없어 마이크 소리 없이 송출합니다(${why}). 마이크를 쓰려면 허용한 뒤 송출을 멈추고 다시 시작하세요.`;
+  // 원인에 맞는 안내(2바퀴 동작 사냥 7: 마이크가 없을 때도 "허용"이라고 쓰던 문제)
+  const how =
+    e instanceof DOMException && e.name === 'NotAllowedError'
+      ? '마이크를 쓰려면 주소창 옆 자물쇠에서 허용한 뒤'
+      : '마이크를 쓰려면 마이크를 연결하거나 마이크를 쓰는 다른 프로그램을 닫은 뒤';
+  return `마이크를 쓸 수 없어 마이크 소리 없이 송출합니다(${why}). ${how} 송출을 멈추고 다시 시작하세요.`;
 }
 
 /** 권한 상태. 알 수 없으면(지원 안 하는 브라우저) 'unknown'. 읽기만 해서 권한 창은 뜨지 않는다. */
@@ -348,7 +360,8 @@ async function firstVideo(c: MediaTrackConstraints): Promise<MediaStreamTrack> {
 /** 카메라 개수. 권한을 받은 뒤에 불러야 정확하다. 알 수 없으면 0. */
 export async function cameraCount(): Promise<number> {
   try {
-    return (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'videoinput').length;
+    // 장치 번호가 비어 있으면(권한 전 등) 고를 수 없으니 세지 않는다(2바퀴 동작 사냥 6)
+    return (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'videoinput' && d.deviceId).length;
   } catch {
     return 0;
   }
@@ -360,13 +373,30 @@ export async function cameraCount(): Promise<number> {
  * 그때는 다른 카메라를 장치 번호로 켠다(#68 R3).
  * @param fromId 지금까지 쓰던 카메라의 장치 번호(이미 꺼져 있어야 한다)
  */
-export async function otherCamera(facing: Facing, fromId?: string): Promise<MediaStreamTrack> {
-  const t = await firstVideo(cameraVideo(facing));
-  if (!fromId || t.getSettings().deviceId !== fromId) return t;
-  const devices = await navigator.mediaDevices.enumerateDevices().catch(() => [] as MediaDeviceInfo[]);
-  const other = devices.find((d) => d.kind === 'videoinput' && d.deviceId && d.deviceId !== fromId);
-  if (!other) return t;
-  t.stop();
+export async function otherCamera(
+  facing: Facing | undefined,
+  fromId: string | undefined,
+  /** 아직 전환할 때인지(멈췄으면 false). 두 번째 요청 전에 본다(2바퀴 동작 사냥 3). */
+  wanted: () => boolean,
+): Promise<MediaStreamTrack> {
+  // 방향을 아는 카메라(휴대폰)는 방향으로 고른다. 방향을 모르면(PC) 처음부터 장치 순서대로 고른다.
+  const t = facing ? await firstVideo(cameraVideo(facing)) : null;
+  if (t && (!fromId || t.getSettings().deviceId !== fromId)) return t;
+  if (!fromId || !wanted()) {
+    if (t) return t;
+    throw new PublishError('다른 카메라를 찾지 못했습니다');
+  }
+  const cams = (await navigator.mediaDevices.enumerateDevices().catch(() => [] as MediaDeviceInfo[])).filter(
+    (d) => d.kind === 'videoinput' && d.deviceId,
+  );
+  // 지금 카메라 다음 것(끝이면 처음). 카메라가 3개 이상이어도 모두 돌아가며 고른다(2바퀴 동작 사냥 4).
+  const i = cams.findIndex((d) => d.deviceId === fromId);
+  const other = cams.length > 1 ? cams[(i + 1) % cams.length] : undefined;
+  if (!other || other.deviceId === fromId || !wanted()) {
+    if (t) return t;
+    throw new PublishError('다른 카메라를 찾지 못했습니다');
+  }
+  t?.stop();
   return firstVideo({ deviceId: { exact: other.deviceId }, width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } });
 }
 
@@ -379,7 +409,7 @@ export async function sameCamera(facing: Facing, id?: string): Promise<MediaStre
 export type Facing = 'user' | 'environment';
 
 /** 휴대폰·PC 카메라 + 마이크(#2). 권한 창이 한 번만 뜨도록 영상과 소리를 함께 요청한다. */
-export async function cameraAndMic(register: (t: MediaStreamTrack[]) => void, facing: Facing) {
+export async function cameraAndMic(register: Register, facing: Facing) {
   if (!navigator.mediaDevices?.getUserMedia) {
     throw new PublishError('이 브라우저는 카메라를 쓸 수 없습니다. https 주소인지 확인하세요');
   }
@@ -412,8 +442,11 @@ export async function cameraAndMic(register: (t: MediaStreamTrack[]) => void, fa
       // 카메라 자체가 안 되면 처음 오류를 보여 준다
       throw new PublishError(message(e));
     }
-    register([video]);
+    // 그사이 멈췄으면 마이크는 켜지 않는다(2바퀴 동작 사냥 2)
+    if (!register([video])) return { video, audio: [] as MediaStreamTrack[], micError: '' };
     // 처음 실패가 카메라 쪽의 잠깐 오류였을 수도 있다. 마이크만 한 번 더 요청해 보고, 그것도 실패할 때만 마이크 없이 보낸다(#68 R2).
+    // 권한 거부였으면 다시 묻지 않는다. 사용자가 방금 닫은 권한 창이 또 뜨지 않게(2바퀴 리뷰 1).
+    if (name === 'NotAllowedError') return { video, audio: [] as MediaStreamTrack[], micError: micFailed(e) };
     try {
       const mic = await navigator.mediaDevices.getUserMedia({ audio: audioC });
       register(mic.getTracks());
