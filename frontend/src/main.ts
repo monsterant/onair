@@ -916,11 +916,13 @@ function studioPanel(current: () => Broadcast, publisher: Publisher): { el: HTML
   startScreen.onclick = () => {
     let screenAudio = 0;
     let micError = '';
+    let mic: MediaStreamTrack | undefined;
     void begin(
       async (register) => {
         const t = await screenAndMic(register, withMic.checked);
         screenAudio = t.screenAudio;
         micError = t.micError;
+        mic = t.micTrack;
         return t;
       },
       '화면 공유가 끝났습니다',
@@ -929,7 +931,19 @@ function studioPanel(current: () => Broadcast, publisher: Publisher): { el: HTML
         if (screenAudio === 0) {
           warns.push('화면 소리가 함께 가지 않습니다. 공유 창에서 "탭 오디오 공유" 또는 "시스템 오디오 공유"를 켰는지 확인하세요(Chrome·Edge만 되고, "창" 공유에는 소리 칸이 없습니다).');
         }
-        warn.textContent = warns.filter(Boolean).join(' ');
+        const show = () => {
+          if (publisher.state !== 'idle') warn.textContent = warns.filter(Boolean).join(' ');
+        };
+        // 송출 중 마이크만 끊기면(마이크를 뺌 등) 화면과 화면 소리는 계속 가므로 알린다(#31 P11)
+        if (mic) {
+          const lostMic = '마이크가 꺼졌습니다. 지금은 마이크 소리 없이 송출 중입니다.';
+          mic.onended = () => {
+            warns.push(lostMic);
+            show();
+          };
+          if (mic.readyState === 'ended') warns.push(lostMic);
+        }
+        show();
       },
     );
   };
