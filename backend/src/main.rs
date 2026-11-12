@@ -63,7 +63,8 @@ async fn main() {
     loop {
         match onair_backend::migrate(&db).await {
             Ok(()) => break,
-            Err(e) if tries < 30 => {
+            // 연결 문제만 다시 시도한다. 버전 불일치·SQL 오류는 다시 해도 같으니 바로 멈춘다(#25 A13).
+            Err(e) if tries < 30 && onair_backend::migrate_retryable(&e) => {
                 tries += 1;
                 tracing::warn!(error = %e, tries, "DB 마이그레이션 실패, 다시 시도");
                 tokio::time::sleep(Duration::from_secs(2)).await;

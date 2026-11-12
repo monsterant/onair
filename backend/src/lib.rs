@@ -91,12 +91,31 @@ pub fn app(state: AppState) -> Router {
         .layer(axum::middleware::from_fn(guard::reject_cross_site))
         // 기본 오류 응답도 {"error"} 모양으로(#25 A12). 가장 바깥에 둔다.
         .layer(axum::middleware::from_fn(guard::json_errors))
+        // 오류 응답까지 포함해 모든 API 응답을 캐시하지 않게(#25 A16). json_errors가 바꾼 응답에도 붙도록 그 바깥에 둔다.
+        .layer(axum::middleware::from_fn(guard::no_store))
         .with_state(state)
 }
 
 /// DB 구조 변경(migrations 폴더)을 적용한다. 이미 적용된 것은 건너뛴다.
 pub async fn migrate(db: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
     sqlx::migrate!("./migrations").run(db).await
+}
+
+/// 마이그레이션 실패가 기다리면 나아질 수 있는 것인지(#25 A13).
+/// - 다시 시도: DB가 아직 뜨는 중이라 연결이 안 되는 경우(연결 거부, 시간 초과, 풀에서 연결을 못 받음).
+/// - 바로 멈춤: 버전 불일치·빠진 버전·SQL 오류처럼 몇 번을 다시 해도 같은 것. 60초를 기다리지 않고 원인을 바로 보여 준다.
+pub fn migrate_retryable(e: &sqlx::migrate::MigrateError) -> bool {
+    use sqlx::migrate::MigrateError;
+    match e {
+        MigrateError::Execute(err) | MigrateError::ExecuteMigration(err, _) => matches!(
+            err,
+            sqlx::Error::Io(_)
+                | sqlx::Error::PoolTimedOut
+                | sqlx::Error::PoolClosed
+                | sqlx::Error::Tls(_)
+        ),
+        _ => false,
+    }
 }
 
 /// OME AdmissionWebhooks 길. DB가 필요 없어서 상태(서명 키)를 따로 받는다.

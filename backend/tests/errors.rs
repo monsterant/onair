@@ -194,6 +194,56 @@ async fn expired_sessions_of_all_users_are_cleaned(db: PgPool) {
 }
 
 #[sqlx::test]
+async fn api_responses_are_not_cached(db: PgPool) {
+    // 로그인한 사람의 정보가 공용 PC·프록시 캐시에 남지 않게 모든 API 응답에 no-store(#25 A16)
+    let r = router(db, true);
+    for (method, path, ct, body) in [
+        ("GET", "/health", None, ""),
+        ("GET", "/broadcasts", None, ""),
+        ("GET", "/auth/me", None, ""),
+        ("GET", "/no-such-path", None, ""),
+        ("POST", "/auth/login", Some("application/json"), "{not json"),
+        ("POST", "/auth/demo/1", None, ""),
+    ] {
+        let res = r
+            .clone()
+            .oneshot(json_req(method, path, ct, body))
+            .await
+            .unwrap();
+        assert_eq!(
+            res.headers()
+                .get(header::CACHE_CONTROL)
+                .map(|v| v.to_str().unwrap()),
+            Some("no-store"),
+            "{method} {path} -> {}",
+            res.status()
+        );
+    }
+}
+
+#[test]
+fn only_connection_failures_retry_migrations() {
+    // DB가 아직 뜨는 중(연결 문제)이면 다시 시도하고, 다시 해도 같은 오류는 바로 멈춘다(#25 A13)
+    use onair_backend::migrate_retryable;
+    use sqlx::migrate::MigrateError;
+    let io = || {
+        sqlx::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "refused",
+        ))
+    };
+    assert!(migrate_retryable(&MigrateError::Execute(io())));
+    assert!(migrate_retryable(&MigrateError::Execute(
+        sqlx::Error::PoolTimedOut
+    )));
+    assert!(!migrate_retryable(&MigrateError::Execute(
+        sqlx::Error::Protocol("bad".into())
+    )));
+    assert!(!migrate_retryable(&MigrateError::VersionMismatch(3)));
+    assert!(!migrate_retryable(&MigrateError::VersionMissing(3)));
+}
+
+#[sqlx::test]
 async fn unknown_path_is_json_in_the_production_router(db: PgPool) {
     // main.rs와 똑같이 OME 웹훅 라우터와 합친 라우터로 본다
     let r =

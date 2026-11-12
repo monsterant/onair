@@ -22,7 +22,7 @@ use std::{
 
 use axum::{
     extract::{Request, State},
-    http::{HeaderMap, Method, header},
+    http::{HeaderMap, HeaderValue, Method, header},
     middleware::Next,
     response::{IntoResponse, Response},
 };
@@ -83,6 +83,17 @@ pub async fn json_errors(req: Request, next: Next) -> Response {
     );
     let body = serde_json::json!({ "error": msg }).to_string();
     Response::from_parts(parts, axum::body::Body::from(body))
+}
+
+/// API 응답은 브라우저·중간 캐시에 남기지 않는다(#25 A16).
+/// 로그인한 사람의 정보(내 정보, 내 방송, 송출 키)가 공용 PC나 프록시 캐시에 남지 않게 한다.
+/// 핸들러가 이미 Cache-Control을 정한 응답(녹화 파일 등)은 그대로 둔다.
+pub async fn no_store(req: Request, next: Next) -> Response {
+    let mut res = next.run(req).await;
+    res.headers_mut()
+        .entry(header::CACHE_CONTROL)
+        .or_insert(HeaderValue::from_static("no-store"));
+    res
 }
 
 pub async fn reject_cross_site(req: Request, next: Next) -> Response {

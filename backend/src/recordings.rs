@@ -352,10 +352,15 @@ async fn start_missing(db: &sqlx::PgPool, api: &OmeApi) -> Result<(), sqlx::Erro
 
 /// 2. 방송이 끝났거나 너무 길어진 녹화를 멈춘다
 async fn stop_finished(db: &sqlx::PgPool, api: &OmeApi) -> Result<(), sqlx::Error> {
+    // 멈출 녹화: 방송이 live가 아님, 너무 오래됨(상한), 또는 지난 송출의 녹화(#62 M2).
+    // 송출이 닫힌 뒤 멈춤이 계속 실패하고 그사이 방송자가 다시 붙으면, 방송은 다시 live라 첫 조건에 걸리지 않는다.
+    // 다시 live가 될 때 방송 시작 시각(b.started_at)이 새로 정해지므로(ome.rs), 그보다 먼저 시작한 녹화는 지난 송출의 것이다.
+    // 그대로 두면 상한(2시간)까지 한 파일에 이어지고, 같은 방송에 녹화 중은 하나뿐이라 새 녹화도 못 건다.
     let rows: Vec<String> = sqlx::query_scalar(
         "SELECT r.record_id FROM recordings r JOIN broadcasts b ON b.id = r.broadcast_id
           WHERE r.status = 'recording'
-            AND (b.status <> 'live' OR r.started_at < now() - make_interval(secs => $1))",
+            AND (b.status <> 'live' OR r.started_at < now() - make_interval(secs => $1)
+                 OR r.started_at < b.started_at)",
     )
     .bind(MAX_RECORDING.as_secs_f64())
     .fetch_all(db)
@@ -547,7 +552,16 @@ pub async fn serve_file(
         Err(e) => return ApiError::from(e).into_response(),
     }
     match ServeFile::new(dir.join(&file)).oneshot(req).await {
-        Ok(res) => res.into_response(),
+        // 영상은 브라우저가 받아 둔 조각을 다시 쓸 수 있게 하되, 쓸 때마다 서버에 확인한다.
+        // 녹화를 지우면 다음 확인에서 404가 되어 옛 영상이 남지 않는다(#25 A16의 no-store 대신).
+        Ok(res) => {
+            let mut res = res.into_response();
+            res.headers_mut().insert(
+                axum::http::header::CACHE_CONTROL,
+                axum::http::HeaderValue::from_static("private, no-cache"),
+            );
+            res
+        }
         Err(_) => ApiError::Internal.into_response(),
     }
 }
