@@ -554,12 +554,16 @@ pub async fn serve_file(
     match ServeFile::new(dir.join(&file)).oneshot(req).await {
         // 영상은 브라우저가 받아 둔 조각을 다시 쓸 수 있게 하되, 쓸 때마다 서버에 확인한다.
         // 녹화를 지우면 다음 확인에서 404가 되어 옛 영상이 남지 않는다(#25 A16의 no-store 대신).
+        // 오류(파일 없음 404, 범위 오류 416)에는 붙이지 않는다. 그러면 바깥의 no_store가 붙는다(#71 R1).
         Ok(res) => {
             let mut res = res.into_response();
-            res.headers_mut().insert(
-                axum::http::header::CACHE_CONTROL,
-                axum::http::HeaderValue::from_static("private, no-cache"),
-            );
+            let s = res.status();
+            if s.is_success() || s == axum::http::StatusCode::NOT_MODIFIED {
+                res.headers_mut().insert(
+                    axum::http::header::CACHE_CONTROL,
+                    axum::http::HeaderValue::from_static("private, no-cache"),
+                );
+            }
             res
         }
         Err(_) => ApiError::Internal.into_response(),

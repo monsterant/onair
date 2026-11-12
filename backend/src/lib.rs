@@ -102,18 +102,23 @@ pub async fn migrate(db: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
 }
 
 /// 마이그레이션 실패가 기다리면 나아질 수 있는 것인지(#25 A13).
-/// - 다시 시도: DB가 아직 뜨는 중이라 연결이 안 되는 경우(연결 거부, 시간 초과, 풀에서 연결을 못 받음).
-/// - 바로 멈춤: 버전 불일치·빠진 버전·SQL 오류처럼 몇 번을 다시 해도 같은 것. 60초를 기다리지 않고 원인을 바로 보여 준다.
+/// - 다시 시도: DB가 아직 뜨는 중이거나 잠깐 끊긴 경우(연결 거부, 시간 초과, 풀에서 연결을 못 받음,
+///   DB가 보낸 일시 오류 57P01·57P02·57P03 종료·재시작·뜨는 중, 53300 연결 초과).
+/// - 바로 멈춤: 버전 불일치·빠진 버전·SQL 오류·인증 실패·TLS 설정 오류처럼 몇 번을 다시 해도 같은 것.
+///   60초를 기다리지 않고 원인을 바로 보여 준다.
 pub fn migrate_retryable(e: &sqlx::migrate::MigrateError) -> bool {
     use sqlx::migrate::MigrateError;
     match e {
-        MigrateError::Execute(err) | MigrateError::ExecuteMigration(err, _) => matches!(
-            err,
-            sqlx::Error::Io(_)
-                | sqlx::Error::PoolTimedOut
-                | sqlx::Error::PoolClosed
-                | sqlx::Error::Tls(_)
-        ),
+        MigrateError::Execute(err) | MigrateError::ExecuteMigration(err, _) => match err {
+            sqlx::Error::Io(_) | sqlx::Error::PoolTimedOut | sqlx::Error::PoolClosed => true,
+            sqlx::Error::Database(db) => {
+                matches!(
+                    db.code().as_deref(),
+                    Some("57P01" | "57P02" | "57P03" | "53300")
+                )
+            }
+            _ => false,
+        },
         _ => false,
     }
 }

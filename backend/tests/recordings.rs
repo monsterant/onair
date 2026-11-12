@@ -609,6 +609,66 @@ async fn failed_stop_keeps_recording_and_retries(db: PgPool) {
 }
 
 #[sqlx::test]
+async fn recording_started_with_the_broadcast_is_kept(db: PgPool) {
+    // #62 조건의 경계: 녹화 시작 시각이 방송 시작 시각과 같으면 지금 송출의 녹화다. 멈추지 않는다(#71 R4).
+    let dir = temp_dir();
+    let (fake, api) = fake_ome(dir.clone()).await;
+    let cfg = RecConfig {
+        dir: Some(dir.clone()),
+    };
+    let r = router(db.clone(), api.clone(), Some(dir.clone()));
+    let (bid, stream) = live_broadcast(&r, &db, "같은 시각").await;
+    fake.streams.lock().unwrap().insert(stream, "H264".into());
+    sync(&db, &api, &cfg).await.unwrap();
+    sqlx::query(
+        "UPDATE recordings SET started_at = (SELECT started_at FROM broadcasts WHERE id = $1)",
+    )
+    .bind(bid)
+    .execute(&db)
+    .await
+    .unwrap();
+    sync(&db, &api, &cfg).await.unwrap();
+    assert!(fake.stopped.lock().unwrap().is_empty());
+    assert_eq!(statuses(&db).await, ["recording"]);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[sqlx::test]
+async fn missing_replay_file_is_not_cacheable(db: PgPool) {
+    // 기록은 ready인데 파일이 없으면 404이고, 확인 후 캐시(private, no-cache)가 아니라 no-store다(#71 R1)
+    let dir = temp_dir();
+    let (_, api) = fake_ome(dir.clone()).await;
+    let r = router(db.clone(), api, Some(dir.clone()));
+    let (bid, _) = live_broadcast(&r, &db, "파일 없음").await;
+    sqlx::query(
+        "INSERT INTO recordings (broadcast_id, record_id, file_name, format, title, owner_username, status, bytes, ended_at)
+         VALUES ($1, 'rec-x', 'rec-1-00000001.mp4', 'mp4', 'x', 'demo1', 'ready', 70000, now())",
+    )
+    .bind(bid)
+    .execute(&db)
+    .await
+    .unwrap();
+    let res = r
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/vod/rec-1-00000001.mp4")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        res.headers()
+            .get(header::CACHE_CONTROL)
+            .map(|v| v.to_str().unwrap()),
+        Some("no-store")
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[sqlx::test]
 async fn recording_left_from_an_earlier_publish_is_stopped(db: PgPool) {
     // #62 M2: 송출이 닫힌 뒤 멈춤이 계속 실패하고, 그사이 방송자가 다시 붙었다.
     // 지난 송출의 녹화는 멈추고, 지금 송출을 새로 녹화한다(한 파일에 이어 붙지 않는다).

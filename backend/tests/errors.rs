@@ -239,6 +239,19 @@ fn only_connection_failures_retry_migrations() {
     assert!(!migrate_retryable(&MigrateError::Execute(
         sqlx::Error::Protocol("bad".into())
     )));
+    assert!(migrate_retryable(&MigrateError::Execute(
+        sqlx::Error::PoolClosed
+    )));
+    // 마이그레이션을 실행하다 실패한 경우도 같은 기준(#71 R4)
+    assert!(migrate_retryable(&MigrateError::ExecuteMigration(io(), 1)));
+    assert!(!migrate_retryable(&MigrateError::ExecuteMigration(
+        sqlx::Error::Protocol("bad".into()),
+        1
+    )));
+    // TLS 설정 오류는 다시 해도 같다(#71 R3)
+    assert!(!migrate_retryable(&MigrateError::Execute(
+        sqlx::Error::Tls(Box::new(std::io::Error::other("tls")))
+    )));
     assert!(!migrate_retryable(&MigrateError::VersionMismatch(3)));
     assert!(!migrate_retryable(&MigrateError::VersionMissing(3)));
 }
