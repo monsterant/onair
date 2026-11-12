@@ -14,10 +14,13 @@
 
 	<Tag name="WHIP" level="warn" />
 	<Tag name="AccessController" level="warn" />
+	<!-- 송출이 거절되면(틀린 키, 종료된 방송) 키가 든 주소를 WebRTC Provider는 warn, HTTP.Server는 error로 찍는다(#28 리뷰).
+	     WebRTC Provider는 error 이상만, HTTP.Server는 critical만 남긴다. 거절 기록은 백엔드 로그(키는 가림)와 Caddy 로그에 남는다. -->
+	<Tag name="WebRTC Provider" level="error" />
+	<Tag name="HTTP.Server" level="critical" />
 
 	<!-- 아래는 기본 설정 그대로 -->
 	<Tag name="SRT" level="critical" />
-	<Tag name="HTTP.Server" level="warn" />
 	<Tag name=".*\.Stat" level="warn" />
 	<Tag name=".*" level="info" />
 </Logger>
