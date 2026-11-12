@@ -117,6 +117,7 @@ node run-all.mjs https://<배포 주소>/ --gap 60   # 실제 서버. 같은 IP 
 | `ux.mjs`, `ux2.mjs` | 첫 화면 안내, 소리 켜기, 긴 설명 접기, 로그인 뒤 보던 화면으로 등 |
 | `offline.mjs` | 시청자 인터넷 끊김 알림, 다시 연결되면 이어 보기 |
 | `devices.mjs` | 마이크 없이 송출, 영상 비율에 맞춘 시청 칸, 송출 중 카메라 전환 |
+| `timeouts.mjs` | 송출 서버가 답하지 않음(15초)·영상 연결 안 됨(20초)이면 이유와 함께 멈춤, 화면 공유 중 마이크 꺼짐 경고. `--pause-ome <OME 컨테이너>`를 주면 송출 중 연결 끊김(로컬만) |
 
 ### 배포 (실제 서비스)
 - AWS EC2 한 대(ARM, Ubuntu 24.04)에 Docker로 올렸다. 도메인은 DuckDNS, HTTPS 인증서는 Caddy가 Let's Encrypt에서 자동으로 받는다.
