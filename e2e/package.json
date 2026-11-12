@@ -8,5 +8,8 @@
   },
   "devDependencies": {
     "puppeteer-core": "24.43.1"
+  },
+  "engines": {
+    "node": ">=20.11"
   }
 }

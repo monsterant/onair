@@ -99,7 +99,9 @@ node run-all.mjs                      # 모두 (http://localhost:5173)
 node pc.mjs                           # 하나만
 node run-all.mjs https://<배포 주소>/ --gap 60   # 실제 서버. 같은 IP 요청 제한(분당 20회) 때문에 시험 사이를 띄운다
 ```
-- Chrome 위치가 다르면 `CHROME_PATH` 환경변수로 알려 준다.
+- Node.js 20.11 이상이 필요하다. Chrome 위치가 다르면 `CHROME_PATH` 환경변수로 알려 준다.
+- `recording.mjs`는 `.env`의 `RECORDINGS_DIR`, `donate.mjs`는 `TOSS_CLIENT_KEY`·`TOSS_SECRET_KEY`(토스 **테스트** 키)가 있어야 통과한다. 비어 있으면 그 기능이 꺼져 실패로 나온다.
+- 시험 하나를 따로 돌리면 실패가 있어도 끝 코드는 0이다. 실패 여부는 `FAIL` 줄로 본다(`run-all.mjs`는 실패가 있으면 1).
 - CI에서는 돌리지 않는다. 미디어 서버(OME)와 진짜 브라우저가 필요해서, 기능을 바꿀 때마다 로컬과 실제 서버에서 돌렸다.
 
 | 파일 | 확인하는 것 |
