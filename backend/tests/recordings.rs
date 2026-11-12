@@ -39,6 +39,10 @@ struct FakeOme {
     no_file: Arc<Mutex<bool>>,
     /// 녹화 멈춤이 실패한다(OME 잠깐 끊김)
     fail_stop: Arc<Mutex<bool>>,
+    /// 앞으로 이 횟수만큼 멈춤을 실패시킨다(다시 시도 경로 시험, #62 L4)
+    fail_stops_left: Arc<Mutex<u32>>,
+    /// 멈춤 요청을 받은 횟수(실패 포함)
+    stop_calls: Arc<Mutex<u32>>,
     /// 녹화 목록 조회가 실패한다
     records_unavailable: Arc<Mutex<bool>>,
     /// 영상 코덱을 물어본 횟수
@@ -141,8 +145,16 @@ async fn fake_ome(dir: PathBuf) -> (FakeOme, OmeApi) {
                     "app:stopRecord" => {
                         let delay = *f.stop_delay_ms.lock().unwrap();
                         tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                        *f.stop_calls.lock().unwrap() += 1;
                         if *f.fail_stop.lock().unwrap() {
                             return ok(StatusCode::INTERNAL_SERVER_ERROR);
+                        }
+                        {
+                            let mut left = f.fail_stops_left.lock().unwrap();
+                            if *left > 0 {
+                                *left -= 1;
+                                return ok(StatusCode::INTERNAL_SERVER_ERROR);
+                            }
                         }
                         f.stopped.lock().unwrap().push(id.clone());
                         if let Some((_, path, _)) = f.records.lock().unwrap().get(&id)
@@ -730,6 +742,56 @@ async fn recording_left_from_an_earlier_publish_is_stopped(db: PgPool) {
     assert_eq!(rows[0].0, first);
     assert_ne!(rows[0].1, "recording");
     assert_eq!(rows[1].1, "recording");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// 송출이 닫힌 뒤의 녹화 멈춤(stop_after_closing)을 시험하려고 녹화 중인 기록 하나를 만든다
+async fn one_recording(db: &PgPool) -> (FakeOme, OmeApi, PathBuf, String) {
+    let dir = temp_dir();
+    let (fake, api) = fake_ome(dir.clone()).await;
+    let cfg = RecConfig {
+        dir: Some(dir.clone()),
+    };
+    let r = router(db.clone(), api.clone(), Some(dir.clone()));
+    let (_, stream) = live_broadcast(&r, db, "닫힌 뒤 멈춤").await;
+    fake.streams.lock().unwrap().insert(stream, "H264".into());
+    sync(db, &api, &cfg).await.unwrap();
+    let rid: String = sqlx::query_scalar("SELECT record_id FROM recordings")
+        .fetch_one(db)
+        .await
+        .unwrap();
+    (fake, api, dir, rid)
+}
+
+#[sqlx::test]
+async fn stop_after_closing_retries_until_ome_stops(db: PgPool) {
+    // #62 L4: OME가 멈춤을 두 번 거절해도 세 번째에 멈추고 기록을 finishing으로 바꾼다
+    let (fake, api, dir, rid) = one_recording(&db).await;
+    *fake.fail_stops_left.lock().unwrap() = 2;
+    let kick = onair_backend::recordings::Kick::default();
+    onair_backend::ome::stop_after_closing(db.clone(), api, kick.clone(), vec![rid.clone()]).await;
+    assert_eq!(*fake.stop_calls.lock().unwrap(), 3);
+    assert_eq!(fake.stopped.lock().unwrap().as_slice(), [rid]);
+    assert_eq!(statuses(&db).await, ["finishing"]);
+    // 끝나면 녹화 맞춰 보기를 깨운다
+    tokio::time::timeout(std::time::Duration::from_secs(1), kick.wait())
+        .await
+        .expect("kick");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[sqlx::test]
+async fn stop_after_closing_gives_up_after_three_tries(db: PgPool) {
+    // #62 L4: 세 번 모두 실패하면 녹화 중으로 남기고(다음 맞춰 보기의 stop_finished가 다시 멈춘다) 깨우기는 보낸다
+    let (fake, api, dir, rid) = one_recording(&db).await;
+    *fake.fail_stop.lock().unwrap() = true;
+    let kick = onair_backend::recordings::Kick::default();
+    onair_backend::ome::stop_after_closing(db.clone(), api, kick.clone(), vec![rid]).await;
+    assert_eq!(*fake.stop_calls.lock().unwrap(), 3);
+    assert_eq!(statuses(&db).await, ["recording"]);
+    tokio::time::timeout(std::time::Duration::from_secs(1), kick.wait())
+        .await
+        .expect("kick");
     let _ = std::fs::remove_dir_all(dir);
 }
 
