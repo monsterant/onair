@@ -341,6 +341,27 @@ async fn live_broadcast_is_recorded_and_replayable(db: PgPool) {
     let (st, _, body, _) = call(&r, "GET", &url, None, None, Some("bytes=10-14")).await;
     assert_eq!(st, StatusCode::PARTIAL_CONTENT);
     assert_eq!(body, b"abcde");
+    // 영상은 쓸 때마다 서버에 확인하는 캐시(no-store 아님), 목록 같은 API는 캐시하지 않음(#25 A16)
+    let cache = |path: String| {
+        let r = r.clone();
+        async move {
+            let res = r
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            res.headers()
+                .get(header::CACHE_CONTROL)
+                .map(|v| v.to_str().unwrap().to_string())
+        }
+    };
+    assert_eq!(
+        cache(url.clone()).await.as_deref(),
+        Some("private, no-cache")
+    );
+    assert_eq!(
+        cache("/recordings".into()).await.as_deref(),
+        Some("no-store")
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -588,6 +609,119 @@ async fn failed_stop_keeps_recording_and_retries(db: PgPool) {
 }
 
 #[sqlx::test]
+async fn recording_started_with_the_broadcast_is_kept(db: PgPool) {
+    // #62 조건의 경계: 녹화 시작 시각이 방송 시작 시각과 같으면 지금 송출의 녹화다. 멈추지 않는다(#71 R4).
+    let dir = temp_dir();
+    let (fake, api) = fake_ome(dir.clone()).await;
+    let cfg = RecConfig {
+        dir: Some(dir.clone()),
+    };
+    let r = router(db.clone(), api.clone(), Some(dir.clone()));
+    let (bid, stream) = live_broadcast(&r, &db, "같은 시각").await;
+    fake.streams.lock().unwrap().insert(stream, "H264".into());
+    sync(&db, &api, &cfg).await.unwrap();
+    sqlx::query(
+        "UPDATE recordings SET started_at = (SELECT started_at FROM broadcasts WHERE id = $1)",
+    )
+    .bind(bid)
+    .execute(&db)
+    .await
+    .unwrap();
+    sync(&db, &api, &cfg).await.unwrap();
+    assert!(fake.stopped.lock().unwrap().is_empty());
+    assert_eq!(statuses(&db).await, ["recording"]);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[sqlx::test]
+async fn missing_replay_file_is_not_cacheable(db: PgPool) {
+    // 기록은 ready인데 파일이 없으면 404이고, 확인 후 캐시(private, no-cache)가 아니라 no-store다(#71 R1)
+    let dir = temp_dir();
+    let (_, api) = fake_ome(dir.clone()).await;
+    let r = router(db.clone(), api, Some(dir.clone()));
+    let (bid, _) = live_broadcast(&r, &db, "파일 없음").await;
+    sqlx::query(
+        "INSERT INTO recordings (broadcast_id, record_id, file_name, format, title, owner_username, status, bytes, ended_at)
+         VALUES ($1, 'rec-x', 'rec-1-00000001.mp4', 'mp4', 'x', 'demo1', 'ready', 70000, now())",
+    )
+    .bind(bid)
+    .execute(&db)
+    .await
+    .unwrap();
+    let res = r
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/vod/rec-1-00000001.mp4")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        res.headers()
+            .get(header::CACHE_CONTROL)
+            .map(|v| v.to_str().unwrap()),
+        Some("no-store")
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[sqlx::test]
+async fn recording_left_from_an_earlier_publish_is_stopped(db: PgPool) {
+    // #62 M2: 송출이 닫힌 뒤 멈춤이 계속 실패하고, 그사이 방송자가 다시 붙었다.
+    // 지난 송출의 녹화는 멈추고, 지금 송출을 새로 녹화한다(한 파일에 이어 붙지 않는다).
+    let dir = temp_dir();
+    let (fake, api) = fake_ome(dir.clone()).await;
+    let cfg = RecConfig {
+        dir: Some(dir.clone()),
+    };
+    let r = router(db.clone(), api.clone(), Some(dir.clone()));
+    let (bid, stream) = live_broadcast(&r, &db, "다시 붙음").await;
+    fake.streams.lock().unwrap().insert(stream, "H264".into());
+    sync(&db, &api, &cfg).await.unwrap();
+    assert_eq!(statuses(&db).await, ["recording"]);
+    let first: String = sqlx::query_scalar("SELECT record_id FROM recordings")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    // 송출이 닫혔는데 멈춤이 실패했다
+    sqlx::query("UPDATE recordings SET started_at = now() - interval '1 minute'")
+        .execute(&db)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE broadcasts SET status = 'ready' WHERE id = $1")
+        .bind(bid)
+        .execute(&db)
+        .await
+        .unwrap();
+    *fake.fail_stop.lock().unwrap() = true;
+    sync(&db, &api, &cfg).await.unwrap();
+    assert_eq!(statuses(&db).await, ["recording"]);
+    // 방송자가 다시 붙었다(opening 웹훅처럼 시작 시각이 새로 정해진다). 이번에는 멈춤이 된다.
+    sqlx::query("UPDATE broadcasts SET status = 'live', started_at = now(), updated_at = now() WHERE id = $1")
+        .bind(bid)
+        .execute(&db)
+        .await
+        .unwrap();
+    *fake.fail_stop.lock().unwrap() = false;
+    sync(&db, &api, &cfg).await.unwrap();
+    assert!(fake.stopped.lock().unwrap().contains(&first));
+    // 지난 녹화는 끝났고, 지금 송출은 새 녹화로 간다
+    let rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT record_id, status FROM recordings ORDER BY id")
+            .fetch_all(&db)
+            .await
+            .unwrap();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert_eq!(rows[0].0, first);
+    assert_ne!(rows[0].1, "recording");
+    assert_eq!(rows[1].1, "recording");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[sqlx::test]
 async fn recording_lost_by_ome_is_restarted(db: PgPool) {
     let dir = temp_dir();
     let (fake, api) = fake_ome(dir.clone()).await;
@@ -598,7 +732,12 @@ async fn recording_lost_by_ome_is_restarted(db: PgPool) {
     let (_, stream) = live_broadcast(&r, &db, "OME 재시작").await;
     fake.streams.lock().unwrap().insert(stream, "H264".into());
     sync(&db, &api, &cfg).await.unwrap();
-    // OME가 다시 켜져서 녹화 목록을 잊었다
+    // OME가 다시 켜져서 녹화 목록을 잊었다. 같은 송출 안에서 1분째 녹화 중이었다
+    // (방송 시작 시각도 함께 당긴다. 녹화가 방송보다 먼저 시작했으면 지난 송출의 녹화로 보고 멈춘다, #62)
+    sqlx::query("UPDATE broadcasts SET started_at = now() - interval '2 minutes'")
+        .execute(&db)
+        .await
+        .unwrap();
     sqlx::query("UPDATE recordings SET started_at = now() - interval '1 minute'")
         .execute(&db)
         .await

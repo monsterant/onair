@@ -87,9 +87,10 @@ cd frontend && npm install && npm run dev
 ### 시험
 ```bash
 # 백엔드 API 시험(시험마다 빈 DB를 새로 만든다. docker compose의 DB가 떠 있어야 한다)
-cd backend && DATABASE_URL=postgres://onair:onair-local-only@localhost:55432/onair cargo test
+cd backend && DATABASE_URL=postgres://onair:onair-local-only@127.0.0.1:55432/onair cargo test
 ```
 - 권한(비로그인·소유자·다른 사용자), 방송 상태, 송출 허락, 테스트 계정, 댓글, 도네이션(가짜 토스 서버로 중복 적립·동시 요청·금액 바꿔치기) 등 100개가 넘는 시험이 있다. GitHub Actions에서 PR마다 돈다.
+- 주소는 `localhost` 대신 `127.0.0.1`을 쓴다. Windows에서 `localhost`로 붙으면 연결마다 몇 초씩 기다려, 1분 안에 끝나야 하는 횟수 제한 시험이 실패할 수 있다.
 
 브라우저 시험(`e2e/`, puppeteer)은 진짜 Chrome을 자동으로 움직여 화면에서 송출하고 시청한다. 카메라·마이크·화면 공유는 Chrome의 가짜 장치를 쓴다.
 ```bash
