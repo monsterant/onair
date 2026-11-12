@@ -258,10 +258,12 @@ async fn start_missing(db: &sqlx::PgPool, api: &OmeApi) -> Result<(), sqlx::Erro
             .fetch_one(db)
             .await?;
     let room = (MAX_CONCURRENT - active).max(0);
-    // updated_at: 송출이 열리거나 닫힐 때마다 바뀐다. 아래에서 "그 사이 송출이 바뀌었는지" 보는 데 쓴다(#59 리뷰)
+    // started_at: 송출이 새로 열릴 때(live가 아니다가 live가 될 때)만 바뀐다. 아래에서 "그 사이 송출이 바뀌었는지" 보는 데 쓴다(#59 리뷰).
+    // 송출이 닫히면 status가 바뀐다. 예전에는 updated_at을 봤는데, 제목만 고쳐도 바뀌어서
+    // 막 건 녹화를 멈추고 다시 거는 일이 있었다(#62 L1). 그래서 status와 started_at을 함께 본다.
     let rows: Vec<(i64, String, String, String, OffsetDateTime)> = sqlx::query_as(
-        "SELECT b.id, b.stream_name, b.title, u.username, b.updated_at FROM broadcasts b JOIN users u ON u.id = b.owner_id
-          WHERE b.status = 'live'
+        "SELECT b.id, b.stream_name, b.title, u.username, b.started_at FROM broadcasts b JOIN users u ON u.id = b.owner_id
+          WHERE b.status = 'live' AND b.started_at IS NOT NULL
             AND NOT EXISTS (SELECT 1 FROM recordings r WHERE r.broadcast_id = b.id AND r.status = 'recording')
           ORDER BY b.started_at",
     )
@@ -287,12 +289,12 @@ async fn start_missing(db: &sqlx::PgPool, api: &OmeApi) -> Result<(), sqlx::Erro
         let record_id = format!("rec-{bid}-{hex}");
         let file = format!("{record_id}.{ext}");
         // 기록을 먼저 남긴다(같은 방송에 녹화 중은 하나뿐이라는 DB 규칙이 겹침을 막는다). OME가 거절하면 지운다.
-        // 위에서 읽은 뒤 송출이 닫혔으면(updated_at이 바뀜) 넣지 않는다. 닫히는 송출에 녹화를 걸면
+        // 위에서 읽은 뒤 송출이 닫혔거나 다시 열렸으면(status나 started_at이 바뀜) 넣지 않는다. 닫히는 송출에 녹화를 걸면
         // 곧바로 다시 붙은 송출까지 같은 파일에 이어 써질 수 있다(#47 R1과 같은 문제, #59 리뷰).
         let inserted = sqlx::query(
             "INSERT INTO recordings (broadcast_id, record_id, file_name, format, title, owner_username)
              SELECT $1, $2, $3, $4, $5, $6
-              WHERE EXISTS (SELECT 1 FROM broadcasts WHERE id = $1 AND status = 'live' AND updated_at = $7)
+              WHERE EXISTS (SELECT 1 FROM broadcasts WHERE id = $1 AND status = 'live' AND started_at = $7)
              ON CONFLICT DO NOTHING",
         )
         .bind(bid)
@@ -329,7 +331,7 @@ async fn start_missing(db: &sqlx::PgPool, api: &OmeApi) -> Result<(), sqlx::Erro
             // 녹화를 거는 동안 송출이 닫혔거나 다시 열렸으면 바로 멈춘다(같은 이유, #59 리뷰).
             // 다음 맞춰 보기가 지금 송출로 새 녹화를 시작한다.
             let same: Option<bool> = sqlx::query_scalar(
-                "SELECT status = 'live' AND updated_at = $2 FROM broadcasts WHERE id = $1",
+                "SELECT status = 'live' AND started_at = $2 FROM broadcasts WHERE id = $1",
             )
             .bind(bid)
             .bind(seen)

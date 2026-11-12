@@ -47,6 +47,10 @@ struct FakeOme {
     stop_delay_ms: Arc<Mutex<u64>>,
     /// 녹화를 거는 순간 송출이 닫힌 것처럼 방송을 ready로 바꾼다(#59 리뷰)
     close_on_start: Arc<Mutex<Option<PgPool>>>,
+    /// 녹화를 거는 순간 이 SQL을 실행한다(제목 수정, 다시 송출 등을 흉내, #62)
+    sql_on_start: Arc<Mutex<Option<(PgPool, &'static str)>>>,
+    /// 코덱을 묻는 순간(녹화 기록을 넣기 직전) 이 SQL을 실행한다(#62 L2)
+    sql_on_codec: Arc<Mutex<Option<(PgPool, &'static str)>>>,
     dir: Arc<PathBuf>,
 }
 
@@ -67,6 +71,10 @@ async fn fake_ome(dir: PathBuf) -> (FakeOme, OmeApi) {
             "/v1/vhosts/default/apps/app/streams/{name}",
             get(|State(f): State<FakeOme>, Path(name): Path<String>| async move {
                 *f.codec_calls.lock().unwrap() += 1;
+                let hook = f.sql_on_codec.lock().unwrap().take();
+                if let Some((db, sql)) = hook {
+                    sqlx::query(sql).execute(&db).await.unwrap();
+                }
                 match f.streams.lock().unwrap().get(&name) {
                     Some(codec) => (
                         StatusCode::OK,
@@ -104,6 +112,10 @@ async fn fake_ome(dir: PathBuf) -> (FakeOme, OmeApi) {
                     "app:startRecord" => {
                         if *f.fail_start.lock().unwrap() {
                             return ok(StatusCode::INTERNAL_SERVER_ERROR);
+                        }
+                        let hook = f.sql_on_start.lock().unwrap().take();
+                        if let Some((db, sql)) = hook {
+                            sqlx::query(sql).execute(&db).await.unwrap();
                         }
                         let close = f.close_on_start.lock().unwrap().clone();
                         if let Some(db) = close {
@@ -1039,6 +1051,73 @@ async fn recording_started_while_the_stream_closes_is_stopped_at_once(db: PgPool
     assert_eq!(fake.stopped.lock().unwrap().len(), 1);
     let s = statuses(&db).await;
     assert!(s == ["finishing"] || s == ["ready"], "{s:?}");
+}
+
+#[sqlx::test]
+async fn editing_the_title_while_recording_starts_keeps_the_recording(db: PgPool) {
+    // #62 L1: 녹화를 거는 순간 제목을 고쳐도(updated_at만 바뀜) 막 건 녹화를 멈추지 않는다
+    let dir = temp_dir();
+    let (fake, api) = fake_ome(dir.clone()).await;
+    let cfg = RecConfig {
+        dir: Some(dir.clone()),
+    };
+    let r = router(db.clone(), api.clone(), Some(dir.clone()));
+    let (_, stream) = live_broadcast(&r, &db, "제목 수정").await;
+    fake.streams.lock().unwrap().insert(stream, "H264".into());
+    *fake.sql_on_start.lock().unwrap() = Some((
+        db.clone(),
+        "UPDATE broadcasts SET title = '바뀐 제목', updated_at = now() + interval '1 second'",
+    ));
+    sync(&db, &api, &cfg).await.unwrap();
+    assert!(fake.stopped.lock().unwrap().is_empty());
+    assert_eq!(statuses(&db).await, ["recording"]);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[sqlx::test]
+async fn republishing_while_recording_starts_stops_that_recording(db: PgPool) {
+    // 녹화를 거는 사이 송출이 닫혔다가 다시 열리면(시작 시각이 새로 정해짐) 그 녹화는 바로 멈춘다(#59, #62)
+    let dir = temp_dir();
+    let (fake, api) = fake_ome(dir.clone()).await;
+    let cfg = RecConfig {
+        dir: Some(dir.clone()),
+    };
+    let r = router(db.clone(), api.clone(), Some(dir.clone()));
+    let (_, stream) = live_broadcast(&r, &db, "다시 송출").await;
+    fake.streams.lock().unwrap().insert(stream, "H264".into());
+    *fake.sql_on_start.lock().unwrap() = Some((
+        db.clone(),
+        "UPDATE broadcasts SET status = 'live', started_at = now() + interval '1 second', updated_at = now()",
+    ));
+    sync(&db, &api, &cfg).await.unwrap();
+    assert_eq!(fake.stopped.lock().unwrap().len(), 1);
+    let s = statuses(&db).await;
+    assert!(s == ["finishing"] || s == ["ready"], "{s:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[sqlx::test]
+async fn broadcast_changed_before_insert_gets_no_recording(db: PgPool) {
+    // #62 L2: 방송을 읽은 뒤 기록을 넣기 전에 송출이 다시 열리면 기록을 넣지 않는다(녹화도 걸지 않는다)
+    let dir = temp_dir();
+    let (fake, api) = fake_ome(dir.clone()).await;
+    let cfg = RecConfig {
+        dir: Some(dir.clone()),
+    };
+    let r = router(db.clone(), api.clone(), Some(dir.clone()));
+    let (_, stream) = live_broadcast(&r, &db, "넣기 전 바뀜").await;
+    fake.streams.lock().unwrap().insert(stream, "H264".into());
+    *fake.sql_on_codec.lock().unwrap() = Some((
+        db.clone(),
+        "UPDATE broadcasts SET started_at = now() + interval '1 second', updated_at = now()",
+    ));
+    sync(&db, &api, &cfg).await.unwrap();
+    assert!(statuses(&db).await.is_empty());
+    assert!(fake.records.lock().unwrap().is_empty());
+    // 다음 차례에는 지금 송출로 녹화한다
+    sync(&db, &api, &cfg).await.unwrap();
+    assert_eq!(statuses(&db).await, ["recording"]);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[sqlx::test]
