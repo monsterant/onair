@@ -234,6 +234,43 @@ textarea {
   white-space: pre-wrap;
 }
 
+/* 실시간 채팅 (#86) */
+.chat-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  height: 240px;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+}
+
+.chat-line {
+  font-size: 0.92rem;
+  line-height: 1.4;
+}
+
+.chat-line strong {
+  color: var(--accent);
+}
+
+.chat-line.donation {
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: #3a2f12;
+}
+
+.chat-line.donation strong {
+  color: #ffd166;
+}
+
+.chat-form input {
+  flex: 1;
+  min-width: 0;
+}
+
 /* 댓글 (#37) */
 .comments {
   list-style: none;

@@ -90,6 +90,12 @@ export const publishInfo = (id: number) => api<PublishInfo>('GET', `/broadcasts/
 export const rotateStreamKey = (id: number) => api<PublishInfo>('POST', `/broadcasts/${id}/stream-key`);
 
 export const listComments = (broadcastId: number) => api<Comment[]>('GET', `/broadcasts/${broadcastId}/comments`);
+/** 실시간 채팅 한 줄(#86). kind가 "donation"이면 후원 안내다. */
+export type ChatMessage = { id: number; kind: 'chat' | 'donation'; username: string; text: string; at: string };
+export const sendChat = (broadcastId: number, text: string) => api<void>('POST', `/broadcasts/${broadcastId}/chat`, { text });
+/** 채팅 받기 주소(SSE). 브라우저의 EventSource로 연다. */
+export const chatStreamUrl = (broadcastId: number) => `/api/broadcasts/${broadcastId}/chat/stream`;
+
 export const createComment = (broadcastId: number, body: string) =>
   api<Comment>('POST', `/broadcasts/${broadcastId}/comments`, { body });
 export const updateComment = (id: number, body: string) => api<Comment>('PATCH', `/comments/${id}`, { body });
