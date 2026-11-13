@@ -34,6 +34,8 @@ pub struct AuthConfig {
     /// 댓글 작성 횟수 제한(사용자 하나당). 기본은 1분에 20번.
     /// 로그인 몫과 따로 둔다. 같이 쓰면 댓글을 많이 쓴 사람 때문에 같은 IP의 로그인이 막힌다(#37 리뷰).
     pub comment_limiter: crate::guard::RateLimiter,
+    /// 채팅 횟수 제한(사용자 하나당, #86). 기본은 1분에 20번(3초에 한 번꼴). 댓글 몫과 따로 센다.
+    pub chat_limiter: crate::guard::RateLimiter,
     /// 결제 승인 통지 횟수 제한(IP 하나당). 로그인 없이 부르는 길이라 따로 둔다(#41 리뷰).
     pub notify_limiter: crate::guard::RateLimiter,
 }

@@ -176,6 +176,7 @@ async fn main() {
     };
 
     let router = app(AppState {
+        chat: Default::default(),
         db,
         auth,
         ome: ome_api,

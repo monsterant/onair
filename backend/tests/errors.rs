@@ -15,6 +15,7 @@ use tower::ServiceExt;
 
 fn router(db: PgPool, demo_login: bool) -> Router {
     app(AppState {
+        chat: Default::default(),
         rec: Default::default(),
         toss: Default::default(),
         ome: Default::default(),

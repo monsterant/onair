@@ -234,6 +234,58 @@ textarea {
   white-space: pre-wrap;
 }
 
+/* 실시간 채팅 (#86) */
+.chat-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  height: 240px;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+}
+
+.chat-line {
+  font-size: 0.92rem;
+  line-height: 1.4;
+}
+
+.chat-line strong {
+  color: var(--accent);
+}
+
+.chat-line.donation {
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: #3a2f12;
+}
+
+.chat-line.donation strong {
+  color: #ffd166;
+}
+
+.chat-form input {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 휴대폰에서도 보내기 버튼은 글자만큼만(입력 칸이 좁아지지 않게, #90 R6) */
+.chat-form.row > button {
+  flex: none;
+}
+
+.chat-tag {
+  display: inline-block;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: #ffd166;
+  color: #1a1a1a;
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
 /* 댓글 (#37) */
 .comments {
   list-style: none;

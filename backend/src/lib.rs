@@ -4,6 +4,7 @@
 
 pub mod auth;
 pub mod broadcasts;
+pub mod chat;
 pub mod comments;
 pub mod donations;
 pub mod guard;
@@ -31,6 +32,8 @@ pub struct AppState {
     pub toss: toss::Toss,
     /// 녹화(#47). 폴더를 설정하지 않으면(Default) 녹화·다시보기 파일이 꺼진다
     pub rec: recordings::RecConfig,
+    /// 실시간 채팅방들(#86). 서버 메모리에만 있다.
+    pub chat: chat::Hub,
 }
 
 pub fn app(state: AppState) -> Router {
@@ -60,6 +63,9 @@ pub fn app(state: AppState) -> Router {
                 .delete(broadcasts::delete),
         )
         .route("/broadcasts/{id}/publish", get(broadcasts::publish_info))
+        // 실시간 채팅(#86): 받기는 SSE, 보내기는 POST
+        .route("/broadcasts/{id}/chat/stream", get(chat::stream))
+        .route("/broadcasts/{id}/chat", axum::routing::post(chat::send))
         .route("/broadcasts/{id}/end", post(broadcasts::end))
         .route("/broadcasts/{id}/stream-key", post(broadcasts::rotate_key))
         .route(

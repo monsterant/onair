@@ -17,7 +17,10 @@ import {
   confirmDonation,
   createDonation,
   listDonations,
+  chatStreamUrl,
   createComment,
+  sendChat,
+  type ChatMessage,
   deleteComment,
   listComments,
   updateComment,
@@ -404,6 +407,7 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
     soundBtn,
     netNote,
     offAir,
+    chatPanel(id, () => b),
   );
   // 이 화면에서 쓰는 송출기(소유자만). 화면을 떠나면 송출을 멈춘다.
   const publisher = isOwner ? new Publisher() : null;
@@ -695,6 +699,126 @@ function shortTime(iso: string): string {
  *   댓글별 오류 문구가 사라지기 때문이다(#37 리뷰).
  * - 늦게 도착한 옛 응답이 새 목록을 덮지 않게 요청마다 번호를 매긴다.
  */
+/**
+ * 실시간 채팅(#86). 받기는 SSE(EventSource, 끊기면 브라우저가 알아서 다시 붙음), 보내기는 POST.
+ * 다시 붙으면 서버가 최근 글을 또 보내므로 id로 겹친 것을 버린다. 글은 textContent로만 넣는다.
+ * 댓글(아래 칸)과는 따로 동작한다. 채팅은 서버 메모리에만 있어 서버를 다시 켜면 사라진다.
+ */
+function chatPanel(broadcastId: number, current: () => Broadcast): HTMLElement {
+  const list = el('ul', { className: 'chat-list', ariaLive: 'polite' });
+  const state = el('span', { className: 'hint' });
+  const error = el('p', { className: 'error', role: 'alert' });
+  const seen = new Set<number>();
+  const empty = el('li', { className: 'chat-empty hint', textContent: '아직 채팅이 없습니다.' });
+  list.append(empty);
+
+  const add = (m: ChatMessage) => {
+    if (seen.has(m.id)) return;
+    seen.add(m.id);
+    empty.remove();
+    // 맨 아래를 보고 있었으면 새 글이 와도 맨 아래에 머문다(위로 올려 읽는 중이면 그대로 둔다)
+    const nearBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 40;
+    const li =
+      m.kind === 'donation'
+        ? // 진짜 후원 안내에는 화면이 '후원' 표시를 붙인다. 일반 채팅 글로는 이 표시를 만들 수 없다(#90 R4: 안내 흉내)
+          el('li', { className: 'chat-line donation' }, el('span', { className: 'chat-tag', textContent: '후원' }), ' ', el('strong', { textContent: m.username }), ` 님이 ${m.text}`)
+        : el('li', { className: 'chat-line' }, el('strong', { textContent: m.username }), ` ${m.text}`);
+    li.dataset.id = String(m.id);
+    list.append(li);
+    // 너무 많이 쌓이지 않게 앞에서 지운다
+    while (list.children.length > 200) {
+      const first = list.firstElementChild as HTMLElement | null;
+      if (!first) break;
+      seen.delete(Number(first.dataset.id));
+      first.remove();
+    }
+    if (nearBottom) list.scrollTop = list.scrollHeight;
+  };
+
+  // 연결이 잠깐 끊기면 EventSource가 알아서 다시 붙는다. 하지만 서버가 다시 켜지는 중이라 502 같은 오류로 답하면
+  // EventSource는 완전히 닫힌다(CLOSED). 그때는 몇 초 뒤 직접 다시 연다(3초부터 두 배씩, 최대 30초, #86 리뷰).
+  // 방송이 지워졌으면(404) 더 열지 않는다.
+  let source: EventSource | null = null;
+  let closed = false;
+  let wait = 3_000;
+  let again: ReturnType<typeof setTimeout> | undefined;
+  const open = () => {
+    if (closed) return;
+    const s = new EventSource(chatStreamUrl(broadcastId));
+    source = s;
+    s.addEventListener('chat', (ev) => {
+      try {
+        add(JSON.parse((ev as MessageEvent<string>).data) as ChatMessage);
+      } catch {
+        // 모양이 다른 메시지는 버린다
+      }
+    });
+    s.onopen = () => {
+      state.textContent = '';
+      wait = 3_000;
+    };
+    s.onerror = () => {
+      if (s.readyState !== EventSource.CLOSED) {
+        state.textContent = ' (다시 연결 중…)';
+        return;
+      }
+      s.close();
+      if (closed) return;
+      void getBroadcast(broadcastId)
+        .then(() => {
+          state.textContent = ' (다시 연결 중…)';
+          again = setTimeout(open, wait);
+          wait = Math.min(wait * 2, 30_000);
+        })
+        .catch((e) => {
+          if (e instanceof ApiError && e.status === 404) {
+            state.textContent = ' (연결 끊김)';
+            return;
+          }
+          // 서버가 아직 안 떴으면(연결 실패) 조금 뒤 다시 본다
+          state.textContent = ' (다시 연결 중…)';
+          again = setTimeout(open, wait);
+          wait = Math.min(wait * 2, 30_000);
+        });
+    };
+  };
+  open();
+  cleanup.push(() => {
+    closed = true;
+    clearTimeout(again);
+    source?.close();
+  });
+
+  const panel = el('section', { className: 'chat-panel panel' }, el('h3', {}, '실시간 채팅', state), list);
+  if (me && current().status === 'ended') {
+    // 종료된 방송에는 쓸 수 없으니 입력 칸 대신 안내를 보여 준다(#90 R5)
+    panel.append(el('p', { className: 'hint', textContent: '종료된 방송이라 채팅을 쓸 수 없습니다.' }));
+  } else if (me) {
+    // 글자 수는 서버가 센다(200자). 화면의 maxLength는 이모지를 두 글자로 세어 더 엄격해서 두지 않는다(#90 R7)
+    const input = el('input', { type: 'text', placeholder: '채팅 (200자까지, Enter로 보내기)', ariaLabel: '채팅 입력', autocomplete: 'off' });
+    const send = el('button', { type: 'submit', textContent: '보내기' });
+    const form = el('form', { className: 'chat-form row' }, input, send);
+    form.onsubmit = (ev) => {
+      ev.preventDefault();
+      if (current().status === 'ended') {
+        error.textContent = '종료된 방송에는 채팅할 수 없습니다';
+        return;
+      }
+      const text = input.value;
+      action(send, error, async () => {
+        await sendChat(broadcastId, text);
+        // 보낸 글은 스트림으로 돌아와 목록에 붙는다. 입력 칸만 비운다.
+        if (input.value === text) input.value = '';
+        input.focus();
+      })();
+    };
+    panel.append(form, error);
+  } else {
+    panel.append(el('p', { className: 'hint' }, el('a', { href: '#/login', textContent: '로그인' }), '하면 채팅할 수 있습니다.'));
+  }
+  return panel;
+}
+
 function commentsPanel(broadcastId: number, gen: number): HTMLElement {
   const list = el('ul', { className: 'comments' });
   const error = el('p', { className: 'error', role: 'alert' });
