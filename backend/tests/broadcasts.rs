@@ -451,6 +451,123 @@ async fn list_can_search_titles(db: PgPool) {
     assert_eq!(titles(&v), ["C:\\temp 정리"]);
 }
 
+/// #113: 분류. 만들 때 고르고(없으면 기타), 주인만 바꾸고, 목록을 분류로 걸러 본다. 정해진 값이 아니면 400.
+#[sqlx::test]
+async fn categories_are_set_and_filtered(db: PgPool) {
+    let r = router(db, OmeApi::default()).await;
+    let owner = login(&r, 1).await;
+    let other = login(&r, 2).await;
+    let mk = |title: &'static str, cat: Option<&'static str>| {
+        let r = r.clone();
+        let owner = owner.clone();
+        async move {
+            let mut body = json!({ "title": title });
+            if let Some(c) = cat {
+                body["category"] = json!(c);
+            }
+            call(&r, "POST", "/broadcasts", Some(body), Some(&owner)).await
+        }
+    };
+    let (st, game) = mk("게임 방송", Some("game")).await;
+    assert_eq!(st, StatusCode::CREATED);
+    assert_eq!(game["category"], "game");
+    let (_, plain) = mk("그냥 방송", None).await;
+    assert_eq!(plain["category"], "etc");
+    let (_, music) = mk("노래 방송", Some("music")).await;
+    // 정해진 값이 아니면 400
+    assert_eq!(
+        mk("이상한", Some("cooking")).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(mk("대문자", Some("GAME")).await.0, StatusCode::BAD_REQUEST);
+    let titles = |v: &Value| -> Vec<String> {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["title"].as_str().unwrap().to_string())
+            .collect()
+    };
+    // 분류로 걸러 보기, 빈 값이면 전체, 이상한 값이면 400, 검색과 함께
+    let (_, v) = call(&r, "GET", "/broadcasts?category=game", None, None).await;
+    assert_eq!(titles(&v), ["게임 방송"]);
+    let (_, v) = call(&r, "GET", "/broadcasts?category=", None, None).await;
+    assert_eq!(titles(&v).len(), 3);
+    assert_eq!(
+        call(&r, "GET", "/broadcasts?category=cooking", None, None)
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    let (_, v) = call(
+        &r,
+        "GET",
+        &format!("/broadcasts?category=music&q={}", urlencoding("방송")),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(titles(&v), ["노래 방송"]);
+    // 주인만 바꾼다. 다른 사람 403, 이상한 값 400(그대로), 바꾸면 그 분류에 보인다
+    let id = plain["id"].as_i64().unwrap();
+    let path = format!("/broadcasts/{id}");
+    assert_eq!(
+        call(
+            &r,
+            "PATCH",
+            &path,
+            Some(json!({"category": "talk"})),
+            Some(&other)
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        call(
+            &r,
+            "PATCH",
+            &path,
+            Some(json!({"category": "nope"})),
+            Some(&owner)
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    let (st, b) = call(
+        &r,
+        "PATCH",
+        &path,
+        Some(json!({"category": "talk"})),
+        Some(&owner),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(b["category"], "talk");
+    // 제목만 고치면 분류는 그대로
+    let (_, b) = call(
+        &r,
+        "PATCH",
+        &path,
+        Some(json!({"title": "대화 방송"})),
+        Some(&owner),
+    )
+    .await;
+    assert_eq!(b["category"], "talk");
+    let (_, v) = call(&r, "GET", "/broadcasts?category=talk", None, None).await;
+    assert_eq!(titles(&v), ["대화 방송"]);
+    // 다른 방송의 분류는 그대로
+    let (_, v) = call(
+        &r,
+        "GET",
+        &format!("/broadcasts/{}", music["id"]),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(v["category"], "music");
+}
+
 /// 시험용 주소 인코딩(글자마다 %XX)
 fn urlencoding(s: &str) -> String {
     s.bytes().map(|b| format!("%{b:02X}")).collect()

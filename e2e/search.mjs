@@ -27,8 +27,8 @@ try {
   await p.waitForSelector('.demo .row button');
   await p.click('.demo .row button');
   await sleep(1500);
-  for (const t of [`${tag} 노래`, `${tag} 게임`]) {
-    const b = await p.evaluate(async (title) => (await fetch('/api/broadcasts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title }) })).json(), t);
+  for (const [t, category] of [[`${tag} 노래`, 'music'], [`${tag} 게임`, 'game']]) {
+    const b = await p.evaluate(async (title, category) => (await fetch('/api/broadcasts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title, category }) })).json(), t, category);
     ids.push(b.id);
   }
   await p.goto(`${BASE}/#/`, { waitUntil: 'networkidle2' });
@@ -43,6 +43,15 @@ try {
   await p.$eval('.search', (i) => (i.value = ''));
   await p.type('.search', `${tag}없음`);
   check('no result message', await waitFor(async () => (await listText(p)).includes('찾는 방송이 없습니다'), 5000), await listText(p));
+  // 분류(#113): 검색어를 그대로 두고 음악을 누르면 음악만, 전체를 누르면 다시 둘 다
+  await p.$eval('.search', (i) => { i.value = ''; i.dispatchEvent(new Event('input')); });
+  await p.type('.search', tag);
+  await waitFor(async () => (await titles(p)).length === 2, 5000);
+  await p.click('.category-filter[data-category="music"]');
+  check('category filter shows only music', await waitFor(async () => JSON.stringify(await titles(p)) === JSON.stringify([`${tag} 노래`]), 5000), JSON.stringify(await titles(p)));
+  check('card shows category label', (await listText(p)).includes('음악'));
+  await p.click('.category-filter[data-category=""]');
+  check('all category shows both again', await waitFor(async () => (await titles(p)).length === 2, 5000), JSON.stringify(await titles(p)));
   // 지우면 다시 전체 목록
   await p.$eval('.search', (i) => { i.value = ''; i.dispatchEvent(new Event('input')); });
   check('clearing shows all again', await waitFor(async () => (await titles(p)).length >= 2, 5000), JSON.stringify(await titles(p)));

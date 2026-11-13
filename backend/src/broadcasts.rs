@@ -44,6 +44,8 @@ pub struct Broadcast {
     pub slow_mode_secs: i32,
     /// 채팅 칸 위에 고정한 공지(#109). 빈 문자열이면 없음.
     pub notice: String,
+    /// 분류(#113): game·music·talk·study·etc
+    pub category: String,
     /// 지금 보는 사람 수(#85). 방송 중이고 미디어 서버가 답할 때만 숫자, 아니면 null.
     #[sqlx(default)]
     pub viewers: Option<i64>,
@@ -67,7 +69,7 @@ macro_rules! select_broadcast {
     ($rest:literal) => {
         concat!(
             "SELECT b.id, b.title, b.description, b.status, b.stream_name, b.owner_id,
-       u.username AS owner_username, b.started_at, b.ended_at, b.created_at, b.slow_mode_secs, b.notice
+       u.username AS owner_username, b.started_at, b.ended_at, b.created_at, b.slow_mode_secs, b.notice, b.category
   FROM broadcasts b JOIN users u ON u.id = b.owner_id ",
             $rest
         )
@@ -126,6 +128,22 @@ pub(crate) fn random_hex(bytes: usize) -> Result<String, ApiError> {
 #[derive(Debug, Deserialize)]
 pub struct ListQuery {
     pub q: Option<String>,
+    /// 분류로 걸러 보기(#113). 없거나 빈 값이면 전체.
+    pub category: Option<String>,
+}
+
+/// 고를 수 있는 분류(#113). DB CHECK와 같다.
+pub const CATEGORIES: [&str; 5] = ["game", "music", "talk", "study", "etc"];
+
+/// 분류 값을 확인한다. 정해진 값이 아니면 400.
+fn check_category(c: &str) -> Result<String, ApiError> {
+    if CATEGORIES.contains(&c) {
+        Ok(c.to_string())
+    } else {
+        Err(ApiError::BadRequest(
+            "분류는 game·music·talk·study·etc 중에서 고르세요",
+        ))
+    }
 }
 
 /// 검색어 최대 글자 수(#96)
@@ -163,13 +181,21 @@ pub async fn list(
     Query(query): Query<ListQuery>,
 ) -> Result<Json<Vec<Broadcast>>, ApiError> {
     let pattern = search_pattern(query.q.as_deref())?;
+    let category = query
+        .category
+        .as_deref()
+        .filter(|c| !c.is_empty())
+        .map(check_category)
+        .transpose()?;
     // 방송 중을 먼저, 그다음 최신순. 화면 한 장에 충분한 100개까지.
     // 검색어가 있으면 제목에 들어 있는 것만(대소문자 무시, #96)
     let rows = sqlx::query_as::<_, Broadcast>(select_broadcast!(
         "WHERE ($1::text IS NULL OR b.title ILIKE $1 ESCAPE '\\')
+           AND ($2::text IS NULL OR b.category = $2)
          ORDER BY (b.status = 'live') DESC, b.created_at DESC, b.id DESC LIMIT 100"
     ))
     .bind(pattern)
+    .bind(category)
     .fetch_all(&state.db)
     .await?;
     let mut rows = rows;
@@ -211,6 +237,8 @@ pub struct NewBroadcast {
     pub title: String,
     #[serde(default)]
     pub description: String,
+    /// 분류(#113). 없으면 기타.
+    pub category: Option<String>,
 }
 
 pub async fn create(
@@ -230,6 +258,7 @@ pub async fn create(
     }
     let title = clean_title(&input.title)?;
     let description = clean_description(&input.description)?;
+    let category = check_category(input.category.as_deref().unwrap_or("etc"))?;
     let open: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM broadcasts WHERE owner_id = $1 AND status <> 'ended'",
     )
@@ -242,14 +271,15 @@ pub async fn create(
         ));
     }
     let id: i64 = sqlx::query_scalar(
-        "INSERT INTO broadcasts (owner_id, title, description, stream_name, stream_key)
-         VALUES ($1, $2, $3, $4, $5) RETURNING id",
+        "INSERT INTO broadcasts (owner_id, title, description, stream_name, stream_key, category)
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
     )
     .bind(user.id)
     .bind(&title)
     .bind(&description)
     .bind(random_hex(8)?)
     .bind(random_hex(32)?)
+    .bind(&category)
     .fetch_one(&state.db)
     .await?;
     Ok((StatusCode::CREATED, Json(find(&state, id).await?)))
@@ -259,6 +289,8 @@ pub async fn create(
 pub struct EditBroadcast {
     pub title: Option<String>,
     pub description: Option<String>,
+    /// 분류(#113)
+    pub category: Option<String>,
 }
 
 pub async fn update(
@@ -274,16 +306,18 @@ pub async fn update(
         .as_deref()
         .map(clean_description)
         .transpose()?;
+    let category = input.category.as_deref().map(check_category).transpose()?;
     // 소유자 조건을 UPDATE에도 넣어서, 확인과 수정 사이에 소유자가 바뀌어도 남의 방송을 고치지 않게 한다.
     sqlx::query(
         "UPDATE broadcasts SET title = COALESCE($1, title), description = COALESCE($2, description),
-                updated_at = now()
+                category = COALESCE($5, category), updated_at = now()
           WHERE id = $3 AND owner_id = $4",
     )
     .bind(title)
     .bind(description)
     .bind(id)
     .bind(user.id)
+    .bind(category)
     .execute(&state.db)
     .await?;
     // 방송 중에 제목을 고쳐도 시청자 수가 사라지지 않게 채워서 돌려준다(#88 R2)
