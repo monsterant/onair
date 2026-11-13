@@ -69,6 +69,16 @@ try {
   // 해제
   await owner.click('.ban-list button');
   await waitFor(async () => (await text(owner, '.ban-list')) === '', 5000);
+  // 댓글 옆 버튼으로 막아도 채팅 칸 목록에 바로 보인다(#94 R3). 확인 뒤 다시 푼다.
+  await other.type('.comment-form textarea', '댓글 하나');
+  await other.click('.comment-form button[type=submit]');
+  await waitFor(async () => (await text(other, '.comments-panel')).includes('댓글 하나'), 5000);
+  await owner.reload({ waitUntil: 'networkidle2' });
+  await owner.waitForSelector('.comments-panel .ban-buttons button');
+  await (await owner.$$('.comments-panel .ban-buttons button'))[0].click();
+  check('comment ban shows in chat ban list within 3s', await waitFor(async () => (await text(owner, '.ban-list')).includes('까지'), 3000), await text(owner, '.ban-list'));
+  await owner.click('.ban-list button');
+  await waitFor(async () => (await text(owner, '.ban-list')) === '', 5000);
   await say(other, '풀린 뒤');
   check('unbanned viewer can chat again', await waitFor(() => has(owner, '풀린 뒤'), 5000));
 

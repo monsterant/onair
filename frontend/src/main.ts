@@ -731,7 +731,7 @@ function chatPanel(broadcastId: number, current: () => Broadcast): HTMLElement {
     li.dataset.id = String(m.id);
     // 방송 주인에게는 남의 채팅 옆에 제한 버튼(#87)
     if (m.kind === 'chat' && m.user_id !== null && isOwner() && m.user_id !== me?.id) {
-      li.append(' ', banButtons(broadcastId, m.user_id, m.username, error, () => void loadBans()));
+      li.append(' ', banButtons(broadcastId, m.user_id, m.username, error));
     }
     list.append(li);
     // 너무 많이 쌓이지 않게 앞에서 지운다
@@ -860,7 +860,12 @@ function chatPanel(broadcastId: number, current: () => Broadcast): HTMLElement {
     void loadBans();
     // 댓글 옆 버튼으로 막은 것, 기한이 지난 것도 목록에 맞춰지게 10초마다 다시 읽는다(#94)
     const bansTimer = setInterval(() => void loadBans(), 10_000);
-    cleanup.push(() => clearInterval(bansTimer));
+    const onBansChanged = () => void loadBans();
+    window.addEventListener(BANS_CHANGED, onBansChanged);
+    cleanup.push(() => {
+      clearInterval(bansTimer);
+      window.removeEventListener(BANS_CHANGED, onBansChanged);
+    });
   }
   panel.append(list);
   if (me && current().status === 'ended') {
@@ -892,11 +897,13 @@ function chatPanel(broadcastId: number, current: () => Broadcast): HTMLElement {
   return panel;
 }
 
+const BANS_CHANGED = 'onair-bans-changed';
+
 /**
  * 방송 주인이 글 옆에서 쓰는 제한 버튼(#87). "10분" 또는 "계속"(해제할 때까지). 결과는 note에 적는다.
  * 서버가 주인인지 다시 확인한다(화면에서 버튼을 보여 주는 것은 편의일 뿐).
  */
-function banButtons(broadcastId: number, userId: number, username: string, note: HTMLElement, after?: () => void): HTMLElement {
+function banButtons(broadcastId: number, userId: number, username: string, note: HTMLElement): HTMLElement {
   const make = (label: string, ten: boolean) => {
     const b = el('button', { type: 'button', className: 'small ghost ban', textContent: label, title: `${username} 님의 글쓰기 막기` });
     b.onclick = async () => {
@@ -905,7 +912,8 @@ function banButtons(broadcastId: number, userId: number, username: string, note:
       try {
         await banUser(broadcastId, userId, ten);
         note.textContent = `${username} 님을 ${ten ? '10분 동안' : '해제할 때까지'} 막았습니다.`;
-        after?.();
+        // 채팅 칸의 제한 목록에 알린다. 댓글 옆 버튼으로 막아도 목록이 바로 바뀐다(#94 R3).
+        window.dispatchEvent(new Event(BANS_CHANGED));
       } catch (e) {
         note.textContent = message(e);
       } finally {
