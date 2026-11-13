@@ -42,6 +42,8 @@ pub struct Broadcast {
     pub created_at: OffsetDateTime,
     /// 천천히 모드(초, 0이면 끔, #87)
     pub slow_mode_secs: i32,
+    /// 채팅 칸 위에 고정한 공지(#109). 빈 문자열이면 없음.
+    pub notice: String,
     /// 지금 보는 사람 수(#85). 방송 중이고 미디어 서버가 답할 때만 숫자, 아니면 null.
     #[sqlx(default)]
     pub viewers: Option<i64>,
@@ -65,7 +67,7 @@ macro_rules! select_broadcast {
     ($rest:literal) => {
         concat!(
             "SELECT b.id, b.title, b.description, b.status, b.stream_name, b.owner_id,
-       u.username AS owner_username, b.started_at, b.ended_at, b.created_at, b.slow_mode_secs
+       u.username AS owner_username, b.started_at, b.ended_at, b.created_at, b.slow_mode_secs, b.notice
   FROM broadcasts b JOIN users u ON u.id = b.owner_id ",
             $rest
         )

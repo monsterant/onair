@@ -78,6 +78,11 @@ pub fn app(state: AppState) -> Router {
             "/broadcasts/{id}/slow",
             axum::routing::put(moderation::set_slow),
         )
+        // 공지 고정(#109). 방송 주인만.
+        .route(
+            "/broadcasts/{id}/notice",
+            axum::routing::put(moderation::set_notice),
+        )
         // 방송자 즐겨찾기(#102). 로그인한 사람만, 목록은 나만.
         .route("/follows", get(follows::list))
         .route(

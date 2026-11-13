@@ -518,3 +518,77 @@ async fn slow_mode_rejections_do_not_use_the_rate_limit(db: PgPool) {
         StatusCode::NO_CONTENT
     );
 }
+
+/// #109: 공지 고정. 주인만, 한 줄로 다듬고, 빈 값은 내림, 100자·제어 문자는 400, 방송 정보에 보인다.
+#[sqlx::test]
+async fn owner_can_pin_a_notice(db: PgPool) {
+    let r = router(db, Hub::default());
+    let (bid, owner, _, other, _) = setup(&r).await;
+    let notice = format!("/broadcasts/{bid}/notice");
+    let put = |text: &str, c: Option<&str>| {
+        let r = r.clone();
+        let notice = notice.clone();
+        let body = json!({ "text": text });
+        let c = c.map(str::to_string);
+        async move { call(&r, "PUT", &notice, Some(body), c.as_deref()).await.0 }
+    };
+    let get = || {
+        let r = r.clone();
+        async move {
+            call(&r, "GET", &format!("/broadcasts/{bid}"), None, None)
+                .await
+                .1["notice"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        }
+    };
+    // 처음엔 없다
+    assert_eq!(get().await, "");
+    // 비로그인 401, 다른 사람 403
+    assert_eq!(put("공지", None).await, StatusCode::UNAUTHORIZED);
+    assert_eq!(put("공지", Some(&other)).await, StatusCode::FORBIDDEN);
+    assert_eq!(get().await, "");
+    // 주인: 한 줄로 다듬어 저장, 목록에도 보인다
+    assert_eq!(
+        put("  오늘은\n9시까지  ", Some(&owner)).await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(get().await, "오늘은 9시까지");
+    let (_, list, _) = call(&r, "GET", "/broadcasts", None, None).await;
+    assert_eq!(list[0]["notice"], "오늘은 9시까지");
+    // 100자까지 되고 101자·제어 문자·글자 방향 문자는 400(공지는 그대로)
+    assert_eq!(
+        put(&"가".repeat(100), Some(&owner)).await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        put(&"가".repeat(101), Some(&owner)).await,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(put("널\u{0}", Some(&owner)).await, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        put("abc\u{202E}def", Some(&owner)).await,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(get().await, "가".repeat(100));
+    // 빈 값·보이지 않는 글자만이면 내린다
+    assert_eq!(
+        put("  \u{200B} ", Some(&owner)).await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(get().await, "");
+    // 없는 방송 404
+    assert_eq!(
+        call(
+            &r,
+            "PUT",
+            "/broadcasts/999999/notice",
+            Some(json!({"text": "x"})),
+            Some(&owner)
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+}

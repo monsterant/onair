@@ -24,6 +24,7 @@ import {
   banUser,
   listBans,
   setSlowMode,
+  setNotice,
   unbanUser,
   deleteComment,
   listComments,
@@ -899,6 +900,17 @@ function chatPanel(broadcastId: number, current: () => Broadcast): HTMLElement {
   });
 
   const panel = el('section', { className: 'chat-panel panel' }, el('h3', {}, '실시간 채팅', state));
+  // 고정 공지(#109): 누구나 본다. 방송 정보(5초마다 새로 읽음)를 따라간다.
+  const noticeBox = el('p', { className: 'chat-notice', role: 'note' });
+  const showNotice = () => {
+    const n = current().notice ?? '';
+    noticeBox.textContent = n ? `공지: ${n}` : '';
+    noticeBox.hidden = !n;
+  };
+  showNotice();
+  const noticeTimer = setInterval(showNotice, 2_000);
+  cleanup.push(() => clearInterval(noticeTimer));
+  panel.append(noticeBox);
   // 천천히 모드(#87): 주인은 고르고, 시청자는 안내를 본다. 방송 정보(5초마다 새로 읽음)를 따라간다.
   const slowHint = el('p', { className: 'hint slow-hint' });
   const showSlow = () => {
@@ -955,8 +967,25 @@ function chatPanel(broadcastId: number, current: () => Broadcast): HTMLElement {
         slow.disabled = false;
       }
     };
+    // 공지 고정(#109): 입력하고 올리기, 비우고 올리면 내림
+    const noticeInput = el('input', { type: 'text', className: 'notice-input', placeholder: '채팅 위에 고정할 공지 (100자까지)', ariaLabel: '공지', value: current().notice ?? '' });
+    const noticeSave = el('button', { type: 'button', className: 'small', textContent: '공지 올리기' });
+    noticeSave.onclick = async () => {
+      noticeSave.disabled = true;
+      try {
+        await setNotice(broadcastId, noticeInput.value);
+        // 서버가 다듬은 값은 다음 새로 읽기(5초)에 맞춰진다. 그 전에도 바로 보이게 한다.
+        current().notice = noticeInput.value.trim();
+        showNotice();
+        error.textContent = noticeInput.value.trim() ? '공지를 올렸습니다.' : '공지를 내렸습니다.';
+      } catch (e) {
+        error.textContent = message(e);
+      } finally {
+        noticeSave.disabled = false;
+      }
+    };
     bans.hidden = true;
-    panel.append(el('div', { className: 'row owner-tools' }, slow), bans);
+    panel.append(el('div', { className: 'row owner-tools' }, slow), el('div', { className: 'row owner-tools notice-tools' }, noticeInput, noticeSave), bans);
     void loadBans();
     // 댓글 옆 버튼으로 막은 것, 기한이 지난 것도 목록에 맞춰지게 10초마다 다시 읽는다(#94)
     const bansTimer = setInterval(() => void loadBans(), 10_000);
