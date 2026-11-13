@@ -313,7 +313,7 @@ async fn checkout_gives_order_and_client_key(db: PgPool) {
     // 대기 주문은 내역·합계에 들어가지 않는다
     assert_eq!(
         summary(&r, bid).await,
-        json!({"total": 0, "count": 0, "items": []})
+        json!({"total": 0, "count": 0, "top": [], "items": []})
     );
 }
 
@@ -771,6 +771,111 @@ async fn totals_add_up_per_broadcast(db: PgPool) {
             .status,
         StatusCode::NOT_FOUND
     );
+}
+
+/// #99: 후원 순위. 사람마다 합계, 큰 순서, 동점은 먼저 다다른 사람, 5명까지, 적립된 것만, 탈퇴 사용자 제외
+#[sqlx::test]
+async fn top_donors_rank_paid_totals_per_person(db: PgPool) {
+    let (_fake, toss) = fake_toss().await;
+    let r = router(db.clone(), toss);
+    let owner = login(&r, 1).await;
+    let b = call(
+        &r,
+        "POST",
+        "/broadcasts",
+        Some(json!({"title": "순위 시험"})),
+        Some(&owner),
+    )
+    .await;
+    let bid = b.json["id"].as_i64().unwrap();
+    let other = call(
+        &r,
+        "POST",
+        "/broadcasts",
+        Some(json!({"title": "다른 방송"})),
+        Some(&owner),
+    )
+    .await
+    .json["id"]
+        .as_i64()
+        .unwrap();
+    // 후원자 7명을 만든다
+    let mut users = Vec::new();
+    for i in 0..7 {
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO users (username, password_hash) VALUES ($1, 'x') RETURNING id",
+        )
+        .bind(format!("fan{i}"))
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        users.push(id);
+    }
+    let mut n = 0;
+    let mut give = |donor: Option<i64>, bid: i64, amount: i64, status: &'static str, secs: i64| {
+        n += 1;
+        let db = db.clone();
+        async move {
+            sqlx::query(
+                "INSERT INTO donations (order_id, broadcast_id, donor_id, amount, status, payment_key, paid_at)
+                 VALUES ($1, $2, $3, $4, $5,
+                         CASE WHEN $5 = 'paid' THEN $1 END,
+                         CASE WHEN $5 = 'paid' THEN now() - make_interval(secs => $6) END)",
+            )
+            .bind(format!("o{n}"))
+            .bind(bid)
+            .bind(donor)
+            .bind(amount)
+            .bind(status)
+            .bind(secs as f64)
+            .execute(&db)
+            .await
+            .unwrap();
+        }
+    };
+    // fan0: 1000 + 4000 = 5000 (두 번 나눠서)
+    give(Some(users[0]), bid, 1000, "paid", 100).await;
+    give(Some(users[0]), bid, 4000, "paid", 90).await;
+    // fan1: 3000, fan2: 3000. fan2가 먼저 다다랐다(더 오래 전)
+    give(Some(users[1]), bid, 3000, "paid", 10).await;
+    give(Some(users[2]), bid, 3000, "paid", 50).await;
+    // fan3, fan4, fan5: 1000씩(fan5가 가장 늦음 → 6번째라 빠진다)
+    give(Some(users[3]), bid, 1000, "paid", 40).await;
+    give(Some(users[4]), bid, 1000, "paid", 30).await;
+    give(Some(users[5]), bid, 1000, "paid", 5).await;
+    // 적립 안 된 것, 다른 방송, 탈퇴 사용자는 순위에 안 들어간다
+    give(Some(users[6]), bid, 1_000_000, "pending", 0).await;
+    give(Some(users[6]), bid, 1_000_000, "failed", 0).await;
+    give(Some(users[6]), bid, 1_000_000, "canceled", 0).await;
+    give(Some(users[6]), other, 1_000_000, "paid", 0).await;
+    give(None, bid, 9000, "paid", 0).await;
+    let s = summary(&r, bid).await;
+    let top: Vec<(String, i64, i64)> = s["top"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| {
+            (
+                t["donor_username"].as_str().unwrap().to_string(),
+                t["total"].as_i64().unwrap(),
+                t["count"].as_i64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        top,
+        [
+            ("fan0".to_string(), 5000, 2),
+            ("fan2".to_string(), 3000, 1),
+            ("fan1".to_string(), 3000, 1),
+            ("fan3".to_string(), 1000, 1),
+            ("fan4".to_string(), 1000, 1),
+        ]
+    );
+    // 탈퇴 사용자의 후원도 합계에는 남는다
+    assert_eq!(s["total"], 23000);
+    // 다른 방송의 순위는 따로 센다(fan6만)
+    assert_eq!(summary(&r, other).await["top"].as_array().unwrap().len(), 1);
 }
 
 #[sqlx::test]
