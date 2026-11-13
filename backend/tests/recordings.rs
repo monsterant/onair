@@ -31,6 +31,10 @@ type Rec = (String, String, Vec<String>);
 struct FakeOme {
     /// 스트림 이름 → 영상 코덱
     streams: Arc<Mutex<HashMap<String, String>>>,
+    /// 스트림 이름 → WebRTC 시청자 수(통계 API, #85)
+    viewers: Arc<Mutex<HashMap<String, i64>>>,
+    /// 통계 API가 이만큼 늦게 답한다(OME가 멈춘 경우, #88)
+    stats_delay_ms: Arc<Mutex<u64>>,
     /// 녹화 id → (스트림, 파일 경로, 출력 이름들)
     records: Arc<Mutex<HashMap<String, Rec>>>,
     stopped: Arc<Mutex<Vec<String>>>,
@@ -64,6 +68,21 @@ async fn fake_ome(dir: PathBuf) -> (FakeOme, OmeApi) {
         ..Default::default()
     };
     let r = Router::new()
+        .route(
+            "/v1/stats/current/vhosts/default/apps/app/streams/{name}",
+            get(|State(f): State<FakeOme>, Path(name): Path<String>| async move {
+                let delay = *f.stats_delay_ms.lock().unwrap();
+                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                match f.viewers.lock().unwrap().get(&name) {
+                    // 실제 OME처럼 LL-HLS 수는 시청자와 상관없이 0이 아니게 둔다
+                    Some(n) => (
+                        StatusCode::OK,
+                        Json(json!({ "response": { "connections": { "webrtc": n, "llhls": 8, "file": 1 } } })),
+                    ),
+                    None => (StatusCode::NOT_FOUND, Json(json!({ "statusCode": 404 }))),
+                }
+            }),
+        )
         .route(
             "/v1/vhosts/default/apps/app/streams",
             get(|State(f): State<FakeOme>| async move {
@@ -792,6 +811,119 @@ async fn stop_after_closing_gives_up_after_three_tries(db: PgPool) {
     tokio::time::timeout(std::time::Duration::from_secs(1), kick.wait())
         .await
         .expect("kick");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[sqlx::test]
+async fn live_broadcasts_show_webrtc_viewer_count(db: PgPool) {
+    // #85: 방송 중이면 OME 통계의 WebRTC 접속 수를 시청자 수로 보인다. LL-HLS 수는 쓰지 않는다.
+    let dir = temp_dir();
+    let (fake, api) = fake_ome(dir.clone()).await;
+    let r = router(db.clone(), api, None);
+    let (bid, stream) = live_broadcast(&r, &db, "시청자 수").await;
+    fake.viewers.lock().unwrap().insert(stream.clone(), 3);
+    let (st, b, _, _) = call(&r, "GET", &format!("/broadcasts/{bid}"), None, None, None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(b["viewers"], 3);
+    let (_, list, _, _) = call(&r, "GET", "/broadcasts", None, None, None).await;
+    assert_eq!(list[0]["viewers"], 3);
+    // 5초 동안은 모아 둔 값을 쓴다(OME에 매번 묻지 않음)
+    fake.viewers.lock().unwrap().insert(stream, 5);
+    assert_eq!(
+        call(&r, "GET", &format!("/broadcasts/{bid}"), None, None, None)
+            .await
+            .1["viewers"],
+        3
+    );
+    // 방송 중이 아니면 null
+    sqlx::query("UPDATE broadcasts SET status = 'ready' WHERE id = $1")
+        .bind(bid)
+        .execute(&db)
+        .await
+        .unwrap();
+    assert!(
+        call(&r, "GET", &format!("/broadcasts/{bid}"), None, None, None)
+            .await
+            .1["viewers"]
+            .is_null()
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[sqlx::test]
+async fn viewer_count_failures_are_cached_and_slow_ome_does_not_block(db: PgPool) {
+    // #88: OME가 통계를 주지 않은 것도 5초 모아 둔다. OME가 멈춰도 목록·상세는 기다리지 않는다(0.8초 제한, 동시에 묻기).
+    let dir = temp_dir();
+    let (fake, api) = fake_ome(dir.clone()).await;
+    let r = router(db.clone(), api, None);
+    let (b1, s1) = live_broadcast(&r, &db, "느린 OME 1").await;
+    let (_, s2) = live_broadcast(&r, &db, "느린 OME 2").await;
+    // 통계가 없음(404) → null, 그 뒤 값이 생겨도 5초 동안은 null
+    assert!(
+        call(&r, "GET", &format!("/broadcasts/{b1}"), None, None, None)
+            .await
+            .1["viewers"]
+            .is_null()
+    );
+    fake.viewers.lock().unwrap().insert(s1.clone(), 4);
+    assert!(
+        call(&r, "GET", &format!("/broadcasts/{b1}"), None, None, None)
+            .await
+            .1["viewers"]
+            .is_null()
+    );
+    // OME가 3초 늦게 답한다. 방송 중 2개의 목록도 2초 안에 돌아온다(차례로 3초씩 기다리면 6초)
+    fake.viewers.lock().unwrap().insert(s2, 2);
+    *fake.stats_delay_ms.lock().unwrap() = 3000;
+    let t = std::time::Instant::now();
+    let (st, _, _, _) = call(&r, "GET", "/broadcasts", None, None, None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(
+        t.elapsed() < std::time::Duration::from_secs(2),
+        "{:?}",
+        t.elapsed()
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[sqlx::test]
+async fn editing_a_live_broadcast_keeps_the_viewer_count(db: PgPool) {
+    // #88 R2: 방송 중에 제목을 고친 응답에도 시청자 수가 들어 있다(방송자 화면에서 숫자가 사라지지 않게)
+    let dir = temp_dir();
+    let (fake, api) = fake_ome(dir.clone()).await;
+    let r = router(db.clone(), api, None);
+    let (bid, stream) = live_broadcast(&r, &db, "제목 바꾸기").await;
+    fake.viewers.lock().unwrap().insert(stream, 4);
+    let cookie = call(&r, "POST", "/auth/demo/1", None, None, None)
+        .await
+        .3
+        .unwrap();
+    let (st, b, _, _) = call(
+        &r,
+        "PATCH",
+        &format!("/broadcasts/{bid}"),
+        Some(json!({"title": "새 제목"})),
+        Some(&cookie),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{b}");
+    assert_eq!(b["title"], "새 제목");
+    assert_eq!(b["viewers"], 4);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[sqlx::test]
+async fn viewer_count_is_null_when_ome_has_no_stats(db: PgPool) {
+    // OME가 통계를 주지 않으면(스트림이 아직 없음 등) 시청자 수는 null이고 방송 조회는 그대로 된다
+    let dir = temp_dir();
+    let (_, api) = fake_ome(dir.clone()).await;
+    let r = router(db.clone(), api, None);
+    let (bid, _) = live_broadcast(&r, &db, "통계 없음").await;
+    let (st, b, _, _) = call(&r, "GET", &format!("/broadcasts/{bid}"), None, None, None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(b["viewers"].is_null());
+    assert_eq!(b["status"], "live");
     let _ = std::fs::remove_dir_all(dir);
 }
 

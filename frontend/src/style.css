@@ -179,6 +179,14 @@ textarea {
   margin: 0;
 }
 
+/* 지금 보는 사람 수(#85) */
+.viewers {
+  margin-left: 6px;
+  font-size: 0.8rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
 .badge {
   font-size: 0.75rem;
   padding: 2px 8px;

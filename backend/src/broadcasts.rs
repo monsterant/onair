@@ -40,6 +40,22 @@ pub struct Broadcast {
     pub ended_at: Option<OffsetDateTime>,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
+    /// 지금 보는 사람 수(#85). 방송 중이고 미디어 서버가 답할 때만 숫자, 아니면 null.
+    #[sqlx(default)]
+    pub viewers: Option<i64>,
+}
+
+/// 방송 중인 것에 시청자 수를 채운다(#85). 여러 방송을 동시에 묻는다(#88 R1: 차례로 물으면 OME가 멈췄을 때 개수만큼 느려짐).
+async fn fill_viewers(state: &AppState, rows: &mut [Broadcast]) {
+    let mut set = tokio::task::JoinSet::new();
+    for (i, b) in rows.iter().enumerate().filter(|(_, b)| b.status == "live") {
+        let ome = state.ome.clone();
+        let name = b.stream_name.clone();
+        set.spawn(async move { (i, ome.viewers(&name).await) });
+    }
+    while let Some(Ok((i, v))) = set.join_next().await {
+        rows[i].viewers = v;
+    }
 }
 
 /// 방송 조회 SQL 앞부분. sqlx는 SQL을 문자열 상수로만 받으므로(SQL 끼워 넣기 방지) concat!으로 붙인다.
@@ -109,6 +125,8 @@ pub async fn list(State(state): State<AppState>) -> Result<Json<Vec<Broadcast>>,
     ))
     .fetch_all(&state.db)
     .await?;
+    let mut rows = rows;
+    fill_viewers(&state, &mut rows).await;
     Ok(Json(rows))
 }
 
@@ -124,7 +142,10 @@ pub async fn get(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Json<Broadcast>, ApiError> {
-    Ok(Json(find(&state, id).await?))
+    let mut b = [find(&state, id).await?];
+    fill_viewers(&state, &mut b).await;
+    let [b] = b;
+    Ok(Json(b))
 }
 
 /// 소유자인지 확인한다. 아니면 403, 방송이 없으면 404.
@@ -218,7 +239,11 @@ pub async fn update(
     .bind(user.id)
     .execute(&state.db)
     .await?;
-    Ok(Json(find(&state, id).await?))
+    // 방송 중에 제목을 고쳐도 시청자 수가 사라지지 않게 채워서 돌려준다(#88 R2)
+    let mut b = [find(&state, id).await?];
+    fill_viewers(&state, &mut b).await;
+    let [b] = b;
+    Ok(Json(b))
 }
 
 pub async fn delete(

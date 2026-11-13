@@ -95,6 +95,11 @@ function message(e: unknown): string {
 
 const STATUS_LABEL: Record<Status, string> = { ready: '대기', live: '방송 중', ended: '종료' };
 
+/** "N명 시청 중"(#85). 방송 중이고 서버가 셀 수 있을 때만, 아니면 빈 글자 */
+function viewersText(b: Broadcast): string {
+  return b.status === 'live' && typeof b.viewers === 'number' ? `${b.viewers}명 시청 중` : '';
+}
+
 function badge(s: Status) {
   return el('span', { className: `badge ${s}`, textContent: STATUS_LABEL[s] });
 }
@@ -182,7 +187,7 @@ async function listPage(main: HTMLElement) {
             'a',
             { className: 'card', href: `#/b/${b.id}` },
             el('div', { className: 'card-top' }, badge(b.status), el('strong', { textContent: b.title })),
-            el('span', { className: 'hint', textContent: b.owner_username }),
+            el('span', { className: 'hint', textContent: [b.owner_username, viewersText(b)].filter(Boolean).join(' · ') }),
           ),
         ),
       );
@@ -343,6 +348,9 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
 
   const paint = () => {
     statusBox.replaceChildren(badge(b.status));
+    // 지금 보는 사람 수(#85). 상태 확인(5초마다)과 함께 바뀐다
+    const vt = viewersText(b);
+    if (vt) statusBox.append(el('span', { className: 'viewers', textContent: vt }));
     titleEl.textContent = b.title;
     if (descEl.textContent !== b.description) {
       descEl.textContent = b.description;

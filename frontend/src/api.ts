@@ -16,6 +16,8 @@ export type Broadcast = {
   started_at: string | null;
   ended_at: string | null;
   created_at: string;
+  /** 지금 보는 사람 수(#85). 방송 중이고 서버가 셀 수 있을 때만 숫자 */
+  viewers?: number | null;
 };
 
 export type PublishInfo = { stream_name: string; stream_key: string; whip_path: string };
