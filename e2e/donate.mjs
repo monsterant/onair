@@ -34,7 +34,8 @@ try {
   await d.type('.donations-panel input', '응원합니다');
   await d.click('.donations-panel button');
   await d.waitForFunction(() => [...document.querySelectorAll('iframe')].some((f) => f.src.includes('tosspayments.com')), { timeout: 20000 }).catch(() => {});
-  await sleep(1500);
+  // 버튼은 위젯이 다 그려진 뒤에 바뀐다(main.ts donationsPanel). iframe이 보인 뒤에도 느린 망에서는 몇 초 더 걸린다
+  await d.waitForFunction(() => [...document.querySelectorAll('.donations-panel button')].some((b) => b.textContent === '결제하기' && !b.hidden), { timeout: 20000 }).catch(() => {});
   const frames = d.frames().map((f) => f.url());
   check('toss widget frames load', frames.some((u) => u.includes('payment-widget.tosspayments.com')), frames.join(' '));
   const btns = await d.$$eval('.donations-panel button', (bs) => bs.map((b) => ({ t: b.textContent, hidden: b.hidden })));
