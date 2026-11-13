@@ -605,7 +605,10 @@ const AMOUNTS = [1_000, 5_000, 10_000, 50_000];
 function donationsPanel(b: Broadcast, gen: number): HTMLElement {
   const total = el('strong', { className: 'donation-total' });
   const list = el('ul', { className: 'donations' });
-  const panel = el('section', { className: 'donations-panel panel' }, el('h3', {}, '후원 ', total), list);
+  // 후원 순위(#99): 이 방송에 가장 많이 후원한 사람 5명
+  const top = el('ol', { className: 'donor-top', ariaLabel: '후원 순위' });
+  top.hidden = true;
+  const panel = el('section', { className: 'donations-panel panel' }, el('h3', {}, '후원 ', total), top, list);
   let stopped = false;
 
   const load = async () => {
@@ -613,6 +616,12 @@ function donationsPanel(b: Broadcast, gen: number): HTMLElement {
       const s = await listDonations(b.id);
       if (stopped || gen !== routeGen) return;
       total.textContent = `${won(s.total)} · ${s.count}건`;
+      top.replaceChildren(
+        ...(s.top ?? []).map((t) =>
+          el('li', {}, el('strong', { textContent: t.donor_username }), ` ${won(t.total)} (${t.count}번)`),
+        ),
+      );
+      top.hidden = top.childElementCount === 0;
       list.replaceChildren(
         ...s.items.map((d) =>
           el(

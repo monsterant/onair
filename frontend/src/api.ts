@@ -116,7 +116,9 @@ export const deleteComment = (id: number) => api<void>('DELETE', `/comments/${id
 
 /** 도네이션(#41) */
 export type DonationItem = { id: number; donor_username: string; amount: number; message: string; paid_at: string | null };
-export type DonationSummary = { total: number; count: number; items: DonationItem[] };
+/** 후원 순위 한 줄(#99) */
+export type TopDonor = { donor_username: string; total: number; count: number };
+export type DonationSummary = { total: number; count: number; top: TopDonor[]; items: DonationItem[] };
 export type Checkout = { order_id: string; order_name: string; amount: number; client_key: string; customer_key: string };
 export type DonationStatus = { id: number; order_id: string; broadcast_id: number; amount: number; message: string; status: 'pending' | 'paid' | 'failed' };
 

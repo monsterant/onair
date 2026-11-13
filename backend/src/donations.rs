@@ -48,11 +48,24 @@ pub struct DonationItem {
     pub paid_at: Option<OffsetDateTime>,
 }
 
+/// 후원 순위 한 줄(#99). 한 사람이 이 방송에 적립한 합계.
+#[derive(Serialize, Debug, sqlx::FromRow)]
+pub struct TopDonor {
+    pub donor_username: String,
+    pub total: i64,
+    pub count: i64,
+}
+
+/// 후원 순위에 보여 줄 사람 수(#99)
+pub const TOP_DONORS: i64 = 5;
+
 #[derive(Serialize, Debug)]
 pub struct DonationList {
     /// 적립된 후원의 합계(원)
     pub total: i64,
     pub count: i64,
+    /// 후원 순위(#99). 합계가 큰 사람부터 5명
+    pub top: Vec<TopDonor>,
     /// 최근 100개, 최신부터
     pub items: Vec<DonationItem>,
 }
@@ -437,9 +450,24 @@ pub async fn list(
     .bind(broadcast_id)
     .fetch_all(&state.db)
     .await?;
+    // 후원 순위(#99): 적립된 것만 사람마다 더한다. 합계가 같으면 그 금액에 먼저 다다른 사람(마지막 후원이 이른 사람)이 앞.
+    // 탈퇴한 사용자(donor_id NULL)는 뺀다. 여러 사람이 한 줄로 합쳐져 틀린 순위가 되기 때문이다.
+    let top = sqlx::query_as::<_, TopDonor>(
+        "SELECT u.username AS donor_username, SUM(d.amount)::BIGINT AS total, COUNT(*) AS count
+           FROM donations d JOIN users u ON u.id = d.donor_id
+          WHERE d.broadcast_id = $1 AND d.status = 'paid'
+          GROUP BY u.id, u.username
+          ORDER BY total DESC, MAX(d.paid_at) ASC, u.id ASC
+          LIMIT $2",
+    )
+    .bind(broadcast_id)
+    .bind(TOP_DONORS)
+    .fetch_all(&state.db)
+    .await?;
     Ok(Json(DonationList {
         total,
         count,
+        top,
         items,
     }))
 }
