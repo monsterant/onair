@@ -89,10 +89,10 @@ try {
   await b.click('.comment-form button[type=submit]');
   await sleep(800);
 
-  // A 화면에 B의 댓글이 몇 초 안에 나타난다(폴링)
+  // A 화면에 B의 댓글이 몇 초 안에 나타난다(폴링). A는 방송 주인이라 남의 댓글에는 수정·삭제 대신 제한 버튼만 있다(#87)
   await sleep(4500);
   list = await items(a);
-  check('author sees new comment by polling', list.length === 2 && list[1].body === 'B의 댓글' && list[1].buttons.length === 0, JSON.stringify(list));
+  check('author sees new comment by polling', list.length === 2 && list[1].body === 'B의 댓글' && JSON.stringify(list[1].buttons) === JSON.stringify(['10분 제한', '계속 제한']), JSON.stringify(list));
 
   // C(비로그인): 목록은 보고, 입력 칸 대신 로그인 안내
   const c = await ctx();
