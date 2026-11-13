@@ -46,6 +46,9 @@ pub struct Broadcast {
     pub notice: String,
     /// 분류(#113): game·music·talk·study·etc
     pub category: String,
+    /// 시작 예정 시각(#114). 없으면 null.
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub scheduled_at: Option<OffsetDateTime>,
     /// 지금 보는 사람 수(#85). 방송 중이고 미디어 서버가 답할 때만 숫자, 아니면 null.
     #[sqlx(default)]
     pub viewers: Option<i64>,
@@ -69,7 +72,7 @@ macro_rules! select_broadcast {
     ($rest:literal) => {
         concat!(
             "SELECT b.id, b.title, b.description, b.status, b.stream_name, b.owner_id,
-       u.username AS owner_username, b.started_at, b.ended_at, b.created_at, b.slow_mode_secs, b.notice, b.category
+       u.username AS owner_username, b.started_at, b.ended_at, b.created_at, b.slow_mode_secs, b.notice, b.category, b.scheduled_at
   FROM broadcasts b JOIN users u ON u.id = b.owner_id ",
             $rest
         )
@@ -325,6 +328,50 @@ pub async fn update(
     fill_viewers(&state, &mut b).await;
     let [b] = b;
     Ok(Json(b))
+}
+
+/// 예정 시각은 지금부터 7일 안(#114)
+pub const SCHEDULE_DAYS: i64 = 7;
+
+#[derive(Deserialize)]
+pub struct ScheduleInput {
+    /// 시작 예정 시각(RFC 3339). null이면 지운다.
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub at: Option<OffsetDateTime>,
+}
+
+/// 시작 예정 시각을 정하거나 지운다(#114). 주인만, 아직 시작하지 않은(대기) 방송만.
+/// 시각은 지금부터 7일 안이어야 한다(지난 시각·너무 먼 시각은 400).
+pub async fn set_schedule(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Path(id): Path<i64>,
+    Json(input): Json<ScheduleInput>,
+) -> Result<Json<Broadcast>, ApiError> {
+    let b = owned(&state, id, &user).await?;
+    if b.status != "ready" {
+        return Err(ApiError::Conflict(
+            "예정 시각은 아직 시작하지 않은 방송에만 정할 수 있습니다",
+        ));
+    }
+    if let Some(at) = input.at {
+        let now = OffsetDateTime::now_utc();
+        if at <= now || at > now + time::Duration::days(SCHEDULE_DAYS) {
+            return Err(ApiError::BadRequest(
+                "예정 시각은 지금부터 7일 안으로 정하세요",
+            ));
+        }
+    }
+    // 확인과 저장 사이에 방송이 시작·종료되면 바꾸지 않는다(대기 조건을 UPDATE에도 둔다)
+    sqlx::query(
+        "UPDATE broadcasts SET scheduled_at = $2 WHERE id = $1 AND owner_id = $3 AND status = 'ready'",
+    )
+    .bind(id)
+    .bind(input.at)
+    .bind(user.id)
+    .execute(&state.db)
+    .await?;
+    Ok(Json(find(&state, id).await?))
 }
 
 pub async fn delete(

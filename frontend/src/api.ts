@@ -24,6 +24,8 @@ export type Broadcast = {
   notice: string;
   /** 분류(#113) */
   category: Category;
+  /** 시작 예정 시각(#114). 없으면 null */
+  scheduled_at: string | null;
 };
 
 export type PublishInfo = { stream_name: string; stream_key: string; whip_path: string };
@@ -116,6 +118,8 @@ export const createBroadcast = (title: string, description: string, category: Ca
   api<Broadcast>('POST', '/broadcasts', { title, description, category });
 export const updateBroadcast = (id: number, title: string, description: string, category?: Category) =>
   api<Broadcast>('PATCH', `/broadcasts/${id}`, { title, description, category });
+/** 시작 예정 시각(#114). null이면 지운다. 주인만, 대기 중인 방송만 */
+export const setSchedule = (id: number, at: string | null) => api<Broadcast>('PUT', `/broadcasts/${id}/schedule`, { at });
 export const deleteBroadcast = (id: number) => api<void>('DELETE', `/broadcasts/${id}`);
 export const endBroadcast = (id: number) => api<Broadcast>('POST', `/broadcasts/${id}/end`);
 export const publishInfo = (id: number) => api<PublishInfo>('GET', `/broadcasts/${id}/publish`);

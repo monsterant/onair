@@ -148,11 +148,26 @@ async fn unknown_status_is_rejected(db: PgPool) {
 #[sqlx::test]
 async fn publish_with_right_key_is_allowed_and_goes_live(db: PgPool) {
     seed(&db, "ready").await;
+    // 시작 예정 시각이 있던 방송(#114). 시작하면 지운다(#121: 송출이 끊겨 대기로 돌아가도 "늦어지는 중"으로 다시 뜨지 않게)
+    sqlx::query(
+        "UPDATE broadcasts SET scheduled_at = now() + interval '1 hour' WHERE stream_name = $1",
+    )
+    .bind(NAME)
+    .execute(&db)
+    .await
+    .unwrap();
     let r = router(db.clone());
     let (code, json) = signed(&r, "incoming", "opening", &publish_url(NAME, SKEY)).await;
     assert_eq!(code, StatusCode::OK);
     assert_eq!(json, json!({ "allowed": true }));
     assert_eq!(status_of(&db).await, "live");
+    let cleared: bool =
+        sqlx::query_scalar("SELECT scheduled_at IS NULL FROM broadcasts WHERE stream_name = $1")
+            .bind(NAME)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert!(cleared);
 }
 
 #[sqlx::test]

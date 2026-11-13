@@ -94,6 +94,11 @@ pub fn app(state: AppState) -> Router {
             "/follows/{user_id}",
             axum::routing::put(follows::follow).delete(follows::unfollow),
         )
+        // 시작 예정 시각(#114). 방송 주인만.
+        .route(
+            "/broadcasts/{id}/schedule",
+            axum::routing::put(broadcasts::set_schedule),
+        )
         .route("/broadcasts/{id}/end", post(broadcasts::end))
         .route("/broadcasts/{id}/stream-key", post(broadcasts::rotate_key))
         .route(
