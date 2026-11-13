@@ -428,6 +428,27 @@ async fn list_can_search_titles(db: PgPool) {
     let (st, v) = call(&r, "GET", &search(&"가".repeat(51)), None, None).await;
     assert_eq!(st, StatusCode::BAD_REQUEST);
     assert!(v["error"].as_str().unwrap().contains("50자"));
+    // 글자 수는 앞뒤 빈칸을 뺀 뒤에 센다(#97)
+    let (st, _) = call(
+        &r,
+        "GET",
+        &search(&format!("  {}  ", "가".repeat(50))),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    // 보이지 않는 글자만 있으면 전체, 제어 문자는 500이 아니라 400(#97)
+    let (_, v) = call(&r, "GET", &search("\u{200B}"), None, None).await;
+    assert_eq!(titles(&v).len(), 3);
+    let (st, _) = call(&r, "GET", &search("a\0b"), None, None).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    // 역슬래시도 글자 그대로 찾는다(#97)
+    create(&r, &owner, "C:\\temp 정리").await;
+    let (_, v) = call(&r, "GET", &search("\\"), None, None).await;
+    assert_eq!(titles(&v), ["C:\\temp 정리"]);
+    let (_, v) = call(&r, "GET", &search("\\t"), None, None).await;
+    assert_eq!(titles(&v), ["C:\\temp 정리"]);
 }
 
 /// 시험용 주소 인코딩(글자마다 %XX)
