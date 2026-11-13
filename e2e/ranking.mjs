@@ -14,7 +14,7 @@ const check = (name, ok, extra = '') => results.push(`${ok ? 'PASS' : 'FAIL'} ${
 const browser = await puppeteer.launch({ executablePath: CHROME, headless: true });
 const psql = (sql) => execFileSync('docker', ['exec', 'rodlspr-db-1', 'psql', '-U', 'onair', '-d', 'onair', '-tAc', sql], { encoding: 'utf8' }).trim();
 
-let p; let bid;
+let p; let bid; let tag;
 try {
   p = await (await browser.createBrowserContext()).newPage();
   p.on('dialog', (d) => d.accept());
@@ -29,7 +29,7 @@ try {
   check('no donations: ranking hidden', await anon.$eval('.donor-top', (e) => e.hidden));
   if (LOCAL) {
     // 후원자 2명을 만들고 적립된 후원을 넣는다: A 1000+5000, B 3000
-    const tag = Date.now().toString(36);
+    tag = Date.now().toString(36);
     const a = psql(`INSERT INTO users (username, password_hash) VALUES ('rk_a_${tag}', 'x') RETURNING id`).split('\n')[0];
     const b = psql(`INSERT INTO users (username, password_hash) VALUES ('rk_b_${tag}', 'x') RETURNING id`).split('\n')[0];
     for (const [i, u, amt] of [[1, a, 1000], [2, b, 3000], [3, a, 5000]]) {
@@ -40,7 +40,6 @@ try {
     const rows = await anon.$$eval('.donor-top li', (ls) => ls.map((l) => l.textContent));
     check('ranking shown, biggest first', rows.length === 2 && rows[0].startsWith(`rk_a_${tag}`) && rows[0].includes('6,000원') && rows[0].includes('2번') && rows[1].startsWith(`rk_b_${tag}`), JSON.stringify(rows));
     check('ranking visible', !(await anon.$eval('.donor-top', (e) => e.hidden)));
-    psql(`DELETE FROM users WHERE username IN ('rk_a_${tag}', 'rk_b_${tag}')`);
   } else {
     results.push('SKIP ranking with donations (운영에서는 DB에 후원을 넣지 않음)');
   }
@@ -48,6 +47,8 @@ try {
   check('no exception', false, e.stack);
 } finally {
   if (p && bid) await p.evaluate(async (id) => fetch(`/api/broadcasts/${id}`, { method: 'DELETE' }), bid).catch(() => {});
+  // 중간에 실패해도 시험 사용자를 지운다(#100)
+  if (tag) try { psql(`DELETE FROM users WHERE username IN ('rk_a_${tag}', 'rk_b_${tag}')`); } catch {}
 }
 console.log(results.join('\n'));
 await browser.close();

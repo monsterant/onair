@@ -836,8 +836,10 @@ async fn top_donors_rank_paid_totals_per_person(db: PgPool) {
     // fan0: 1000 + 4000 = 5000 (두 번 나눠서)
     give(Some(users[0]), bid, 1000, "paid", 100).await;
     give(Some(users[0]), bid, 4000, "paid", 90).await;
-    // fan1: 3000, fan2: 3000. fan2가 먼저 다다랐다(더 오래 전)
-    give(Some(users[1]), bid, 3000, "paid", 10).await;
+    // fan1: 1000(오래 전) + 2000(최근) = 3000, fan2: 3000 한 번(50초 전).
+    // 3000에 먼저 다다른 사람은 fan2다. fan1의 첫 후원이 더 오래 전이어도 "마지막 후원 시각"으로 정한다(#100).
+    give(Some(users[1]), bid, 1000, "paid", 200).await;
+    give(Some(users[1]), bid, 2000, "paid", 10).await;
     give(Some(users[2]), bid, 3000, "paid", 50).await;
     // fan3, fan4, fan5: 1000씩(fan5가 가장 늦음 → 6번째라 빠진다)
     give(Some(users[3]), bid, 1000, "paid", 40).await;
@@ -867,7 +869,7 @@ async fn top_donors_rank_paid_totals_per_person(db: PgPool) {
         [
             ("fan0".to_string(), 5000, 2),
             ("fan2".to_string(), 3000, 1),
-            ("fan1".to_string(), 3000, 1),
+            ("fan1".to_string(), 3000, 2),
             ("fan3".to_string(), 1000, 1),
             ("fan4".to_string(), 1000, 1),
         ]
