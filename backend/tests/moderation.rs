@@ -545,9 +545,10 @@ async fn owner_can_pin_a_notice(db: PgPool) {
     };
     // 처음엔 없다
     assert_eq!(get().await, "");
-    // 비로그인 401, 다른 사람 403
+    // 비로그인 401, 다른 사람 403. 잘못된 글을 보내도 주인 확인이 먼저다(403, #115)
     assert_eq!(put("공지", None).await, StatusCode::UNAUTHORIZED);
     assert_eq!(put("공지", Some(&other)).await, StatusCode::FORBIDDEN);
+    assert_eq!(put("널\u{0}", Some(&other)).await, StatusCode::FORBIDDEN);
     assert_eq!(get().await, "");
     // 주인: 한 줄로 다듬어 저장, 목록에도 보인다
     assert_eq!(
@@ -567,11 +568,32 @@ async fn owner_can_pin_a_notice(db: PgPool) {
         StatusCode::BAD_REQUEST
     );
     assert_eq!(put("널\u{0}", Some(&owner)).await, StatusCode::BAD_REQUEST);
+    // NUL은 DB도 받지 않으니, DB가 받는 제어 문자(벨)로도 400인지 본다(#115)
+    assert_eq!(put("벨\u{7}", Some(&owner)).await, StatusCode::BAD_REQUEST);
     assert_eq!(
         put("abc\u{202E}def", Some(&owner)).await,
         StatusCode::BAD_REQUEST
     );
     assert_eq!(get().await, "가".repeat(100));
+    // 탭·\r\n·줄 구분 문자는 빈칸 하나씩(#115)
+    assert_eq!(
+        put("a\tb\r\nc\u{2028}d", Some(&owner)).await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(get().await, "a b c d");
+    // 다른 방송의 공지는 그대로다(#115). demo2가 자기 방송을 만든다.
+    let (_, b2, _) = call(
+        &r,
+        "POST",
+        "/broadcasts",
+        Some(json!({"title": "다른 방송"})),
+        Some(&other),
+    )
+    .await;
+    let bid2 = b2["id"].as_i64().unwrap();
+    assert_eq!(put("내 공지", Some(&owner)).await, StatusCode::NO_CONTENT);
+    let (_, v, _) = call(&r, "GET", &format!("/broadcasts/{bid2}"), None, None).await;
+    assert_eq!(v["notice"], "");
     // 빈 값·보이지 않는 글자만이면 내린다
     assert_eq!(
         put("  \u{200B} ", Some(&owner)).await,

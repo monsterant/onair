@@ -145,10 +145,12 @@ pub struct NoticeInput {
 /// 공지를 다듬는다. 한 줄로 만들고(줄바꿈·탭은 빈칸), 앞뒤 빈칸을 뺀다.
 /// 보이지 않는 글자만 있으면 빈 공지(내림). 제어 문자·글자 방향을 바꾸는 문자는 400.
 pub fn clean_notice(raw: &str) -> Result<String, ApiError> {
+    // \r\n은 빈칸 하나로. 줄 구분 문자(U+2028·U+2029)도 줄바꿈처럼 빈칸으로(#115)
     let one_line: String = raw
+        .replace("\r\n", " ")
         .chars()
         .map(|c| {
-            if matches!(c, '\n' | '\r' | '\t') {
+            if matches!(c, '\n' | '\r' | '\t' | '\u{2028}' | '\u{2029}') {
                 ' '
             } else {
                 c

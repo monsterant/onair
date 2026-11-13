@@ -974,10 +974,12 @@ function chatPanel(broadcastId: number, current: () => Broadcast): HTMLElement {
       noticeSave.disabled = true;
       try {
         await setNotice(broadcastId, noticeInput.value);
-        // 서버가 다듬은 값은 다음 새로 읽기(5초)에 맞춰진다. 그 전에도 바로 보이게 한다.
-        current().notice = noticeInput.value.trim();
+        // 서버가 다듬은 값을 바로 다시 읽어 보여 준다(#115). 못 읽으면 다음 새로 읽기(5초)에 맞춰진다.
+        const saved = (await getBroadcast(broadcastId).catch(() => null))?.notice ?? current().notice;
+        current().notice = saved;
+        noticeInput.value = saved;
         showNotice();
-        error.textContent = noticeInput.value.trim() ? '공지를 올렸습니다.' : '공지를 내렸습니다.';
+        error.textContent = saved ? '공지를 올렸습니다.' : '공지를 내렸습니다.';
       } catch (e) {
         error.textContent = message(e);
       } finally {
