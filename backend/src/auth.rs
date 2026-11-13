@@ -54,6 +54,8 @@ pub enum ApiError {
     Conflict(&'static str),
     NotFound,
     TooManyRequests,
+    /// 429에 이유를 붙일 때(천천히 모드 등, #87)
+    TooManyRequestsBecause(&'static str),
     Internal,
     /// 503: 기능이 설정되지 않음(예: 결제 키 없음)
     Unavailable(&'static str),
@@ -73,6 +75,7 @@ impl IntoResponse for ApiError {
                 StatusCode::TOO_MANY_REQUESTS,
                 "요청이 너무 많습니다. 잠시 뒤에 다시 시도하세요",
             ),
+            ApiError::TooManyRequestsBecause(m) => (StatusCode::TOO_MANY_REQUESTS, m),
             ApiError::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "서버 오류입니다"),
             ApiError::Unavailable(m) => (StatusCode::SERVICE_UNAVAILABLE, m),
             ApiError::BadGateway(m) => (StatusCode::BAD_GATEWAY, m),

@@ -310,9 +310,9 @@ async fn deleting_a_broadcast_clears_its_chat_and_ends_streams(db: PgPool) {
 #[test]
 fn message_ids_do_not_restart_from_one() {
     // 서버를 다시 켜도(새 허브) 번호가 앞 번호보다 커서, 열린 화면이 새 글을 버리지 않는다(#86 리뷰)
-    let first = Hub::default().publish(1, "chat", "a", "x").id;
+    let first = Hub::default().publish(1, "chat", None, "a", "x").id;
     std::thread::sleep(Duration::from_millis(5));
-    let second = Hub::default().publish(1, "chat", "a", "y").id;
+    let second = Hub::default().publish(1, "chat", None, "a", "y").id;
     assert!(first > 1_000_000_000, "{first}");
     assert!(second > first, "{first} {second}");
 }
@@ -321,7 +321,7 @@ fn message_ids_do_not_restart_from_one() {
 fn hub_keeps_only_recent_messages() {
     let hub = Hub::default();
     for i in 0..60 {
-        hub.publish(1, "chat", "a", &i.to_string());
+        hub.publish(1, "chat", None, "a", &i.to_string());
     }
     let (recent, _) = hub.subscribe(1);
     assert_eq!(recent.len(), onair_backend::chat::RECENT_MAX);

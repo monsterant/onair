@@ -14,6 +14,7 @@ use std::{
     collections::{HashMap, VecDeque},
     convert::Infallible,
     sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 
 use axum::{
@@ -46,6 +47,8 @@ pub struct Message {
     pub id: i64,
     /// "chat" 또는 "donation"(후원 안내)
     pub kind: &'static str,
+    /// 보낸 사람 번호(방송 주인 화면의 "제한" 버튼이 쓴다, #87). 후원 안내는 null.
+    pub user_id: Option<i64>,
     pub username: String,
     pub text: String,
     #[serde(with = "time::serde::rfc3339")]
@@ -60,6 +63,8 @@ struct Room {
 struct Inner {
     rooms: HashMap<i64, Room>,
     next_id: i64,
+    /// (방송, 사용자) → 마지막으로 채팅한 때. 천천히 모드에 쓴다(#87).
+    last_sent: HashMap<(i64, i64), Instant>,
 }
 
 impl Default for Inner {
@@ -70,6 +75,7 @@ impl Default for Inner {
         Self {
             rooms: HashMap::new(),
             next_id: i64::try_from(now).unwrap_or(0),
+            last_sent: HashMap::new(),
         }
     }
 }
@@ -101,6 +107,7 @@ impl Hub {
         &self,
         broadcast_id: i64,
         kind: &'static str,
+        user_id: Option<i64>,
         username: &str,
         text: &str,
     ) -> Arc<Message> {
@@ -109,6 +116,7 @@ impl Hub {
         let msg = Arc::new(Message {
             id: inner.next_id,
             kind,
+            user_id,
             username: username.to_string(),
             text: text.to_string(),
             at: OffsetDateTime::now_utc(),
@@ -125,7 +133,30 @@ impl Hub {
 
     /// 방송이 지워지면 그 방을 없앤다(메모리가 쌓이지 않게). 듣던 연결은 끝난다.
     pub fn remove(&self, broadcast_id: i64) {
-        self.0.lock().unwrap().rooms.remove(&broadcast_id);
+        let mut inner = self.0.lock().unwrap();
+        inner.rooms.remove(&broadcast_id);
+        inner.last_sent.retain(|(b, _), _| *b != broadcast_id);
+    }
+
+    /// 천천히 모드(#87): 이 사람이 이 방송에서 마지막으로 쓴 지 secs초가 지났으면 true를 돌려주고 지금 시각을 적는다.
+    /// 확인과 기록을 한 잠금 안에서 해서, 같은 사람이 동시에 두 번 보내도 하나만 통과한다.
+    pub fn slow_ok(&self, broadcast_id: i64, user_id: i64, secs: i32) -> bool {
+        let mut inner = self.0.lock().unwrap();
+        let wait = Duration::from_secs(u64::try_from(secs).unwrap_or(0));
+        let key = (broadcast_id, user_id);
+        if let Some(at) = inner.last_sent.get(&key)
+            && at.elapsed() < wait
+        {
+            return false;
+        }
+        // 오래된 기록은 지운다(쌓이지 않게)
+        if inner.last_sent.len() > 10_000 {
+            inner
+                .last_sent
+                .retain(|_, at| at.elapsed() < Duration::from_secs(60));
+        }
+        inner.last_sent.insert(key, Instant::now());
+        true
     }
 }
 
@@ -195,19 +226,33 @@ pub async fn send(
     Json(input): Json<ChatInput>,
 ) -> Result<StatusCode, ApiError> {
     let text = clean_text(&input.text)?;
-    let status: Option<String> = sqlx::query_scalar("SELECT status FROM broadcasts WHERE id = $1")
-        .bind(id)
-        .fetch_optional(&state.db)
-        .await?;
-    match status.as_deref() {
-        None => return Err(ApiError::NotFound),
-        Some("ended") => return Err(ApiError::Conflict("종료된 방송에는 채팅할 수 없습니다")),
-        _ => {}
+    let row: Option<(String, i32, i64)> =
+        sqlx::query_as("SELECT status, slow_mode_secs, owner_id FROM broadcasts WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&state.db)
+            .await?;
+    let Some((status, slow, owner)) = row else {
+        return Err(ApiError::NotFound);
+    };
+    if status == "ended" {
+        return Err(ApiError::Conflict("종료된 방송에는 채팅할 수 없습니다"));
+    }
+    // 방송 주인이 막은 사람은 쓸 수 없다(#87)
+    if crate::moderation::banned(&state.db, id, user.id).await? {
+        return Err(crate::moderation::BANNED);
     }
     // 도배를 막는다. 내용 검사를 먼저 해서 거절된 글은 횟수에 넣지 않는다(댓글과 같음).
     if !state.auth.chat_limiter.allow(&format!("user:{}", user.id)) {
         return Err(ApiError::TooManyRequests);
     }
-    state.chat.publish(id, "chat", &user.username, &text);
+    // 천천히 모드(#87). 방송 주인은 예외.
+    if slow > 0 && owner != user.id && !state.chat.slow_ok(id, user.id, slow) {
+        return Err(ApiError::TooManyRequestsBecause(
+            "천천히 모드가 켜져 있습니다. 잠시 뒤에 다시 쓰세요",
+        ));
+    }
+    state
+        .chat
+        .publish(id, "chat", Some(user.id), &user.username, &text);
     Ok(StatusCode::NO_CONTENT)
 }

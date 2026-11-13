@@ -146,6 +146,10 @@ pub async fn create(
     Json(input): Json<CommentInput>,
 ) -> Result<(StatusCode, Json<Comment>), ApiError> {
     let body = clean_body(&input.body)?;
+    // 방송 주인이 막은 사람은 댓글도 쓸 수 없다(#87)
+    if crate::moderation::banned(&state.db, broadcast_id, user.id).await? {
+        return Err(crate::moderation::BANNED);
+    }
     // 도배를 막으려고 사용자 하나당 1분 횟수 제한을 건다. 로그인 몫과는 따로 센다(#37 리뷰).
     // 내용 검사를 먼저 해서, 거절된 글은 횟수에 넣지 않는다.
     if !state
