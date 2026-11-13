@@ -306,6 +306,15 @@ textarea {
   font-size: 0.9rem;
 }
 
+.category-filters {
+  margin-bottom: 8px;
+}
+
+.category-filter[aria-pressed='true'] {
+  font-weight: 700;
+  text-decoration: underline;
+}
+
 .search {
   width: 100%;
   max-width: 420px;

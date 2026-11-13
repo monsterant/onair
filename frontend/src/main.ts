@@ -40,6 +40,9 @@ import {
   endBroadcast,
   getBroadcast,
   listBroadcasts,
+  CATEGORIES,
+  categoryLabel,
+  type Category,
   listFollows,
   followUser,
   unfollowUser,
@@ -220,6 +223,20 @@ async function listPage(main: HTMLElement) {
   // 제목 검색(#96). 치고 잠깐 멈추면 찾는다. 10초마다 새로 읽을 때도 검색어를 지킨다.
   const search = el('input', { type: 'search', className: 'search', placeholder: '방송 제목 검색', maxLength: 50, ariaLabel: '방송 제목 검색' });
   main.append(search);
+  // 분류로 걸러 보기(#113). 고른 버튼은 aria-pressed로 표시
+  let cat = '';
+  const catButtons = [['', '전체'] as const, ...CATEGORIES].map(([v, l]) => {
+    const btn = el('button', { type: 'button', className: 'small ghost category-filter', textContent: l });
+    btn.dataset.category = v;
+    btn.setAttribute('aria-pressed', String(v === cat));
+    btn.onclick = () => {
+      cat = v;
+      for (const x of catButtons) x.setAttribute('aria-pressed', String(x.dataset.category === cat));
+      void load();
+    };
+    return btn;
+  });
+  main.append(el('div', { className: 'row category-filters' }, ...catButtons));
   const box = el('div', { className: 'list', textContent: '불러오는 중...' });
   main.append(box);
   // 늦게 온 예전 응답이 새 검색 결과를 덮지 않게 순서 번호를 붙인다
@@ -228,10 +245,10 @@ async function listPage(main: HTMLElement) {
     const my = ++seq;
     const q = search.value.trim();
     try {
-      const items = await listBroadcasts(q);
+      const items = await listBroadcasts(q, cat);
       if (my !== seq) return;
       if (items.length === 0) {
-        box.replaceChildren(el('p', { className: 'hint', textContent: q ? '찾는 방송이 없습니다.' : '아직 방송이 없습니다.' }));
+        box.replaceChildren(el('p', { className: 'hint', textContent: q || cat ? '찾는 방송이 없습니다.' : '아직 방송이 없습니다.' }));
         return;
       }
       box.replaceChildren(
@@ -240,7 +257,7 @@ async function listPage(main: HTMLElement) {
             'a',
             { className: 'card', href: `#/b/${b.id}` },
             el('div', { className: 'card-top' }, badge(b.status), el('strong', { textContent: b.title })),
-            el('span', { className: 'hint', textContent: [b.owner_username, viewersText(b)].filter(Boolean).join(' · ') }),
+            el('span', { className: 'hint', textContent: [categoryLabel(b.category), b.owner_username, viewersText(b)].filter(Boolean).join(' · ') }),
           ),
         ),
       );
@@ -310,6 +327,13 @@ function loginPage(main: HTMLElement) {
 
 // ---------- 만들기 ----------
 
+/** 분류 고르기(#113) */
+function categorySelect(value: string): HTMLSelectElement {
+  const s = el('select', { name: 'category', className: 'category-select', ariaLabel: '분류' }, ...CATEGORIES.map(([v, l]) => el('option', { value: v, textContent: `분류: ${l}` })));
+  s.value = value;
+  return s;
+}
+
 function newPage(main: HTMLElement) {
   if (!me) {
     main.append(el('p', {}, '방송을 만들려면 ', el('a', { href: '#/login', textContent: '로그인' }), '하세요.'));
@@ -317,13 +341,14 @@ function newPage(main: HTMLElement) {
   }
   const title = el('input', { name: 'title', placeholder: '방송 제목 (100자 이하)', maxLength: 100, required: true });
   const description = el('textarea', { name: 'description', placeholder: '설명 (1000자 이하, 선택)', maxLength: 1000, rows: 4 });
+  const category = categorySelect('etc');
   const error = el('p', { className: 'error', role: 'alert' });
   const submit = el('button', { type: 'submit', textContent: '만들기' });
-  const form = el('form', { className: 'panel', noValidate: true }, el('h2', { textContent: '방송 만들기' }), title, description, submit, error);
+  const form = el('form', { className: 'panel', noValidate: true }, el('h2', { textContent: '방송 만들기' }), title, description, category, submit, error);
   form.onsubmit = (ev) => {
     ev.preventDefault();
     action(submit, error, async () => {
-      const b = await createBroadcast(title.value, description.value);
+      const b = await createBroadcast(title.value, description.value, category.value as Category);
       go(`#/b/${b.id}`);
     })();
   };
@@ -1612,13 +1637,14 @@ function ownerPanel(b: Broadcast, onChange: (b: Broadcast) => void, publisher: P
   // 수정
   const title = el('input', { value: b.title, maxLength: 100, ariaLabel: '방송 제목', placeholder: '방송 제목 (100자 이하)' });
   const description = el('textarea', { value: b.description, maxLength: 1000, rows: 3, ariaLabel: '방송 설명', placeholder: '설명 (1000자 이하, 선택)' });
+  const category = categorySelect(b.category ?? 'etc');
   const save = el('button', { type: 'button', textContent: '저장' });
   const saved = el('span', { className: 'hint', role: 'status' });
   // 저장 뒤에 다시 고치기 시작하면 "저장했습니다"를 지운다(리뷰 지적 2)
-  title.oninput = description.oninput = () => (saved.textContent = '');
+  title.oninput = description.oninput = category.onchange = () => (saved.textContent = '');
   save.onclick = action(save, error, async () => {
     saved.textContent = '';
-    onChange(await updateBroadcast(b.id, title.value, description.value));
+    onChange(await updateBroadcast(b.id, title.value, description.value, category.value as Category));
     saved.textContent = '저장했습니다.';
   });
 
@@ -1686,6 +1712,7 @@ function ownerPanel(b: Broadcast, onChange: (b: Broadcast) => void, publisher: P
     el('h3', { textContent: '방송 관리 (소유자)' }),
     title,
     description,
+    category,
     el('div', { className: 'row' }, save, saved, showPublish, end, del),
     endedNote,
     publishBox,

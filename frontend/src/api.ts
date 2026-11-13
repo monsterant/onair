@@ -22,6 +22,8 @@ export type Broadcast = {
   slow_mode_secs: number;
   /** 채팅 칸 위 고정 공지(#109). 빈 문자열이면 없음 */
   notice: string;
+  /** 분류(#113) */
+  category: Category;
 };
 
 export type PublishInfo = { stream_name: string; stream_key: string; whip_path: string };
@@ -88,13 +90,32 @@ export const followUser = (userId: number) => api<void>('PUT', `/follows/${userI
 export const unfollowUser = (userId: number) => api<void>('DELETE', `/follows/${userId}`);
 
 /** 방송 목록. q가 있으면 제목에 그 글자가 들어 있는 방송만(#96) */
-export const listBroadcasts = (q = '') =>
-  api<Broadcast[]>('GET', q.trim() ? `/broadcasts?q=${encodeURIComponent(q.trim())}` : '/broadcasts');
+export const listBroadcasts = (q = '', category = '') =>
+  api<Broadcast[]>('GET', listPath(q, category));
+
+/** 방송 분류(#113). 서버와 같은 값 */
+export const CATEGORIES = [
+  ['game', '게임'],
+  ['music', '음악'],
+  ['talk', '대화'],
+  ['study', '공부'],
+  ['etc', '기타'],
+] as const;
+export type Category = (typeof CATEGORIES)[number][0];
+export const categoryLabel = (c: string) => CATEGORIES.find(([v]) => v === c)?.[1] ?? '기타';
+
+function listPath(q: string, category: string): string {
+  const p = new URLSearchParams();
+  if (q.trim()) p.set('q', q.trim());
+  if (category) p.set('category', category);
+  const s = p.toString();
+  return s ? `/broadcasts?${s}` : '/broadcasts';
+}
 export const getBroadcast = (id: number) => api<Broadcast>('GET', `/broadcasts/${id}`);
-export const createBroadcast = (title: string, description: string) =>
-  api<Broadcast>('POST', '/broadcasts', { title, description });
-export const updateBroadcast = (id: number, title: string, description: string) =>
-  api<Broadcast>('PATCH', `/broadcasts/${id}`, { title, description });
+export const createBroadcast = (title: string, description: string, category: Category = 'etc') =>
+  api<Broadcast>('POST', '/broadcasts', { title, description, category });
+export const updateBroadcast = (id: number, title: string, description: string, category?: Category) =>
+  api<Broadcast>('PATCH', `/broadcasts/${id}`, { title, description, category });
 export const deleteBroadcast = (id: number) => api<void>('DELETE', `/broadcasts/${id}`);
 export const endBroadcast = (id: number) => api<Broadcast>('POST', `/broadcasts/${id}/end`);
 export const publishInfo = (id: number) => api<PublishInfo>('GET', `/broadcasts/${id}/publish`);
