@@ -858,6 +858,9 @@ function chatPanel(broadcastId: number, current: () => Broadcast): HTMLElement {
     bans.hidden = true;
     panel.append(el('div', { className: 'row owner-tools' }, slow), bans);
     void loadBans();
+    // 댓글 옆 버튼으로 막은 것, 기한이 지난 것도 목록에 맞춰지게 10초마다 다시 읽는다(#94)
+    const bansTimer = setInterval(() => void loadBans(), 10_000);
+    cleanup.push(() => clearInterval(bansTimer));
   }
   panel.append(list);
   if (me && current().status === 'ended') {

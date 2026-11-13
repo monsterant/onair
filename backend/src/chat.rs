@@ -241,15 +241,15 @@ pub async fn send(
     if crate::moderation::banned(&state.db, id, user.id).await? {
         return Err(crate::moderation::BANNED);
     }
-    // 도배를 막는다. 내용 검사를 먼저 해서 거절된 글은 횟수에 넣지 않는다(댓글과 같음).
-    if !state.auth.chat_limiter.allow(&format!("user:{}", user.id)) {
-        return Err(ApiError::TooManyRequests);
-    }
-    // 천천히 모드(#87). 방송 주인은 예외.
+    // 천천히 모드(#87). 방송 주인은 예외. 횟수 제한보다 먼저 봐서, 여기서 거절된 글은 1분 횟수를 쓰지 않는다(#94).
     if slow > 0 && owner != user.id && !state.chat.slow_ok(id, user.id, slow) {
         return Err(ApiError::TooManyRequestsBecause(
             "천천히 모드가 켜져 있습니다. 잠시 뒤에 다시 쓰세요",
         ));
+    }
+    // 도배를 막는다. 내용 검사를 먼저 해서 거절된 글은 횟수에 넣지 않는다(댓글과 같음).
+    if !state.auth.chat_limiter.allow(&format!("user:{}", user.id)) {
+        return Err(ApiError::TooManyRequests);
     }
     state
         .chat

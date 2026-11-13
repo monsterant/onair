@@ -180,8 +180,12 @@ pub async fn update(
     Path(id): Path<i64>,
     Json(input): Json<CommentInput>,
 ) -> Result<Json<Comment>, ApiError> {
-    authored(&state, id, &user).await?;
+    let c = authored(&state, id, &user).await?;
     let body = clean_body(&input.body)?;
+    // 막힌 사람이 예전 댓글을 고쳐 새 내용을 올리지 못하게 한다(#94). 지우기는 막지 않는다.
+    if crate::moderation::banned(&state.db, c.broadcast_id, user.id).await? {
+        return Err(crate::moderation::BANNED);
+    }
     // 작성자 조건을 UPDATE에도 넣어서, 확인과 수정 사이에 무슨 일이 있어도 남의 댓글을 고치지 않게 한다
     sqlx::query(
         "UPDATE comments SET body = $1, updated_at = now() WHERE id = $2 AND author_id = $3",

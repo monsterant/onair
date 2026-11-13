@@ -363,3 +363,158 @@ fn slow_ok_waits_per_user_and_broadcast() {
     hub.remove(1);
     assert!(hub.slow_ok(1, 10, 5));
 }
+
+/// #94: 주인만 풀 수 있다, 막힌 사람은 댓글을 고칠 수 없다(지우기는 된다), 제한은 그 방송에만 걸린다.
+#[sqlx::test]
+async fn unban_is_owner_only_and_bans_are_per_broadcast(db: PgPool) {
+    let r = router(db, Hub::default());
+    let (bid, owner, _, other, other_id) = setup(&r).await;
+    let (st, b2, _) = call(
+        &r,
+        "POST",
+        "/broadcasts",
+        Some(json!({"title": "다른 방송"})),
+        Some(&owner),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let bid2 = b2["id"].as_i64().unwrap();
+    // 막히기 전에 댓글을 하나 쓴다
+    let (st, c, _) = call(
+        &r,
+        "POST",
+        &format!("/broadcasts/{bid}/comments"),
+        Some(json!({"body": "막히기 전 댓글"})),
+        Some(&other),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let cid = c["id"].as_i64().unwrap();
+    let ban = format!("/broadcasts/{bid}/bans/{other_id}");
+    assert_eq!(
+        call(
+            &r,
+            "PUT",
+            &ban,
+            Some(json!({"ten_minutes": false})),
+            Some(&owner)
+        )
+        .await
+        .0,
+        StatusCode::NO_CONTENT
+    );
+    // 막힌 사람이 스스로 풀거나, 비로그인이 풀 수 없다. 그 뒤에도 계속 막혀 있다.
+    assert_eq!(
+        call(&r, "DELETE", &ban, None, Some(&other)).await.0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        call(&r, "DELETE", &ban, None, None).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        chat(&r, bid, "풀었나", &other).await.0,
+        StatusCode::FORBIDDEN
+    );
+    // 천천히 모드도 비로그인은 401
+    assert_eq!(
+        call(
+            &r,
+            "PUT",
+            &format!("/broadcasts/{bid}/slow"),
+            Some(json!({"secs": 5})),
+            None
+        )
+        .await
+        .0,
+        StatusCode::UNAUTHORIZED
+    );
+    // 예전 댓글을 고칠 수 없다(403). 지우기는 된다.
+    let (st, j, _) = call(
+        &r,
+        "PATCH",
+        &format!("/comments/{cid}"),
+        Some(json!({"body": "막힌 뒤 고침"})),
+        Some(&other),
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+    assert!(j["error"].as_str().unwrap().contains("막았습니다"));
+    // 다른 방송에서는 그대로 쓴다. 그 방송의 제한 목록은 비어 있다.
+    assert_eq!(
+        chat(&r, bid2, "여기는 됨", &other).await.0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        comment(&r, bid2, "여기는 됨", &other).await,
+        StatusCode::CREATED
+    );
+    let (_, list, _) = call(
+        &r,
+        "GET",
+        &format!("/broadcasts/{bid2}/bans"),
+        None,
+        Some(&owner),
+    )
+    .await;
+    assert_eq!(list.as_array().unwrap().len(), 0);
+    assert_eq!(
+        call(
+            &r,
+            "DELETE",
+            &format!("/comments/{cid}"),
+            None,
+            Some(&other)
+        )
+        .await
+        .0,
+        StatusCode::NO_CONTENT
+    );
+}
+
+/// #94: 천천히 모드에 걸린 채팅은 1분 횟수를 쓰지 않는다
+#[sqlx::test]
+async fn slow_mode_rejections_do_not_use_the_rate_limit(db: PgPool) {
+    let hub = Hub::default();
+    let r = router(db, hub.clone());
+    let (bid, owner, _, other, _) = setup(&r).await;
+    assert_eq!(
+        call(
+            &r,
+            "PUT",
+            &format!("/broadcasts/{bid}/slow"),
+            Some(json!({"secs": 5})),
+            Some(&owner)
+        )
+        .await
+        .0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        chat(&r, bid, "첫 글", &other).await.0,
+        StatusCode::NO_CONTENT
+    );
+    // 30번 거절되어도 모두 천천히 모드 안내다(횟수 제한 안내가 섞이지 않는다)
+    for _ in 0..30 {
+        let (st, j) = chat(&r, bid, "또", &other).await;
+        assert_eq!(st, StatusCode::TOO_MANY_REQUESTS);
+        assert!(j["error"].as_str().unwrap().contains("천천히 모드"), "{j}");
+    }
+    // 천천히 모드를 끄면 바로 쓴다(1분 횟수가 남아 있다)
+    assert_eq!(
+        call(
+            &r,
+            "PUT",
+            &format!("/broadcasts/{bid}/slow"),
+            Some(json!({"secs": 0})),
+            Some(&owner)
+        )
+        .await
+        .0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        chat(&r, bid, "끈 뒤", &other).await.0,
+        StatusCode::NO_CONTENT
+    );
+}
