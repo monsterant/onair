@@ -722,26 +722,71 @@ function chatPanel(broadcastId: number, current: () => Broadcast): HTMLElement {
       m.kind === 'donation'
         ? el('li', { className: 'chat-line donation' }, el('strong', { textContent: m.username }), ` 님이 ${m.text}`)
         : el('li', { className: 'chat-line' }, el('strong', { textContent: m.username }), ` ${m.text}`);
+    li.dataset.id = String(m.id);
     list.append(li);
     // 너무 많이 쌓이지 않게 앞에서 지운다
-    while (list.children.length > 200) list.firstElementChild?.remove();
+    while (list.children.length > 200) {
+      const first = list.firstElementChild as HTMLElement | null;
+      if (!first) break;
+      seen.delete(Number(first.dataset.id));
+      first.remove();
+    }
     if (nearBottom) list.scrollTop = list.scrollHeight;
   };
 
-  const source = new EventSource(chatStreamUrl(broadcastId));
-  source.addEventListener('chat', (ev) => {
-    try {
-      add(JSON.parse((ev as MessageEvent<string>).data) as ChatMessage);
-    } catch {
-      // 모양이 다른 메시지는 버린다
-    }
-  });
-  source.onopen = () => (state.textContent = '');
-  source.onerror = () => {
-    // 브라우저가 알아서 다시 붙는다. 방송이 지워졌으면(404) 더 붙지 않는다(readyState CLOSED).
-    state.textContent = source.readyState === EventSource.CLOSED ? ' (연결 끊김)' : ' (다시 연결 중…)';
+  // 연결이 잠깐 끊기면 EventSource가 알아서 다시 붙는다. 하지만 서버가 다시 켜지는 중이라 502 같은 오류로 답하면
+  // EventSource는 완전히 닫힌다(CLOSED). 그때는 몇 초 뒤 직접 다시 연다(3초부터 두 배씩, 최대 30초, #86 리뷰).
+  // 방송이 지워졌으면(404) 더 열지 않는다.
+  let source: EventSource | null = null;
+  let closed = false;
+  let wait = 3_000;
+  let again: ReturnType<typeof setTimeout> | undefined;
+  const open = () => {
+    if (closed) return;
+    const s = new EventSource(chatStreamUrl(broadcastId));
+    source = s;
+    s.addEventListener('chat', (ev) => {
+      try {
+        add(JSON.parse((ev as MessageEvent<string>).data) as ChatMessage);
+      } catch {
+        // 모양이 다른 메시지는 버린다
+      }
+    });
+    s.onopen = () => {
+      state.textContent = '';
+      wait = 3_000;
+    };
+    s.onerror = () => {
+      if (s.readyState !== EventSource.CLOSED) {
+        state.textContent = ' (다시 연결 중…)';
+        return;
+      }
+      s.close();
+      if (closed) return;
+      void getBroadcast(broadcastId)
+        .then(() => {
+          state.textContent = ' (다시 연결 중…)';
+          again = setTimeout(open, wait);
+          wait = Math.min(wait * 2, 30_000);
+        })
+        .catch((e) => {
+          if (e instanceof ApiError && e.status === 404) {
+            state.textContent = ' (연결 끊김)';
+            return;
+          }
+          // 서버가 아직 안 떴으면(연결 실패) 조금 뒤 다시 본다
+          state.textContent = ' (다시 연결 중…)';
+          again = setTimeout(open, wait);
+          wait = Math.min(wait * 2, 30_000);
+        });
+    };
   };
-  cleanup.push(() => source.close());
+  open();
+  cleanup.push(() => {
+    closed = true;
+    clearTimeout(again);
+    source?.close();
+  });
 
   const panel = el('section', { className: 'chat-panel panel' }, el('h3', {}, '실시간 채팅', state), list);
   if (me) {

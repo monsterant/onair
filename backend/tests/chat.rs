@@ -239,9 +239,12 @@ async fn stream_sends_recent_then_new_messages(db: PgPool) {
             .unwrap();
         String::from_utf8(chunk.to_vec()).unwrap()
     };
-    // 처음에 최근 글
+    // 처음에 연결 신호(주석), 그다음 최근 글
     seen.push_str(&next().await);
-    assert!(seen.contains("먼저 쓴 글"), "{seen}");
+    assert!(seen.starts_with(":"), "{seen}");
+    while !seen.contains("먼저 쓴 글") {
+        seen.push_str(&next().await);
+    }
     assert!(seen.contains("event: chat"), "{seen}");
     // 연결한 뒤에 쓴 글도 바로 온다
     assert_eq!(
@@ -251,6 +254,67 @@ async fn stream_sends_recent_then_new_messages(db: PgPool) {
     let more = next().await;
     assert!(more.contains("새 글"), "{more}");
     assert!(more.contains("\"username\":\"demo1\""), "{more}");
+}
+
+#[sqlx::test]
+async fn deleting_a_broadcast_clears_its_chat_and_ends_streams(db: PgPool) {
+    // 방송을 지우면 채팅방도 지우고, 듣던 연결은 끝난다(#86 변이 시험에서 빠진 것)
+    let hub = Hub::default();
+    let r = router(db, hub.clone(), 100);
+    let (bid, owner) = broadcast(&r).await;
+    assert_eq!(
+        say(&r, bid, "곧 지워짐", Some(&owner)).await.0,
+        StatusCode::NO_CONTENT
+    );
+    let res = r
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/broadcasts/{bid}/chat/stream"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let mut body = res.into_body().into_data_stream();
+    // 처음 신호와 최근 글을 받는다
+    let mut got = String::new();
+    while !got.contains("곧 지워짐") {
+        let c = tokio::time::timeout(Duration::from_secs(3), body.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        got.push_str(std::str::from_utf8(&c).unwrap());
+    }
+    let (st, _, _) = call(
+        &r,
+        "DELETE",
+        &format!("/broadcasts/{bid}"),
+        None,
+        Some(&owner),
+    )
+    .await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+    // 듣던 연결이 끝난다(본문 끝)
+    let end = tokio::time::timeout(Duration::from_secs(3), async {
+        while let Some(c) = body.next().await {
+            c.unwrap();
+        }
+    })
+    .await;
+    assert!(end.is_ok(), "방송을 지우면 채팅 연결이 끝나야 한다");
+    assert!(hub.subscribe(bid).0.is_empty());
+}
+
+#[test]
+fn message_ids_do_not_restart_from_one() {
+    // 서버를 다시 켜도(새 허브) 번호가 앞 번호보다 커서, 열린 화면이 새 글을 버리지 않는다(#86 리뷰)
+    let first = Hub::default().publish(1, "chat", "a", "x").id;
+    std::thread::sleep(Duration::from_millis(5));
+    let second = Hub::default().publish(1, "chat", "a", "y").id;
+    assert!(first > 1_000_000_000, "{first}");
+    assert!(second > first, "{first} {second}");
 }
 
 #[test]

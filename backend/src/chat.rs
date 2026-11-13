@@ -57,10 +57,21 @@ struct Room {
     recent: VecDeque<Arc<Message>>,
 }
 
-#[derive(Default)]
 struct Inner {
     rooms: HashMap<i64, Room>,
     next_id: i64,
+}
+
+impl Default for Inner {
+    /// 메시지 번호는 서버를 켠 시각(마이크로초)에서 시작한다. 서버를 다시 켜도 번호가 앞 번호와 겹치지 않아,
+    /// 열려 있던 화면이 새 글을 "이미 본 글"로 버리지 않는다(#86 리뷰).
+    fn default() -> Self {
+        let now = OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000;
+        Self {
+            rooms: HashMap::new(),
+            next_id: i64::try_from(now).unwrap_or(0),
+        }
+    }
 }
 
 /// 방송별 채팅방. 복사해도 같은 방들을 가리킨다.
@@ -159,10 +170,15 @@ pub async fn stream(
         .await?;
     found.ok_or(ApiError::NotFound)?;
     let (recent, rx) = state.chat.subscribe(id);
-    let first = tokio_stream::iter(recent);
+    // 처음에 짧은 주석 신호를 하나 보낸다. 운영 프록시(Caddy 압축)는 첫 글이 나올 때까지 응답 머리를 보내지 않아,
+    // 방이 조용하면 브라우저가 "연결됨"을 늦게 안다(#86 리뷰). 화면은 주석을 무시한다.
+    let hello = tokio_stream::iter([Event::default().comment("ok")]);
+    let first = tokio_stream::iter(recent).map(|m| event(&m));
     // 너무 늦어 밀린 메시지(Lagged)는 건너뛴다
-    let rest = BroadcastStream::new(rx).filter_map(Result::ok);
-    let s = first.chain(rest).map(|m| Ok(event(&m)));
+    let rest = BroadcastStream::new(rx)
+        .filter_map(Result::ok)
+        .map(|m| event(&m));
+    let s = hello.chain(first).chain(rest).map(Ok);
     // 프록시가 오래 조용한 연결을 끊지 않게 15초마다 빈 신호를 보낸다
     Ok(Sse::new(s).keep_alive(KeepAlive::default()))
 }
