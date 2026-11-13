@@ -52,6 +52,7 @@ import {
   rotateStreamKey,
   signup,
   updateBroadcast,
+  setSchedule,
 } from './api';
 // 플레이어(OvenPlayer+hls.js, 약 1MB)는 상세 화면에서만 불러온다. 목록 화면을 가볍게 하려는 것이다.
 const player = () => import('./player');
@@ -219,6 +220,32 @@ async function listPage(main: HTMLElement) {
     }
   };
   main.append(favs);
+  // 곧 시작(#114): 목록 중 대기 중이고 예정 시각이 있는 방송을 시각 순으로. 지났으면 "늦어지는 중"
+  const upcoming = el('section', { className: 'panel upcoming' });
+  upcoming.hidden = true;
+  const showUpcoming = (items: Broadcast[]) => {
+    const list = items
+      .filter((b) => b.status === 'ready' && b.scheduled_at)
+      .sort((a, b) => Date.parse(a.scheduled_at!) - Date.parse(b.scheduled_at!));
+    upcoming.replaceChildren(
+      el('h3', { textContent: '곧 시작' }),
+      el(
+        'ul',
+        {},
+        ...list.map((b) => {
+          const late = Date.parse(b.scheduled_at!) < Date.now();
+          return el(
+            'li',
+            {},
+            el('a', { href: `#/b/${b.id}`, textContent: b.title }),
+            el('span', { className: 'hint', textContent: ` ${b.owner_username} · ${shortTime(b.scheduled_at!)}${late ? ' · 늦어지는 중' : ''}` }),
+          );
+        }),
+      ),
+    );
+    upcoming.hidden = list.length === 0;
+  };
+  main.append(upcoming);
   main.append(el('h2', { textContent: '방송 목록' }));
   // 제목 검색(#96). 치고 잠깐 멈추면 찾는다. 10초마다 새로 읽을 때도 검색어를 지킨다.
   const search = el('input', { type: 'search', className: 'search', placeholder: '방송 제목 검색', maxLength: 50, ariaLabel: '방송 제목 검색' });
@@ -247,6 +274,7 @@ async function listPage(main: HTMLElement) {
     try {
       const items = await listBroadcasts(q, cat);
       if (my !== seq) return;
+      showUpcoming(items);
       if (items.length === 0) {
         box.replaceChildren(el('p', { className: 'hint', textContent: q || cat ? '찾는 방송이 없습니다.' : '아직 방송이 없습니다.' }));
         return;
@@ -384,6 +412,8 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
 
   const statusBox = el('span');
   const titleEl = el('h2');
+  // 시작 예정 시각 안내(#114). 대기 중이고 예정이 있을 때만
+  const scheduleNote = el('p', { className: 'hint schedule-note' });
   const descEl = el('p', { className: 'description' });
   const moreBtn = el('button', { type: 'button', className: 'small more', textContent: '더보기', hidden: true });
   moreBtn.onclick = () => {
@@ -442,6 +472,8 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
     const vt = viewersText(b);
     if (vt) statusBox.append(el('span', { className: 'viewers', textContent: vt }));
     titleEl.textContent = b.title;
+    scheduleNote.textContent = b.status === 'ready' && b.scheduled_at ? `시작 예정: ${shortTime(b.scheduled_at)}` : '';
+    scheduleNote.hidden = !scheduleNote.textContent;
     if (descEl.textContent !== b.description) {
       descEl.textContent = b.description;
       // 긴 설명은 접어 둔다(휴대폰에서 방송하기·댓글까지 한참 내려가야 하던 문제)
@@ -490,6 +522,7 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
   main.append(
     el('div', { className: 'detail-head' }, statusBox, titleEl),
     el('p', { className: 'hint owner-line' }, `방송자: ${b.owner_username} `, followButton(b.owner_id, b.owner_username)),
+    scheduleNote,
     playerBox,
     soundBtn,
     netNote,
@@ -1631,8 +1664,28 @@ function studioPanel(current: () => Broadcast, publisher: Publisher): { el: HTML
   return { el: panel, update };
 }
 
+/** datetime-local 칸에 넣을 값(이 기기 시각, 분까지) */
+function localInputValue(iso: string): string {
+  const d = new Date(iso);
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
 function ownerPanel(b: Broadcast, onChange: (b: Broadcast) => void, publisher: Publisher): { el: HTMLElement; update: (b: Broadcast) => void } {
   const error = el('p', { className: 'error', role: 'alert' });
+  // 시작 예정 시각(#114): 이 기기 시각으로 고르면 서버에는 UTC로 보낸다. 지우기는 null.
+  const when = el('input', { type: 'datetime-local', className: 'schedule-input', ariaLabel: '시작 예정 시각', value: b.scheduled_at ? localInputValue(b.scheduled_at) : '' });
+  const setWhen = el('button', { type: 'button', className: 'small', textContent: '예정 저장' });
+  const clearWhen = el('button', { type: 'button', className: 'small ghost', textContent: '예정 지우기' });
+  setWhen.onclick = action(setWhen, error, async () => {
+    if (!when.value) throw new Error('예정 시각을 고르세요');
+    onChange(await setSchedule(b.id, new Date(when.value).toISOString()));
+  });
+  clearWhen.onclick = action(clearWhen, error, async () => {
+    onChange(await setSchedule(b.id, null));
+    when.value = '';
+  });
+  const scheduleRow = el('div', { className: 'row schedule-tools' }, el('span', { className: 'hint', textContent: '시작 예정' }), when, setWhen, clearWhen);
 
   // 수정
   const title = el('input', { value: b.title, maxLength: 100, ariaLabel: '방송 제목', placeholder: '방송 제목 (100자 이하)' });
@@ -1700,6 +1753,8 @@ function ownerPanel(b: Broadcast, onChange: (b: Broadcast) => void, publisher: P
   const endedNote = el('p', { className: 'hint', textContent: '종료된 방송은 다시 송출할 수 없습니다. 새로 방송하려면 방송을 새로 만드세요.' });
   const update = (nb: Broadcast) => {
     b = nb;
+    // 예정 시각은 대기 중일 때만 정한다(#114)
+    scheduleRow.hidden = nb.status !== 'ready';
     const ended = nb.status === 'ended';
     showPublish.hidden = ended;
     end.hidden = ended;
@@ -1714,6 +1769,7 @@ function ownerPanel(b: Broadcast, onChange: (b: Broadcast) => void, publisher: P
     description,
     category,
     el('div', { className: 'row' }, save, saved, showPublish, end, del),
+    scheduleRow,
     endedNote,
     publishBox,
     error,

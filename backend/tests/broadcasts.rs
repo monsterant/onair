@@ -1067,3 +1067,114 @@ async fn every_category_works_and_old_broadcasts_are_etc(db: PgPool) {
     let (_, v) = call(&r, "GET", &format!("/broadcasts/{id}"), None, None).await;
     assert_eq!(v["category"], "etc");
 }
+
+/// #114: 시작 예정 시각. 주인만, 대기 중인 방송만, 지금부터 7일 안, null이면 지움, 방송 정보에 보인다.
+#[sqlx::test]
+async fn owner_can_schedule_a_ready_broadcast(db: PgPool) {
+    let r = router(db.clone(), OmeApi::default()).await;
+    let owner = login(&r, 1).await;
+    let other = login(&r, 2).await;
+    let b = create(&r, &owner, "예정 방송").await;
+    let id = b["id"].as_i64().unwrap();
+    assert!(b["scheduled_at"].is_null());
+    let path = format!("/broadcasts/{id}/schedule");
+    let fmt = |d: time::Duration| {
+        (time::OffsetDateTime::now_utc() + d)
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap()
+    };
+    let soon = fmt(time::Duration::hours(2));
+    // 비로그인 401, 다른 사람 403
+    assert_eq!(
+        call(&r, "PUT", &path, Some(json!({ "at": soon })), None)
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        call(&r, "PUT", &path, Some(json!({ "at": soon })), Some(&other))
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    // 주인: 정하면 방송 정보와 목록에 보인다
+    let (st, v) = call(&r, "PUT", &path, Some(json!({ "at": soon })), Some(&owner)).await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(v["scheduled_at"].is_string());
+    let (_, list) = call(&r, "GET", "/broadcasts", None, None).await;
+    assert!(list[0]["scheduled_at"].is_string());
+    // 지난 시각, 7일 넘는 시각, 형식이 틀린 값은 거절. 예정은 그대로
+    for bad in [
+        fmt(time::Duration::minutes(-1)),
+        fmt(time::Duration::days(8)),
+    ] {
+        assert_eq!(
+            call(&r, "PUT", &path, Some(json!({ "at": bad })), Some(&owner))
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    assert_eq!(
+        call(
+            &r,
+            "PUT",
+            &path,
+            Some(json!({ "at": "내일 저녁" })),
+            Some(&owner)
+        )
+        .await
+        .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    let (_, v) = call(&r, "GET", &format!("/broadcasts/{id}"), None, None).await;
+    assert!(v["scheduled_at"].is_string());
+    // 7일 거의 끝도 된다
+    assert_eq!(
+        call(
+            &r,
+            "PUT",
+            &path,
+            Some(json!({ "at": fmt(time::Duration::days(7) - time::Duration::minutes(1)) })),
+            Some(&owner)
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    // null이면 지운다
+    let (st, v) = call(&r, "PUT", &path, Some(json!({ "at": null })), Some(&owner)).await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(v["scheduled_at"].is_null());
+    // 다른 방송의 예정은 그대로(정하지 않음)
+    let b2 = create(&r, &owner, "다른 방송").await;
+    let (_, v) = call(&r, "PUT", &path, Some(json!({ "at": soon })), Some(&owner)).await;
+    assert!(v["scheduled_at"].is_string());
+    let (_, v2) = call(&r, "GET", &format!("/broadcasts/{}", b2["id"]), None, None).await;
+    assert!(v2["scheduled_at"].is_null());
+    // 시작한(방송 중) 방송과 종료된 방송에는 정할 수 없다(409)
+    sqlx::query("UPDATE broadcasts SET status = 'live' WHERE id = $1")
+        .bind(id)
+        .execute(&db)
+        .await
+        .unwrap();
+    assert_eq!(
+        call(&r, "PUT", &path, Some(json!({ "at": soon })), Some(&owner))
+            .await
+            .0,
+        StatusCode::CONFLICT
+    );
+    // 없는 방송 404
+    assert_eq!(
+        call(
+            &r,
+            "PUT",
+            "/broadcasts/999999/schedule",
+            Some(json!({ "at": soon })),
+            Some(&owner)
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+}

@@ -315,6 +315,16 @@ textarea {
   text-decoration: underline;
 }
 
+.upcoming ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.upcoming li {
+  padding: 2px 0;
+}
+
 .search {
   width: 100%;
   max-width: 420px;
