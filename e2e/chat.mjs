@@ -73,7 +73,8 @@ try {
   check('owner receives other user message', await waitFor(() => has(owner, '반가워요'), 5000));
   const ownerLines = await lines(owner);
   check('own message appears once (no duplicates)', ownerLines.filter((l) => l.includes('안녕하세요 방송자입니다')).length === 1, JSON.stringify(ownerLines));
-  check('username shown', /^guest_\w+ 반가워요$/.test(ownerLines.find((l) => l.includes('반가워요')) ?? ''), JSON.stringify(ownerLines));
+  // 방송 주인 화면이라 남의 채팅 뒤에 제한 버튼 글자가 붙는다(#87)
+  check('username shown', /^guest_\w+ 반가워요( 10분 제한계속 제한)?$/.test(ownerLines.find((l) => l.includes('반가워요')) ?? ''), JSON.stringify(ownerLines));
   // 늦게 들어온 사람도 최근 대화를 본다
   const late = await (await browser.createBrowserContext()).newPage();
   await late.goto(`${BASE}/#/b/${bid}`, { waitUntil: 'networkidle2' });

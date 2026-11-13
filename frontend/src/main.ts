@@ -21,6 +21,10 @@ import {
   createComment,
   sendChat,
   type ChatMessage,
+  banUser,
+  listBans,
+  setSlowMode,
+  unbanUser,
   deleteComment,
   listComments,
   updateComment,
@@ -435,7 +439,7 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
   if (studio) main.append(studio.el);
   main.append(descEl, moreBtn);
   if (owner) main.append(owner.el);
-  main.append(recordingsPanel(id), donationsPanel(b, gen), commentsPanel(id, gen));
+  main.append(recordingsPanel(id), donationsPanel(b, gen), commentsPanel(id, gen, b.owner_id));
   paint();
 
   // 5초마다 상태를 다시 본다(방송이 시작·종료되면 플레이어를 켜고 끈다)
@@ -712,6 +716,7 @@ function chatPanel(broadcastId: number, current: () => Broadcast): HTMLElement {
   const empty = el('li', { className: 'chat-empty hint', textContent: '아직 채팅이 없습니다.' });
   list.append(empty);
 
+  const isOwner = () => !!me && me.id === current().owner_id;
   const add = (m: ChatMessage) => {
     if (seen.has(m.id)) return;
     seen.add(m.id);
@@ -724,6 +729,10 @@ function chatPanel(broadcastId: number, current: () => Broadcast): HTMLElement {
           el('li', { className: 'chat-line donation' }, el('span', { className: 'chat-tag', textContent: '후원' }), ' ', el('strong', { textContent: m.username }), ` 님이 ${m.text}`)
         : el('li', { className: 'chat-line' }, el('strong', { textContent: m.username }), ` ${m.text}`);
     li.dataset.id = String(m.id);
+    // 방송 주인에게는 남의 채팅 옆에 제한 버튼(#87)
+    if (m.kind === 'chat' && m.user_id !== null && isOwner() && m.user_id !== me?.id) {
+      li.append(' ', banButtons(broadcastId, m.user_id, m.username, error));
+    }
     list.append(li);
     // 너무 많이 쌓이지 않게 앞에서 지운다
     while (list.children.length > 200) {
@@ -789,7 +798,76 @@ function chatPanel(broadcastId: number, current: () => Broadcast): HTMLElement {
     source?.close();
   });
 
-  const panel = el('section', { className: 'chat-panel panel' }, el('h3', {}, '실시간 채팅', state), list);
+  const panel = el('section', { className: 'chat-panel panel' }, el('h3', {}, '실시간 채팅', state));
+  // 천천히 모드(#87): 주인은 고르고, 시청자는 안내를 본다. 방송 정보(5초마다 새로 읽음)를 따라간다.
+  const slowHint = el('p', { className: 'hint slow-hint' });
+  const showSlow = () => {
+    const s = current().slow_mode_secs ?? 0;
+    slowHint.textContent = s > 0 && !isOwner() ? `천천히 모드: ${s}초에 한 번 쓸 수 있습니다.` : '';
+    slowHint.hidden = !slowHint.textContent;
+  };
+  showSlow();
+  const slowTimer = setInterval(showSlow, 2_000);
+  cleanup.push(() => clearInterval(slowTimer));
+  panel.append(slowHint);
+  // 제한 목록(주인만)
+  const bans = el('ul', { className: 'ban-list' });
+  const loadBans = async () => {
+    if (!isOwner()) return;
+    try {
+      const list = await listBans(broadcastId);
+      bans.replaceChildren(
+        ...list.map((x) => {
+          const off = el('button', { type: 'button', className: 'small ghost', textContent: '해제' });
+          off.onclick = async () => {
+            off.disabled = true;
+            try {
+              await unbanUser(broadcastId, x.user_id);
+              await loadBans();
+            } catch (e) {
+              error.textContent = message(e);
+              off.disabled = false;
+            }
+          };
+          return el('li', {}, el('strong', { textContent: x.username }), ` ${x.until ? `${shortTime(x.until)}까지` : '해제할 때까지'} `, off);
+        }),
+      );
+      bans.hidden = list.length === 0;
+    } catch {
+      // 목록을 못 읽어도 채팅은 그대로 둔다
+    }
+  };
+  if (isOwner()) {
+    const slow = el(
+      'select',
+      { className: 'slow-select', ariaLabel: '천천히 모드' },
+      ...[0, 5, 10, 30].map((s) => el('option', { value: String(s), textContent: s === 0 ? '천천히 모드 끔' : `천천히 모드 ${s}초` })),
+    );
+    slow.value = String(current().slow_mode_secs ?? 0);
+    slow.onchange = async () => {
+      slow.disabled = true;
+      try {
+        await setSlowMode(broadcastId, Number(slow.value));
+        error.textContent = Number(slow.value) > 0 ? `천천히 모드를 ${slow.value}초로 켰습니다.` : '천천히 모드를 껐습니다.';
+      } catch (e) {
+        error.textContent = message(e);
+      } finally {
+        slow.disabled = false;
+      }
+    };
+    bans.hidden = true;
+    panel.append(el('div', { className: 'row owner-tools' }, slow), bans);
+    void loadBans();
+    // 댓글 옆 버튼으로 막은 것, 기한이 지난 것도 목록에 맞춰지게 10초마다 다시 읽는다(#94)
+    const bansTimer = setInterval(() => void loadBans(), 10_000);
+    const onBansChanged = () => void loadBans();
+    window.addEventListener(BANS_CHANGED, onBansChanged);
+    cleanup.push(() => {
+      clearInterval(bansTimer);
+      window.removeEventListener(BANS_CHANGED, onBansChanged);
+    });
+  }
+  panel.append(list);
   if (me && current().status === 'ended') {
     // 종료된 방송에는 쓸 수 없으니 입력 칸 대신 안내를 보여 준다(#90 R5)
     panel.append(el('p', { className: 'hint', textContent: '종료된 방송이라 채팅을 쓸 수 없습니다.' }));
@@ -819,7 +897,35 @@ function chatPanel(broadcastId: number, current: () => Broadcast): HTMLElement {
   return panel;
 }
 
-function commentsPanel(broadcastId: number, gen: number): HTMLElement {
+const BANS_CHANGED = 'onair-bans-changed';
+
+/**
+ * 방송 주인이 글 옆에서 쓰는 제한 버튼(#87). "10분" 또는 "계속"(해제할 때까지). 결과는 note에 적는다.
+ * 서버가 주인인지 다시 확인한다(화면에서 버튼을 보여 주는 것은 편의일 뿐).
+ */
+function banButtons(broadcastId: number, userId: number, username: string, note: HTMLElement): HTMLElement {
+  const make = (label: string, ten: boolean) => {
+    const b = el('button', { type: 'button', className: 'small ghost ban', textContent: label, title: `${username} 님의 글쓰기 막기` });
+    b.onclick = async () => {
+      if (!confirm(`${username} 님이 이 방송에 채팅·댓글을 쓰지 못하게 ${ten ? '10분 동안' : '해제할 때까지'} 막을까요?`)) return;
+      b.disabled = true;
+      try {
+        await banUser(broadcastId, userId, ten);
+        note.textContent = `${username} 님을 ${ten ? '10분 동안' : '해제할 때까지'} 막았습니다.`;
+        // 채팅 칸의 제한 목록에 알린다. 댓글 옆 버튼으로 막아도 목록이 바로 바뀐다(#94 R3).
+        window.dispatchEvent(new Event(BANS_CHANGED));
+      } catch (e) {
+        note.textContent = message(e);
+      } finally {
+        b.disabled = false;
+      }
+    };
+    return b;
+  };
+  return el('span', { className: 'ban-buttons' }, make('10분 제한', true), make('계속 제한', false));
+}
+
+function commentsPanel(broadcastId: number, gen: number, ownerId: number): HTMLElement {
   const list = el('ul', { className: 'comments' });
   const error = el('p', { className: 'error', role: 'alert' });
   const count = el('span', { className: 'hint' });
@@ -844,6 +950,10 @@ function commentsPanel(broadcastId: number, gen: number): HTMLElement {
     const text = el('p', { className: 'comment-body', textContent: c.body });
     const li = el('li', { className: 'comment' }, head, text);
     li.dataset.id = String(c.id);
+    // 방송 주인에게는 남의 댓글 옆에 제한 버튼(#87)
+    if (me && me.id === ownerId && me.id !== c.author_id) {
+      head.append(banButtons(broadcastId, c.author_id, c.author_username, error));
+    }
     if (me?.id !== c.author_id) return li;
 
     const rowError = el('p', { className: 'error', role: 'alert' });

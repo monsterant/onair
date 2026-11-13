@@ -281,7 +281,9 @@ async fn announce(state: &AppState, d: &Donation) {
     if !d.message.is_empty() {
         text.push_str(&format!(" — {}", d.message));
     }
-    state.chat.publish(d.broadcast_id, "donation", &name, &text);
+    state
+        .chat
+        .publish(d.broadcast_id, "donation", None, &name, &text);
 }
 
 /// 1234567 → "1,234,567"

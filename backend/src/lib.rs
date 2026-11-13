@@ -8,6 +8,7 @@ pub mod chat;
 pub mod comments;
 pub mod donations;
 pub mod guard;
+pub mod moderation;
 pub mod ome;
 pub mod ome_api;
 pub mod recordings;
@@ -66,6 +67,16 @@ pub fn app(state: AppState) -> Router {
         // 실시간 채팅(#86): 받기는 SSE, 보내기는 POST
         .route("/broadcasts/{id}/chat/stream", get(chat::stream))
         .route("/broadcasts/{id}/chat", axum::routing::post(chat::send))
+        // 시청자 제한·천천히 모드(#87). 방송 주인만.
+        .route("/broadcasts/{id}/bans", get(moderation::list))
+        .route(
+            "/broadcasts/{id}/bans/{user_id}",
+            axum::routing::put(moderation::ban).delete(moderation::unban),
+        )
+        .route(
+            "/broadcasts/{id}/slow",
+            axum::routing::put(moderation::set_slow),
+        )
         .route("/broadcasts/{id}/end", post(broadcasts::end))
         .route("/broadcasts/{id}/stream-key", post(broadcasts::rotate_key))
         .route(

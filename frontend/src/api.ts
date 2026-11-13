@@ -18,6 +18,8 @@ export type Broadcast = {
   created_at: string;
   /** 지금 보는 사람 수(#85). 방송 중이고 서버가 셀 수 있을 때만 숫자 */
   viewers?: number | null;
+  /** 천천히 모드(초, 0이면 끔, #87) */
+  slow_mode_secs: number;
 };
 
 export type PublishInfo = { stream_name: string; stream_key: string; whip_path: string };
@@ -91,7 +93,16 @@ export const rotateStreamKey = (id: number) => api<PublishInfo>('POST', `/broadc
 
 export const listComments = (broadcastId: number) => api<Comment[]>('GET', `/broadcasts/${broadcastId}/comments`);
 /** 실시간 채팅 한 줄(#86). kind가 "donation"이면 후원 안내다. */
-export type ChatMessage = { id: number; kind: 'chat' | 'donation'; username: string; text: string; at: string };
+export type ChatMessage = { id: number; kind: 'chat' | 'donation'; user_id: number | null; username: string; text: string; at: string };
+
+/** 시청자 제한(#87). until이 null이면 해제할 때까지 */
+export type Ban = { user_id: number; username: string; until: string | null };
+export const listBans = (broadcastId: number) => api<Ban[]>('GET', `/broadcasts/${broadcastId}/bans`);
+export const banUser = (broadcastId: number, userId: number, tenMinutes: boolean) =>
+  api<void>('PUT', `/broadcasts/${broadcastId}/bans/${userId}`, { ten_minutes: tenMinutes });
+export const unbanUser = (broadcastId: number, userId: number) =>
+  api<void>('DELETE', `/broadcasts/${broadcastId}/bans/${userId}`);
+export const setSlowMode = (broadcastId: number, secs: number) => api<void>('PUT', `/broadcasts/${broadcastId}/slow`, { secs });
 export const sendChat = (broadcastId: number, text: string) => api<void>('POST', `/broadcasts/${broadcastId}/chat`, { text });
 /** 채팅 받기 주소(SSE). 브라우저의 EventSource로 연다. */
 export const chatStreamUrl = (broadcastId: number) => `/api/broadcasts/${broadcastId}/chat/stream`;
