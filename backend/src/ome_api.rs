@@ -5,7 +5,11 @@
 //! - 주소를 설정하지 않으면(로컬 개발, 시험) 아무 일도 하지 않는다.
 //! - OME가 응답하지 않아도 방송 API는 실패시키지 않는다. 끊기는 웹훅(종료된 방송 거절)과 맞춰 보기가 한 번 더 챙긴다.
 
-use std::{collections::HashSet, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::Deserialize;
@@ -13,7 +17,15 @@ use serde::Deserialize;
 #[derive(Clone, Default)]
 pub struct OmeApi {
     inner: Option<Inner>,
+    /// 시청자 수를 잠깐 모아 둔다(#85). 목록을 자주 불러도 OME에 매번 묻지 않게.
+    viewers_cache: Arc<Mutex<ViewersCache>>,
 }
+
+/// 스트림 이름 → (물어본 때, 시청자 수)
+type ViewersCache = HashMap<String, (Instant, Option<i64>)>;
+
+/// 시청자 수를 모아 두는 시간
+const VIEWERS_TTL: Duration = Duration::from_secs(5);
 
 /// 로그에 찍혀도 토큰이 보이지 않게 주소만 보여 준다
 impl std::fmt::Debug for OmeApi {
@@ -47,6 +59,7 @@ impl OmeApi {
                 auth: format!("Basic {}", STANDARD.encode(token)),
                 http,
             }),
+            viewers_cache: Default::default(),
         }
     }
 
@@ -96,6 +109,43 @@ impl OmeApi {
         }
         let list: StreamList = r.json().await.ok()?;
         Some(list.response.into_iter().collect())
+    }
+
+    /// 지금 이 스트림을 WebRTC로 보는 사람 수(#85). 물어볼 수 없으면 None.
+    /// OME 통계의 LL-HLS 접속 수는 시청자가 없어도 0이 아니어서(로컬 확인: 시청자 0명에 8) 세지 않는다.
+    /// 방송자는 송출만 하고 자기 방송을 WebRTC로 보지 않으므로 들어가지 않는다.
+    /// 결과(실패 포함)는 5초 동안 모아 둔다. OME가 느리거나 꺼져 있어도 목록이 매번 기다리지 않게.
+    pub async fn viewers(&self, name: &str) -> Option<i64> {
+        let i = self.inner.as_ref()?;
+        if let Some((at, v)) = self.viewers_cache.lock().unwrap().get(name)
+            && at.elapsed() < VIEWERS_TTL
+        {
+            return *v;
+        }
+        let url = format!(
+            "{}/v1/stats/current/vhosts/default/apps/app/streams/{}",
+            i.base, name
+        );
+        let got = async {
+            let r = i
+                .http
+                .get(&url)
+                .header("Authorization", &i.auth)
+                .send()
+                .await
+                .ok()?;
+            if !r.status().is_success() {
+                return None;
+            }
+            let v: serde_json::Value = r.json().await.ok()?;
+            v["response"]["connections"]["webrtc"].as_i64()
+        }
+        .await;
+        let mut cache = self.viewers_cache.lock().unwrap();
+        // 끝난 스트림 이름이 계속 쌓이지 않게 오래된 것은 지운다
+        cache.retain(|_, (at, _)| at.elapsed() < VIEWERS_TTL * 12);
+        cache.insert(name.to_string(), (Instant::now(), got));
+        got
     }
 
     fn app_url(base: &str, action: &str) -> String {

@@ -40,6 +40,16 @@ pub struct Broadcast {
     pub ended_at: Option<OffsetDateTime>,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
+    /// 지금 보는 사람 수(#85). 방송 중이고 미디어 서버가 답할 때만 숫자, 아니면 null.
+    #[sqlx(default)]
+    pub viewers: Option<i64>,
+}
+
+/// 방송 중인 것에 시청자 수를 채운다(#85). 방송 중인 것은 보통 몇 개라 차례로 묻는다(결과는 5초 모아 둠).
+async fn fill_viewers(state: &AppState, rows: &mut [Broadcast]) {
+    for b in rows.iter_mut().filter(|b| b.status == "live") {
+        b.viewers = state.ome.viewers(&b.stream_name).await;
+    }
 }
 
 /// 방송 조회 SQL 앞부분. sqlx는 SQL을 문자열 상수로만 받으므로(SQL 끼워 넣기 방지) concat!으로 붙인다.
@@ -109,6 +119,8 @@ pub async fn list(State(state): State<AppState>) -> Result<Json<Vec<Broadcast>>,
     ))
     .fetch_all(&state.db)
     .await?;
+    let mut rows = rows;
+    fill_viewers(&state, &mut rows).await;
     Ok(Json(rows))
 }
 
@@ -124,7 +136,10 @@ pub async fn get(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Json<Broadcast>, ApiError> {
-    Ok(Json(find(&state, id).await?))
+    let mut b = [find(&state, id).await?];
+    fill_viewers(&state, &mut b).await;
+    let [b] = b;
+    Ok(Json(b))
 }
 
 /// 소유자인지 확인한다. 아니면 403, 방송이 없으면 404.
