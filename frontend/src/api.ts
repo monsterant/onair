@@ -79,6 +79,12 @@ export const guestLogin = () => api<User>('POST', '/auth/guest');
 /** 켜진 기능(#25 A7) */
 export const getConfig = () => api<{ demo_login: boolean; donations: boolean }>('GET', '/config');
 
+/** 즐겨찾는 방송자(#102). live는 지금 방송 중이면 그 방송 */
+export type Followed = { user_id: number; username: string; live: { id: number; title: string } | null };
+export const listFollows = () => api<Followed[]>('GET', '/follows');
+export const followUser = (userId: number) => api<void>('PUT', `/follows/${userId}`);
+export const unfollowUser = (userId: number) => api<void>('DELETE', `/follows/${userId}`);
+
 /** 방송 목록. q가 있으면 제목에 그 글자가 들어 있는 방송만(#96) */
 export const listBroadcasts = (q = '') =>
   api<Broadcast[]>('GET', q.trim() ? `/broadcasts?q=${encodeURIComponent(q.trim())}` : '/broadcasts');

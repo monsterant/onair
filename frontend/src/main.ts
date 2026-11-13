@@ -37,6 +37,9 @@ import {
   endBroadcast,
   getBroadcast,
   listBroadcasts,
+  listFollows,
+  followUser,
+  unfollowUser,
   login,
   logout,
   publishInfo,
@@ -178,6 +181,37 @@ async function listPage(main: HTMLElement) {
       ),
     );
   }
+  // 즐겨찾는 방송자(#102): 로그인했고 1명 이상일 때만. 방송 중이면 그 방송으로 가는 링크.
+  const favs = el('section', { className: 'panel follows' });
+  favs.hidden = true;
+  const loadFavs = async () => {
+    if (!me) return;
+    try {
+      const list = await listFollows();
+      favs.replaceChildren(
+        el('h3', { textContent: '즐겨찾는 방송자' }),
+        el(
+          'ul',
+          {},
+          ...list.map((f) =>
+            el(
+              'li',
+              {},
+              el('strong', { textContent: f.username }),
+              ' ',
+              f.live
+                ? el('a', { href: `#/b/${f.live.id}`, textContent: `방송 중: ${f.live.title}` })
+                : el('span', { className: 'hint', textContent: '쉬는 중' }),
+            ),
+          ),
+        ),
+      );
+      favs.hidden = list.length === 0;
+    } catch {
+      // 즐겨찾기를 못 읽어도 방송 목록은 그대로 둔다
+    }
+  };
+  main.append(favs);
   main.append(el('h2', { textContent: '방송 목록' }));
   // 제목 검색(#96). 치고 잠깐 멈추면 찾는다. 10초마다 새로 읽을 때도 검색어를 지킨다.
   const search = el('input', { type: 'search', className: 'search', placeholder: '방송 제목 검색', maxLength: 50, ariaLabel: '방송 제목 검색' });
@@ -216,8 +250,11 @@ async function listPage(main: HTMLElement) {
     clearTimeout(typing);
     typing = setTimeout(() => void load(), 300);
   };
-  await load();
-  const timer = setInterval(load, 10_000);
+  await Promise.all([load(), loadFavs()]);
+  const timer = setInterval(() => {
+    void load();
+    void loadFavs();
+  }, 10_000);
   cleanup.push(() => {
     clearInterval(timer);
     clearTimeout(typing);
@@ -423,7 +460,7 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
 
   main.append(
     el('div', { className: 'detail-head' }, statusBox, titleEl),
-    el('p', { className: 'hint', textContent: `방송자: ${b.owner_username}` }),
+    el('p', { className: 'hint owner-line' }, `방송자: ${b.owner_username} `, followButton(b.owner_id, b.owner_username)),
     playerBox,
     soundBtn,
     netNote,
@@ -597,6 +634,42 @@ function recordingsPanel(broadcastId: number): HTMLElement {
 
 const won = (n: number) => `${n.toLocaleString('ko-KR')}원`;
 const AMOUNTS = [1_000, 5_000, 10_000, 50_000];
+
+/**
+ * 방송자 즐겨찾기 버튼(#102). 로그인했고 내 방송이 아닐 때만 보인다. 지금 상태는 내 즐겨찾기 목록에서 읽는다.
+ */
+function followButton(ownerId: number, ownerName: string): HTMLElement | string {
+  if (!me || me.id === ownerId) return '';
+  const btn = el('button', { type: 'button', className: 'small ghost follow', textContent: '즐겨찾기', disabled: true });
+  let on = false;
+  const show = () => {
+    btn.textContent = on ? '즐겨찾기 해제' : '즐겨찾기';
+    btn.title = on ? `${ownerName} 님 즐겨찾기 해제` : `${ownerName} 님 즐겨찾기`;
+  };
+  void listFollows()
+    .then((list) => {
+      on = list.some((f) => f.user_id === ownerId);
+      show();
+    })
+    .catch(() => {})
+    .finally(() => {
+      btn.disabled = false;
+    });
+  btn.onclick = async () => {
+    btn.disabled = true;
+    try {
+      if (on) await unfollowUser(ownerId);
+      else await followUser(ownerId);
+      on = !on;
+      show();
+    } catch (e) {
+      alert(message(e));
+    } finally {
+      btn.disabled = false;
+    }
+  };
+  return btn;
+}
 
 /**
  * 방송 상세 화면의 후원 칸. 누구나 합계와 내역을 본다. 로그인한 다른 사용자는 후원한다(자기 방송은 안 됨).
