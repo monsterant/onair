@@ -335,6 +335,21 @@ fn hub_keeps_only_recent_messages() {
     assert!(hub.subscribe(1).0.is_empty());
 }
 
+/// #91 리뷰: 서버 전체 상한. 여러 곳을 합쳐 total을 넘으면 어느 곳이든 막히고, 하나 닫으면 다시 열린다.
+#[test]
+fn chat_streams_have_a_total_cap() {
+    let hub = Hub::default();
+    let a = hub.open_stream("a", 2, 3).unwrap();
+    let _b1 = hub.open_stream("b", 2, 3).unwrap();
+    let _b2 = hub.open_stream("b", 2, 3).unwrap();
+    // 전체 3개가 찼으니 새 곳(c)도, 아직 1개뿐인 a도 막힌다
+    assert!(hub.open_stream("c", 2, 3).is_none());
+    assert!(hub.open_stream("a", 2, 3).is_none());
+    // a 하나를 닫으면 다시 열린다
+    drop(a);
+    assert!(hub.open_stream("c", 2, 3).is_some());
+}
+
 /// #91: 한 곳(IP)에서 채팅 스트림을 20개까지만 연다. 21번째는 429, 하나 닫으면 다시 열린다. 다른 곳은 따로 센다.
 #[sqlx::test]
 async fn chat_streams_are_capped_per_client(db: PgPool) {

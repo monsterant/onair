@@ -154,15 +154,17 @@ impl Drop for StreamSlot {
 }
 
 impl Hub {
-    /// 보낸 곳(key) 하나가 동시에 열 수 있는 채팅 스트림을 max개로 막는다(#91).
+    /// 보낸 곳(IP) 하나가 동시에 열 수 있는 채팅 스트림을 per_client개로, 서버 전체를 total개로 막는다(#91).
+    /// 전체 상한은 IPv6 주소를 바꿔 가거나 여러 IP로 IP당 상한을 넘는 경우를 막는다(#91 리뷰).
     /// 자리가 있으면 그 자리(StreamSlot)를 주고, 없으면 None. 확인과 늘리기를 한 잠금 안에서 한다.
-    pub fn open_stream(&self, key: &str, max: usize) -> Option<StreamSlot> {
+    pub fn open_stream(&self, key: &str, per_client: usize, total: usize) -> Option<StreamSlot> {
         let mut inner = self.0.lock().unwrap();
-        let n = inner.streams.entry(key.to_string()).or_insert(0);
-        if *n >= max {
+        let all: usize = inner.streams.values().sum();
+        let n = inner.streams.get(key).copied().unwrap_or(0);
+        if n >= per_client || all >= total {
             return None;
         }
-        *n += 1;
+        *inner.streams.entry(key.to_string()).or_insert(0) += 1;
         Some(StreamSlot {
             hub: self.clone(),
             key: key.to_string(),
@@ -242,6 +244,8 @@ fn event(m: &Message) -> Event {
 
 /// 보낸 곳(IP) 하나가 동시에 열 수 있는 채팅 스트림 수(#91). 한 집·학교처럼 IP를 나눠 쓰는 곳도 넉넉하게.
 pub const STREAMS_PER_CLIENT: usize = 20;
+/// 서버 전체에서 동시에 열 수 있는 채팅 스트림 수(#91 리뷰). 무료 서버 한 대가 버틸 만큼.
+pub const STREAMS_TOTAL: usize = 2_000;
 
 pub async fn stream(
     State(state): State<AppState>,
@@ -256,7 +260,11 @@ pub async fn stream(
     // 한 곳에서 스트림을 수천 개 열어 서버 메모리·파일 핸들을 채우지 못하게 한다(#91)
     let slot = state
         .chat
-        .open_stream(&crate::guard::client_key(&headers), STREAMS_PER_CLIENT)
+        .open_stream(
+            &crate::guard::client_key(&headers),
+            STREAMS_PER_CLIENT,
+            STREAMS_TOTAL,
+        )
         .ok_or(ApiError::TooManyRequestsBecause(
             "채팅 연결이 너무 많습니다. 다른 창을 닫고 다시 여세요",
         ))?;
