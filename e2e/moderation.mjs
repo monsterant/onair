@@ -104,6 +104,15 @@ try {
   await owner.$eval('.notice-input', (i) => (i.value = ''));
   for (const b of await owner.$$('.notice-tools button')) if ((await b.evaluate((x) => x.textContent)) === '공지 올리기') await b.click();
   check('notice removed for viewer', await waitFor(async () => other.$eval('.chat-notice', (e) => e.hidden), 12000));
+  // 채팅 금칙어(#112): 주인이 저장하면 그 단어가 든 채팅은 거절된다. 시청자에게는 입력 칸이 없다
+  check('viewer has no banned words input', !(await other.$('.words-input')));
+  await owner.select('.chat-panel .slow-select', '0');
+  await owner.type('.words-input', ' Spam , 광고 ');
+  for (const b of await owner.$$('.words-tools button')) if ((await b.evaluate((x) => x.textContent)) === '금칙어 저장') await b.click();
+  check('owner sees cleaned words', await waitFor(async () => (await owner.$eval('.words-input', (i) => i.value)) === 'spam, 광고', 5000), await owner.$eval('.words-input', (i) => i.value));
+  await say(other, '무료 SPAM 사이트');
+  check('banned word rejected', await waitFor(async () => (await text(other, '.chat-panel .error')).includes('막은 단어'), 5000), await text(other, '.chat-panel .error'));
+  check('banned word message not shown', !(await has(owner, '무료 SPAM')));
 } catch (e) {
   check('no exception', false, e.stack);
 } finally {

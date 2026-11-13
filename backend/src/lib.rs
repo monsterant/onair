@@ -78,6 +78,11 @@ pub fn app(state: AppState) -> Router {
             "/broadcasts/{id}/slow",
             axum::routing::put(moderation::set_slow),
         )
+        // 채팅 금칙어(#112). 방송 주인만.
+        .route(
+            "/broadcasts/{id}/banned-words",
+            get(moderation::get_words).put(moderation::set_words),
+        )
         // 공지 고정(#109). 방송 주인만.
         .route(
             "/broadcasts/{id}/notice",

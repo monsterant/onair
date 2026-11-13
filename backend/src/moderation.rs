@@ -134,6 +134,91 @@ pub async fn unban(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// 금칙어 최대 개수와 한 단어 최대 글자 수(#112)
+pub const BANNED_WORDS_MAX: usize = 30;
+pub const BANNED_WORD_LEN: usize = 20;
+/// 받는 목록 자체의 최대 길이(빈 칸·같은 단어를 거르기 전, #117)
+pub const BANNED_WORDS_INPUT_MAX: usize = 100;
+
+#[derive(Deserialize)]
+pub struct WordsInput {
+    pub words: Vec<String>,
+}
+
+/// 금칙어 목록을 다듬는다: 앞뒤 빈칸을 빼고 소문자로, 빈 것은 버리고, 같은 것은 하나만(처음 순서 유지).
+/// 30개·20자를 넘거나 제어 문자·글자 방향 문자가 있으면 400.
+pub fn clean_words(raw: &[String]) -> Result<Vec<String>, ApiError> {
+    // 아주 긴 목록은 다듬기 전에 거절한다. 같은 단어 거르기가 개수의 제곱만큼 느려 서버를 묶을 수 있다(#117).
+    if raw.len() > BANNED_WORDS_INPUT_MAX {
+        return Err(ApiError::BadRequest("금칙어는 30개까지입니다"));
+    }
+    let mut out: Vec<String> = Vec::new();
+    for w in raw {
+        let w = w.trim();
+        // 글자 수는 소문자로 바꾸기 전에 센다. 터키어 İ처럼 바꾸면 길어지는 글자가 있다(#117).
+        if w.chars().count() > BANNED_WORD_LEN {
+            return Err(ApiError::BadRequest("금칙어는 한 단어에 20자까지입니다"));
+        }
+        let w = w.to_lowercase();
+        if w.chars()
+            .any(|c| c.is_control() || crate::comments::bidi_control(c))
+        {
+            return Err(ApiError::BadRequest("금칙어에 쓸 수 없는 글자가 있습니다"));
+        }
+        if w.chars().all(crate::comments::blank_like) {
+            continue;
+        }
+        if !out.contains(&w) {
+            out.push(w);
+        }
+    }
+    if out.len() > BANNED_WORDS_MAX {
+        return Err(ApiError::BadRequest("금칙어는 30개까지입니다"));
+    }
+    Ok(out)
+}
+
+/// 채팅 글에 금칙어가 들어 있는지(대소문자 무시, #112)
+pub fn has_banned_word(text: &str, words: &[String]) -> bool {
+    let t = text.to_lowercase();
+    words
+        .iter()
+        .any(|w| !w.is_empty() && t.contains(w.as_str()))
+}
+
+/// 금칙어 목록(방송 주인만 본다, #112)
+pub async fn get_words(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Path(id): Path<i64>,
+) -> Result<Json<Vec<String>>, ApiError> {
+    owner_of(&state, id, &user).await?;
+    let words: Vec<String> =
+        sqlx::query_scalar("SELECT banned_words FROM broadcasts WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or(ApiError::NotFound)?;
+    Ok(Json(words))
+}
+
+/// 금칙어 목록을 통째로 바꾼다(빈 목록이면 모두 지움, #112). 방송 주인만.
+pub async fn set_words(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Path(id): Path<i64>,
+    Json(input): Json<WordsInput>,
+) -> Result<Json<Vec<String>>, ApiError> {
+    owner_of(&state, id, &user).await?;
+    let words = clean_words(&input.words)?;
+    sqlx::query("UPDATE broadcasts SET banned_words = $2 WHERE id = $1")
+        .bind(id)
+        .bind(&words)
+        .execute(&state.db)
+        .await?;
+    Ok(Json(words))
+}
+
 /// 공지 최대 글자 수(#109)
 pub const NOTICE_MAX: usize = 100;
 
