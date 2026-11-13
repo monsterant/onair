@@ -45,10 +45,16 @@ pub struct Broadcast {
     pub viewers: Option<i64>,
 }
 
-/// 방송 중인 것에 시청자 수를 채운다(#85). 방송 중인 것은 보통 몇 개라 차례로 묻는다(결과는 5초 모아 둠).
+/// 방송 중인 것에 시청자 수를 채운다(#85). 여러 방송을 동시에 묻는다(#88 R1: 차례로 물으면 OME가 멈췄을 때 개수만큼 느려짐).
 async fn fill_viewers(state: &AppState, rows: &mut [Broadcast]) {
-    for b in rows.iter_mut().filter(|b| b.status == "live") {
-        b.viewers = state.ome.viewers(&b.stream_name).await;
+    let mut set = tokio::task::JoinSet::new();
+    for (i, b) in rows.iter().enumerate().filter(|(_, b)| b.status == "live") {
+        let ome = state.ome.clone();
+        let name = b.stream_name.clone();
+        set.spawn(async move { (i, ome.viewers(&name).await) });
+    }
+    while let Some(Ok((i, v))) = set.join_next().await {
+        rows[i].viewers = v;
     }
 }
 
@@ -233,7 +239,11 @@ pub async fn update(
     .bind(user.id)
     .execute(&state.db)
     .await?;
-    Ok(Json(find(&state, id).await?))
+    // 방송 중에 제목을 고쳐도 시청자 수가 사라지지 않게 채워서 돌려준다(#88 R2)
+    let mut b = [find(&state, id).await?];
+    fill_viewers(&state, &mut b).await;
+    let [b] = b;
+    Ok(Json(b))
 }
 
 pub async fn delete(

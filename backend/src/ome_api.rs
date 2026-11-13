@@ -26,6 +26,8 @@ type ViewersCache = HashMap<String, (Instant, Option<i64>)>;
 
 /// 시청자 수를 모아 두는 시간
 const VIEWERS_TTL: Duration = Duration::from_secs(5);
+/// 시청자 수 요청 하나를 기다리는 시간. 다른 OME 요청(3초)보다 짧게 둔다(#88 R1: OME가 멈추면 목록이 느려짐).
+const VIEWERS_TIMEOUT: Duration = Duration::from_millis(800);
 
 /// 로그에 찍혀도 토큰이 보이지 않게 주소만 보여 준다
 impl std::fmt::Debug for OmeApi {
@@ -117,11 +119,23 @@ impl OmeApi {
     /// 결과(실패 포함)는 5초 동안 모아 둔다. OME가 느리거나 꺼져 있어도 목록이 매번 기다리지 않게.
     pub async fn viewers(&self, name: &str) -> Option<i64> {
         let i = self.inner.as_ref()?;
-        if let Some((at, v)) = self.viewers_cache.lock().unwrap().get(name)
-            && at.elapsed() < VIEWERS_TTL
-        {
-            return *v;
-        }
+        // 모아 둔 값이 새것이면 쓴다. 오래됐으면, 묻기 전에 시각을 먼저 새로 적어 둔다(#88 R1).
+        // 그러면 묻는 동안 들어온 다른 요청은 기다리지 않고 예전 값을 쓴다(OME를 한꺼번에 여러 번 부르지 않음).
+        let stale = {
+            let mut cache = self.viewers_cache.lock().unwrap();
+            match cache.get(name) {
+                Some((at, v)) if at.elapsed() < VIEWERS_TTL => return *v,
+                Some((_, v)) => {
+                    let old = *v;
+                    cache.insert(name.to_string(), (Instant::now(), old));
+                    old
+                }
+                None => {
+                    cache.insert(name.to_string(), (Instant::now(), None));
+                    None
+                }
+            }
+        };
         let url = format!(
             "{}/v1/stats/current/vhosts/default/apps/app/streams/{}",
             i.base, name
@@ -131,6 +145,7 @@ impl OmeApi {
                 .http
                 .get(&url)
                 .header("Authorization", &i.auth)
+                .timeout(VIEWERS_TIMEOUT)
                 .send()
                 .await
                 .ok()?;
@@ -141,6 +156,9 @@ impl OmeApi {
             v["response"]["connections"]["webrtc"].as_i64()
         }
         .await;
+        // 시간 초과처럼 답을 못 받았으면 예전 값을 그대로 둔다(잠깐 끊긴 것으로 숫자가 사라지지 않게).
+        // 스트림이 없다고(404 등) 답한 것도 None이라 구분하지 않는다. 방송이 끝나면 화면이 숫자를 숨긴다.
+        let got = got.or(stale);
         let mut cache = self.viewers_cache.lock().unwrap();
         // 끝난 스트림 이름이 계속 쌓이지 않게 오래된 것은 지운다
         cache.retain(|_, (at, _)| at.elapsed() < VIEWERS_TTL * 12);

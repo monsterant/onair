@@ -33,6 +33,7 @@ try {
   await owner.click('form button[type=submit]');
   await sleep(1500);
   bid = Number(owner.url().split('/').pop());
+  await owner.waitForSelector('.detail-head .badge');
   check('no viewer count before live', (await viewersText(owner)) === '');
   await owner.waitForSelector('.start-screen');
   await owner.click('.start-screen');
