@@ -276,6 +276,12 @@ textarea {
   flex: none;
 }
 
+.search {
+  width: 100%;
+  max-width: 420px;
+  margin-bottom: 12px;
+}
+
 .ban-buttons {
   display: inline-flex;
   gap: 4px;

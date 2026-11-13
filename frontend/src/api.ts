@@ -79,7 +79,9 @@ export const guestLogin = () => api<User>('POST', '/auth/guest');
 /** 켜진 기능(#25 A7) */
 export const getConfig = () => api<{ demo_login: boolean; donations: boolean }>('GET', '/config');
 
-export const listBroadcasts = () => api<Broadcast[]>('GET', '/broadcasts');
+/** 방송 목록. q가 있으면 제목에 그 글자가 들어 있는 방송만(#96) */
+export const listBroadcasts = (q = '') =>
+  api<Broadcast[]>('GET', q.trim() ? `/broadcasts?q=${encodeURIComponent(q.trim())}` : '/broadcasts');
 export const getBroadcast = (id: number) => api<Broadcast>('GET', `/broadcasts/${id}`);
 export const createBroadcast = (title: string, description: string) =>
   api<Broadcast>('POST', '/broadcasts', { title, description });

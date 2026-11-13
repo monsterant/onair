@@ -179,13 +179,21 @@ async function listPage(main: HTMLElement) {
     );
   }
   main.append(el('h2', { textContent: '방송 목록' }));
+  // 제목 검색(#96). 치고 잠깐 멈추면 찾는다. 10초마다 새로 읽을 때도 검색어를 지킨다.
+  const search = el('input', { type: 'search', className: 'search', placeholder: '방송 제목 검색', maxLength: 50, ariaLabel: '방송 제목 검색' });
+  main.append(search);
   const box = el('div', { className: 'list', textContent: '불러오는 중...' });
   main.append(box);
+  // 늦게 온 예전 응답이 새 검색 결과를 덮지 않게 순서 번호를 붙인다
+  let seq = 0;
   const load = async () => {
+    const my = ++seq;
+    const q = search.value.trim();
     try {
-      const items = await listBroadcasts();
+      const items = await listBroadcasts(q);
+      if (my !== seq) return;
       if (items.length === 0) {
-        box.replaceChildren(el('p', { className: 'hint', textContent: '아직 방송이 없습니다.' }));
+        box.replaceChildren(el('p', { className: 'hint', textContent: q ? '찾는 방송이 없습니다.' : '아직 방송이 없습니다.' }));
         return;
       }
       box.replaceChildren(
@@ -199,12 +207,21 @@ async function listPage(main: HTMLElement) {
         ),
       );
     } catch (e) {
+      if (my !== seq) return;
       box.replaceChildren(el('p', { className: 'error', textContent: message(e) }));
     }
   };
+  let typing: ReturnType<typeof setTimeout> | undefined;
+  search.oninput = () => {
+    clearTimeout(typing);
+    typing = setTimeout(() => void load(), 300);
+  };
   await load();
   const timer = setInterval(load, 10_000);
-  cleanup.push(() => clearInterval(timer));
+  cleanup.push(() => {
+    clearInterval(timer);
+    clearTimeout(typing);
+  });
 }
 
 // ---------- 로그인 ----------

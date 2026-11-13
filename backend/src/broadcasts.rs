@@ -9,7 +9,7 @@
 
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode, header},
 };
 use serde::{Deserialize, Serialize};
@@ -120,11 +120,54 @@ pub(crate) fn random_hex(bytes: usize) -> Result<String, ApiError> {
 
 // ---------- 조회 ----------
 
-pub async fn list(State(state): State<AppState>) -> Result<Json<Vec<Broadcast>>, ApiError> {
+/// 목록 검색어(#96). 제목에 이 글자가 들어 있는 방송만.
+#[derive(Debug, Deserialize)]
+pub struct ListQuery {
+    pub q: Option<String>,
+}
+
+/// 검색어 최대 글자 수(#96)
+pub const SEARCH_MAX: usize = 50;
+
+/// 검색어를 ILIKE 패턴으로 바꾼다. 빈 값이면 None(전체 목록).
+/// `%`, `_`, `\`는 글자 그대로 찾도록 앞에 `\`를 붙인다(안 하면 `%` 하나로 모든 방송이 걸린다).
+fn search_pattern(q: Option<&str>) -> Result<Option<String>, ApiError> {
+    let q = q.map(str::trim).unwrap_or("");
+    // 비었거나 보이지 않는 글자만 있으면 전체 목록(제목 검사와 같은 기준, #97)
+    if q.chars().all(invisible) {
+        return Ok(None);
+    }
+    // NUL 같은 제어 문자는 DB가 받지 않아 500이 난다. 제목처럼 400으로 거절한다(#97).
+    if q.chars().any(char::is_control) {
+        return Err(ApiError::BadRequest("검색어에 쓸 수 없는 글자가 있습니다"));
+    }
+    if q.chars().count() > SEARCH_MAX {
+        return Err(ApiError::BadRequest("검색어는 50자까지입니다"));
+    }
+    let mut p = String::with_capacity(q.len() + 2);
+    p.push('%');
+    for c in q.chars() {
+        if matches!(c, '%' | '_' | '\\') {
+            p.push('\\');
+        }
+        p.push(c);
+    }
+    p.push('%');
+    Ok(Some(p))
+}
+
+pub async fn list(
+    State(state): State<AppState>,
+    Query(query): Query<ListQuery>,
+) -> Result<Json<Vec<Broadcast>>, ApiError> {
+    let pattern = search_pattern(query.q.as_deref())?;
     // 방송 중을 먼저, 그다음 최신순. 화면 한 장에 충분한 100개까지.
+    // 검색어가 있으면 제목에 들어 있는 것만(대소문자 무시, #96)
     let rows = sqlx::query_as::<_, Broadcast>(select_broadcast!(
-        "ORDER BY (b.status = 'live') DESC, b.created_at DESC, b.id DESC LIMIT 100"
+        "WHERE ($1::text IS NULL OR b.title ILIKE $1 ESCAPE '\\')
+         ORDER BY (b.status = 'live') DESC, b.created_at DESC, b.id DESC LIMIT 100"
     ))
+    .bind(pattern)
     .fetch_all(&state.db)
     .await?;
     let mut rows = rows;
