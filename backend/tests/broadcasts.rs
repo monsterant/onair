@@ -386,6 +386,55 @@ async fn list_shows_live_first_then_newest(db: PgPool) {
     assert_eq!(titles, ["첫째", "셋째", "둘째"]);
 }
 
+/// #96: 제목 검색. 대소문자 무시, %·_는 글자 그대로, 빈 값은 전체, 너무 길면 400
+#[sqlx::test]
+async fn list_can_search_titles(db: PgPool) {
+    let r = router(db, OmeApi::default()).await;
+    let owner = login(&r, 1).await;
+    create(&r, &owner, "Rust 코딩 방송").await;
+    create(&r, &owner, "게임 방송").await;
+    create(&r, &owner, "100% 할인_안내").await;
+    let titles = |v: &Value| -> Vec<String> {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["title"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let search = |q: &str| format!("/broadcasts?q={}", urlencoding(q));
+    let (st, v) = call(&r, "GET", &search("방송"), None, None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(titles(&v), ["게임 방송", "Rust 코딩 방송"]);
+    // 대소문자 무시, 앞뒤 빈칸 무시
+    let (_, v) = call(&r, "GET", &search("  rUST "), None, None).await;
+    assert_eq!(titles(&v), ["Rust 코딩 방송"]);
+    // %와 _는 글자 그대로 찾는다(모든 방송이 걸리지 않는다)
+    let (_, v) = call(&r, "GET", &search("%"), None, None).await;
+    assert_eq!(titles(&v), ["100% 할인_안내"]);
+    let (_, v) = call(&r, "GET", &search("_"), None, None).await;
+    assert_eq!(titles(&v), ["100% 할인_안내"]);
+    let (_, v) = call(&r, "GET", &search("\\"), None, None).await;
+    assert_eq!(titles(&v).len(), 0);
+    // 없는 글자는 빈 목록
+    let (st, v) = call(&r, "GET", &search("없는제목"), None, None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(titles(&v).len(), 0);
+    // 빈 값은 전체
+    let (_, v) = call(&r, "GET", &search("   "), None, None).await;
+    assert_eq!(titles(&v).len(), 3);
+    // 50자까지 되고 51자는 400
+    let (st, _) = call(&r, "GET", &search(&"가".repeat(50)), None, None).await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, v) = call(&r, "GET", &search(&"가".repeat(51)), None, None).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    assert!(v["error"].as_str().unwrap().contains("50자"));
+}
+
+/// 시험용 주소 인코딩(글자마다 %XX)
+fn urlencoding(s: &str) -> String {
+    s.bytes().map(|b| format!("%{b:02X}")).collect()
+}
+
 // ---------- 종료와 삭제 때 송출 끊기 ----------
 
 #[sqlx::test]
