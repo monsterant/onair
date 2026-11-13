@@ -208,7 +208,8 @@ async function listPage(main: HTMLElement) {
       );
       favs.hidden = list.length === 0;
     } catch {
-      // 즐겨찾기를 못 읽어도 방송 목록은 그대로 둔다
+      // 즐겨찾기를 못 읽으면(다른 탭에서 로그아웃 등) 칸을 숨긴다. 방송 목록은 그대로 둔다(#103)
+      favs.hidden = true;
     }
   };
   main.append(favs);

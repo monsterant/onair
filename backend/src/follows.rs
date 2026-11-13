@@ -36,6 +36,8 @@ pub struct Followed {
 }
 
 /// 즐겨찾기. 이미 했으면 그대로 204. 자기 자신 400, 없는 사용자 404.
+/// 방송을 한 번도 만들지 않은 사용자도 404다(#103). 아니면 번호를 차례로 즐겨찾기한 뒤 목록을 읽어
+/// 방송을 안 한 회원의 아이디까지 모을 수 있다. 방송자의 아이디는 원래 방송 목록에 공개되어 있다.
 pub async fn follow(
     State(state): State<AppState>,
     user: CurrentUser,
@@ -44,10 +46,13 @@ pub async fn follow(
     if streamer_id == user.id {
         return Err(ApiError::BadRequest("자기 자신은 즐겨찾기할 수 없습니다"));
     }
-    let exists: Option<i64> = sqlx::query_scalar("SELECT id FROM users WHERE id = $1")
-        .bind(streamer_id)
-        .fetch_optional(&state.db)
-        .await?;
+    let exists: Option<i64> = sqlx::query_scalar(
+        "SELECT u.id FROM users u
+          WHERE u.id = $1 AND EXISTS (SELECT 1 FROM broadcasts b WHERE b.owner_id = u.id)",
+    )
+    .bind(streamer_id)
+    .fetch_optional(&state.db)
+    .await?;
     exists.ok_or(ApiError::NotFound)?;
     // INSERT ... SELECT: 확인과 저장 사이에 그 계정이 지워져도 외래 키 오류(500) 대신 0행이 된다
     sqlx::query(

@@ -89,6 +89,22 @@ fn rows(v: &Value) -> Vec<(String, Option<String>)> {
         .collect()
 }
 
+/// 방송을 하나 만든다(상태와 시작 시각을 정해서)
+async fn broadcast(db: &PgPool, owner: i64, title: &str, status: &str, secs_ago: i64) {
+    sqlx::query(
+        "INSERT INTO broadcasts (title, owner_id, stream_name, stream_key, status, started_at)
+         VALUES ($1, $2, md5(random()::text), md5(random()::text), $3,
+                 CASE WHEN $3 = 'ready' THEN NULL ELSE now() - make_interval(secs => $4) END)",
+    )
+    .bind(title)
+    .bind(owner)
+    .bind(status)
+    .bind(secs_ago as f64)
+    .execute(db)
+    .await
+    .unwrap();
+}
+
 #[sqlx::test]
 async fn follow_unfollow_and_list(db: PgPool) {
     let r = router(db.clone(), Hub::default());
@@ -96,6 +112,11 @@ async fn follow_unfollow_and_list(db: PgPool) {
     let (other, other_id) = login(&r, 2).await;
     let zed = new_user(&db, "zed").await;
     let amy = new_user(&db, "amy").await;
+    let nobody = new_user(&db, "nobody").await;
+    // 방송을 한 번이라도 만든 사람만 방송자다(#103). nobody는 방송이 없다.
+    broadcast(&db, zed, "zed 지난 방송", "ended", 1000).await;
+    broadcast(&db, amy, "amy 지난 방송", "ended", 1000).await;
+    broadcast(&db, other_id, "demo2 대기", "ready", 0).await;
     // 비로그인 401
     assert_eq!(
         call(&r, "GET", "/follows", None, None).await.0,
@@ -113,7 +134,7 @@ async fn follow_unfollow_and_list(db: PgPool) {
             .0,
         StatusCode::UNAUTHORIZED
     );
-    // 자기 자신 400, 없는 사용자 404
+    // 자기 자신 400, 없는 사용자 404, 방송을 안 한 사용자도 404(회원 아이디를 모을 수 없게, #103)
     assert_eq!(
         call(&r, "PUT", &format!("/follows/{me_id}"), None, Some(&me))
             .await
@@ -122,6 +143,12 @@ async fn follow_unfollow_and_list(db: PgPool) {
     );
     assert_eq!(
         call(&r, "PUT", "/follows/999999999", None, Some(&me))
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        call(&r, "PUT", &format!("/follows/{nobody}"), None, Some(&me))
             .await
             .0,
         StatusCode::NOT_FOUND
@@ -139,18 +166,14 @@ async fn follow_unfollow_and_list(db: PgPool) {
             StatusCode::NO_CONTENT
         );
     }
-    assert_eq!(
-        call(&r, "PUT", &format!("/follows/{amy}"), None, Some(&me))
-            .await
-            .0,
-        StatusCode::NO_CONTENT
-    );
-    assert_eq!(
-        call(&r, "PUT", &format!("/follows/{other_id}"), None, Some(&me))
-            .await
-            .0,
-        StatusCode::NO_CONTENT
-    );
+    for id in [amy, other_id] {
+        assert_eq!(
+            call(&r, "PUT", &format!("/follows/{id}"), None, Some(&me))
+                .await
+                .0,
+            StatusCode::NO_CONTENT
+        );
+    }
     // 아무도 방송 중이 아니면 이름순
     let (_, v, _) = call(&r, "GET", "/follows", None, Some(&me)).await;
     assert_eq!(
@@ -162,26 +185,10 @@ async fn follow_unfollow_and_list(db: PgPool) {
         ]
     );
     assert_eq!(v[0]["user_id"], amy);
-    // zed가 방송을 둘 하고 있다(가장 최근에 시작한 것), demo2는 대기 중·종료 방송만 있다
-    for (owner, title, status, secs) in [
-        (zed, "zed 예전 방송", "live", 100),
-        (zed, "zed 새 방송", "live", 10),
-        (other_id, "demo2 대기", "ready", 0),
-        (other_id, "demo2 종료", "ended", 0),
-    ] {
-        sqlx::query(
-            "INSERT INTO broadcasts (title, owner_id, stream_name, stream_key, status, started_at)
-             VALUES ($1, $2, md5(random()::text), md5(random()::text), $3,
-                     CASE WHEN $3 = 'ready' THEN NULL ELSE now() - make_interval(secs => $4) END)",
-        )
-        .bind(title)
-        .bind(owner)
-        .bind(status)
-        .bind(secs as f64)
-        .execute(&db)
-        .await
-        .unwrap();
-    }
+    // zed가 방송을 둘 하고 있다(가장 최근에 시작한 것이 나온다). demo2는 대기·종료 방송만 있다.
+    broadcast(&db, zed, "zed 예전 방송", "live", 100).await;
+    broadcast(&db, zed, "zed 새 방송", "live", 10).await;
+    broadcast(&db, other_id, "demo2 종료", "ended", 0).await;
     let (_, v, _) = call(&r, "GET", "/follows", None, Some(&me)).await;
     assert_eq!(
         rows(&v),
@@ -195,6 +202,13 @@ async fn follow_unfollow_and_list(db: PgPool) {
     // 다른 사람은 내 즐겨찾기를 볼 수 없다(자기 목록만 나온다)
     let (_, v, _) = call(&r, "GET", "/follows", None, Some(&other)).await;
     assert_eq!(rows(&v).len(), 0);
+    // demo2도 zed를 즐겨찾기한다. 내가 해제해도 demo2의 즐겨찾기는 남는다(#103)
+    assert_eq!(
+        call(&r, "PUT", &format!("/follows/{zed}"), None, Some(&other))
+            .await
+            .0,
+        StatusCode::NO_CONTENT
+    );
     // 해제: 두 번 해도 204, 안 한 사람도 204
     for _ in 0..2 {
         assert_eq!(
@@ -215,6 +229,11 @@ async fn follow_unfollow_and_list(db: PgPool) {
         rows(&v),
         [("amy".to_string(), None), ("demo2".to_string(), None)]
     );
+    let (_, v, _) = call(&r, "GET", "/follows", None, Some(&other)).await;
+    assert_eq!(
+        rows(&v),
+        [("zed".to_string(), Some("zed 새 방송".to_string()))]
+    );
     // 방송자 계정이 지워지면 즐겨찾기도 사라진다
     sqlx::query("DELETE FROM users WHERE id = $1")
         .bind(amy)
@@ -223,4 +242,16 @@ async fn follow_unfollow_and_list(db: PgPool) {
         .unwrap();
     let (_, v, _) = call(&r, "GET", "/follows", None, Some(&me)).await;
     assert_eq!(rows(&v), [("demo2".to_string(), None)]);
+    // 즐겨찾기한 사람 쪽 계정이 지워져도 오류 없이 함께 사라진다(24시간 테스트 계정 정리가 실패하지 않게, #103)
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(me_id)
+        .execute(&db)
+        .await
+        .unwrap();
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM follows WHERE user_id = $1")
+        .bind(me_id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(n, 0);
 }
