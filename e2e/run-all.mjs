@@ -8,7 +8,7 @@ const args = process.argv.slice(2);
 const gi = args.indexOf('--gap');
 const gap = gi >= 0 ? Number(args.splice(gi, 2)[1]) : 0;
 const base = args[0] ?? 'http://localhost:5173/';
-const tests = ['auth', 'pc', 'mobile', 'comments', 'donate', 'recording', 'reload', 'ux', 'ux2', 'offline', 'devices', 'timeouts', 'viewers', 'chat', 'moderation', 'search', 'ranking'];
+const tests = ['auth', 'pc', 'mobile', 'comments', 'donate', 'recording', 'reload', 'ux', 'ux2', 'offline', 'devices', 'timeouts', 'viewers', 'chat', 'moderation', 'search', 'ranking', 'follows'];
 
 let pass = 0;
 let fail = 0;

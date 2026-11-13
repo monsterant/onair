@@ -7,6 +7,7 @@ pub mod broadcasts;
 pub mod chat;
 pub mod comments;
 pub mod donations;
+pub mod follows;
 pub mod guard;
 pub mod moderation;
 pub mod ome;
@@ -76,6 +77,12 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/broadcasts/{id}/slow",
             axum::routing::put(moderation::set_slow),
+        )
+        // 방송자 즐겨찾기(#102). 로그인한 사람만, 목록은 나만.
+        .route("/follows", get(follows::list))
+        .route(
+            "/follows/{user_id}",
+            axum::routing::put(follows::follow).delete(follows::unfollow),
         )
         .route("/broadcasts/{id}/end", post(broadcasts::end))
         .route("/broadcasts/{id}/stream-key", post(broadcasts::rotate_key))
