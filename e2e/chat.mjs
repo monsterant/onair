@@ -50,10 +50,14 @@ try {
   check('anonymous sees login hint', (await anon.$eval('.chat-panel', (e) => e.textContent)).includes('로그인하면 채팅할 수 있습니다'));
   // 휴대폰 너비에서 입력 칸이 버튼보다 넓다(#90 R6)
   await other.setViewport({ width: 375, height: 740, isMobile: true, hasTouch: true });
+  // 휴대폰 흉내로 바꾸면 페이지를 다시 불러온다. 다시 그려질 때까지 기다린다
+  await other.waitForSelector('.chat-form input');
   await sleep(300);
   const w = await other.evaluate(() => [document.querySelector('.chat-form input').getBoundingClientRect().width, document.querySelector('.chat-form button').getBoundingClientRect().width, document.documentElement.scrollWidth <= innerWidth + 1]);
   check('phone: input wider than send button, no horizontal scroll', w[0] > w[1] && w[2], JSON.stringify(w));
   await other.setViewport({ width: 1280, height: 800 });
+  await other.waitForSelector('.chat-form input');
+  await sleep(1000);
   await sleep(1000);
 
   // 방송자가 쓴 글이 다른 두 창에 바로 온다
