@@ -490,7 +490,8 @@ async fn categories_are_set_and_filtered(db: PgPool) {
     // 분류로 걸러 보기, 빈 값이면 전체, 이상한 값이면 400, 검색과 함께
     let (_, v) = call(&r, "GET", "/broadcasts?category=game", None, None).await;
     assert_eq!(titles(&v), ["게임 방송"]);
-    let (_, v) = call(&r, "GET", "/broadcasts?category=", None, None).await;
+    let (st, v) = call(&r, "GET", "/broadcasts?category=", None, None).await;
+    assert_eq!(st, StatusCode::OK);
     assert_eq!(titles(&v).len(), 3);
     assert_eq!(
         call(&r, "GET", "/broadcasts?category=cooking", None, None)
@@ -556,6 +557,18 @@ async fn categories_are_set_and_filtered(db: PgPool) {
     assert_eq!(b["category"], "talk");
     let (_, v) = call(&r, "GET", "/broadcasts?category=talk", None, None).await;
     assert_eq!(titles(&v), ["대화 방송"]);
+    // 다른 값으로 다시 바꿀 수 있다(#119)
+    let (_, b) = call(
+        &r,
+        "PATCH",
+        &path,
+        Some(json!({"category": "study"})),
+        Some(&owner),
+    )
+    .await;
+    assert_eq!(b["category"], "study");
+    let (_, v) = call(&r, "GET", "/broadcasts?category=talk", None, None).await;
+    assert_eq!(titles(&v).len(), 0);
     // 다른 방송의 분류는 그대로
     let (_, v) = call(
         &r,
@@ -1021,4 +1034,36 @@ async fn owner_can_rotate_the_stream_key(db: PgPool) {
         StatusCode::CONFLICT
     );
     let _ = db;
+}
+
+/// #119: 다섯 분류 모두로 만들 수 있다. 분류 없이 DB에 들어간 방송(분류가 생기기 전 방송)은 기타다.
+#[sqlx::test]
+async fn every_category_works_and_old_broadcasts_are_etc(db: PgPool) {
+    let r = router(db.clone(), OmeApi::default()).await;
+    let owner = login(&r, 1).await;
+    for c in ["game", "music", "talk", "study", "etc"] {
+        let (st, b) = call(
+            &r,
+            "POST",
+            "/broadcasts",
+            Some(json!({ "title": c, "category": c })),
+            Some(&owner),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "{c}");
+        assert_eq!(b["category"], c);
+        let (st, v) = call(&r, "GET", &format!("/broadcasts?category={c}"), None, None).await;
+        assert_eq!(st, StatusCode::OK, "{c}");
+        assert_eq!(v.as_array().unwrap().len(), 1, "{c}");
+    }
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO broadcasts (owner_id, title, description, stream_name, stream_key)
+         SELECT id, '옛 방송', '', 'sn_old_119', 'key_old_119' FROM users WHERE username = 'demo1'
+         RETURNING id",
+    )
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    let (_, v) = call(&r, "GET", &format!("/broadcasts/{id}"), None, None).await;
+    assert_eq!(v["category"], "etc");
 }
