@@ -334,3 +334,49 @@ fn hub_keeps_only_recent_messages() {
     hub.remove(1);
     assert!(hub.subscribe(1).0.is_empty());
 }
+
+/// #91: 한 곳(IP)에서 채팅 스트림을 20개까지만 연다. 21번째는 429, 하나 닫으면 다시 열린다. 다른 곳은 따로 센다.
+#[sqlx::test]
+async fn chat_streams_are_capped_per_client(db: PgPool) {
+    use onair_backend::chat::STREAMS_PER_CLIENT;
+    let hub = Hub::default();
+    let r = router(db, hub.clone(), 20);
+    let (bid, _) = broadcast(&r).await;
+    let open = |ip: &'static str| {
+        let r = r.clone();
+        async move {
+            r.oneshot(
+                Request::get(format!("/broadcasts/{bid}/chat/stream"))
+                    .header("x-forwarded-for", ip)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        }
+    };
+    // 응답(스트림)을 들고 있는 동안은 열린 것으로 센다
+    let mut held = Vec::new();
+    for _ in 0..STREAMS_PER_CLIENT {
+        let res = open("1.1.1.1").await;
+        assert_eq!(res.status(), StatusCode::OK);
+        held.push(res);
+    }
+    assert_eq!(hub.open_streams("1.1.1.1"), STREAMS_PER_CLIENT);
+    let res = open("1.1.1.1").await;
+    assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+    // 다른 곳은 따로 센다
+    let other = open("2.2.2.2").await;
+    assert_eq!(other.status(), StatusCode::OK);
+    // 하나를 닫으면(응답을 버리면) 다시 열 수 있다
+    held.pop();
+    assert_eq!(hub.open_streams("1.1.1.1"), STREAMS_PER_CLIENT - 1);
+    let again = open("1.1.1.1").await;
+    assert_eq!(again.status(), StatusCode::OK);
+    // 모두 닫으면 기록이 비워진다
+    drop(again);
+    drop(other);
+    held.clear();
+    assert_eq!(hub.open_streams("1.1.1.1"), 0);
+    assert_eq!(hub.open_streams("2.2.2.2"), 0);
+}

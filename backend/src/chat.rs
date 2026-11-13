@@ -20,7 +20,7 @@ use std::{
 use axum::{
     Json,
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::sse::{Event, KeepAlive, Sse},
 };
 use serde::{Deserialize, Serialize};
@@ -65,6 +65,8 @@ struct Inner {
     next_id: i64,
     /// (방송, 사용자) → 마지막으로 채팅한 때. 천천히 모드에 쓴다(#87).
     last_sent: HashMap<(i64, i64), Instant>,
+    /// 보낸 곳(IP)마다 지금 열려 있는 채팅 스트림 수(#91)
+    streams: HashMap<String, usize>,
 }
 
 impl Default for Inner {
@@ -76,6 +78,7 @@ impl Default for Inner {
             rooms: HashMap::new(),
             next_id: i64::try_from(now).unwrap_or(0),
             last_sent: HashMap::new(),
+            streams: HashMap::new(),
         }
     }
 }
@@ -129,6 +132,52 @@ impl Hub {
         // 듣는 사람이 없으면 Err지만 괜찮다(최근 목록에는 남았다)
         let _ = room.tx.send(msg.clone());
         msg
+    }
+}
+
+/// 채팅 스트림 하나를 세는 표. 스트림이 끝나 이 값이 버려지면(Drop) 수를 하나 줄인다(#91).
+pub struct StreamSlot {
+    hub: Hub,
+    key: String,
+}
+
+impl Drop for StreamSlot {
+    fn drop(&mut self) {
+        let mut inner = self.hub.0.lock().unwrap();
+        if let Some(n) = inner.streams.get_mut(&self.key) {
+            *n -= 1;
+            if *n == 0 {
+                inner.streams.remove(&self.key);
+            }
+        }
+    }
+}
+
+impl Hub {
+    /// 보낸 곳(key) 하나가 동시에 열 수 있는 채팅 스트림을 max개로 막는다(#91).
+    /// 자리가 있으면 그 자리(StreamSlot)를 주고, 없으면 None. 확인과 늘리기를 한 잠금 안에서 한다.
+    pub fn open_stream(&self, key: &str, max: usize) -> Option<StreamSlot> {
+        let mut inner = self.0.lock().unwrap();
+        let n = inner.streams.entry(key.to_string()).or_insert(0);
+        if *n >= max {
+            return None;
+        }
+        *n += 1;
+        Some(StreamSlot {
+            hub: self.clone(),
+            key: key.to_string(),
+        })
+    }
+
+    /// 지금 열린 채팅 스트림 수(시험용)
+    pub fn open_streams(&self, key: &str) -> usize {
+        self.0
+            .lock()
+            .unwrap()
+            .streams
+            .get(key)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// 방송이 지워지면 그 방을 없앤다(메모리가 쌓이지 않게). 듣던 연결은 끝난다.
@@ -191,8 +240,12 @@ fn event(m: &Message) -> Event {
         .data(serde_json::to_string(m).unwrap_or_default())
 }
 
+/// 보낸 곳(IP) 하나가 동시에 열 수 있는 채팅 스트림 수(#91). 한 집·학교처럼 IP를 나눠 쓰는 곳도 넉넉하게.
+pub const STREAMS_PER_CLIENT: usize = 20;
+
 pub async fn stream(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(id): Path<i64>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
     let found: Option<i64> = sqlx::query_scalar("SELECT id FROM broadcasts WHERE id = $1")
@@ -200,6 +253,13 @@ pub async fn stream(
         .fetch_optional(&state.db)
         .await?;
     found.ok_or(ApiError::NotFound)?;
+    // 한 곳에서 스트림을 수천 개 열어 서버 메모리·파일 핸들을 채우지 못하게 한다(#91)
+    let slot = state
+        .chat
+        .open_stream(&crate::guard::client_key(&headers), STREAMS_PER_CLIENT)
+        .ok_or(ApiError::TooManyRequestsBecause(
+            "채팅 연결이 너무 많습니다. 다른 창을 닫고 다시 여세요",
+        ))?;
     let (recent, rx) = state.chat.subscribe(id);
     // 처음에 짧은 주석 신호를 하나 보낸다. 운영 프록시(Caddy 압축)는 첫 글이 나올 때까지 응답 머리를 보내지 않아,
     // 방이 조용하면 브라우저가 "연결됨"을 늦게 안다(#86 리뷰). 화면은 주석을 무시한다.
@@ -209,7 +269,11 @@ pub async fn stream(
     let rest = BroadcastStream::new(rx)
         .filter_map(Result::ok)
         .map(|m| event(&m));
-    let s = hello.chain(first).chain(rest).map(Ok);
+    // slot을 스트림 안에 넣어 둔다. 연결이 끊겨 스트림이 버려질 때 slot도 버려져 수가 줄어든다.
+    let s = hello.chain(first).chain(rest).map(move |e| {
+        let _ = &slot;
+        Ok(e)
+    });
     // 프록시가 오래 조용한 연결을 끊지 않게 15초마다 빈 신호를 보낸다
     Ok(Sse::new(s).keep_alive(KeepAlive::default()))
 }
