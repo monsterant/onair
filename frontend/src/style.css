@@ -284,7 +284,8 @@ textarea {
   word-break: break-word;
 }
 
-.notice-input {
+.notice-input,
+.words-input {
   flex: 1;
   min-width: 0;
 }

@@ -614,3 +614,192 @@ async fn owner_can_pin_a_notice(db: PgPool) {
         StatusCode::NOT_FOUND
     );
 }
+
+/// #112: 채팅 금칙어. 주인만 보고 바꾼다, 다듬기, 들어간 채팅은 400(대소문자 무시, 주인도), 다른 방송은 상관없음.
+#[sqlx::test]
+async fn banned_words_block_chat(db: PgPool) {
+    let r = router(db, Hub::default());
+    let (bid, owner, _, other, _) = setup(&r).await;
+    let path = format!("/broadcasts/{bid}/banned-words");
+    // 비로그인 401, 다른 사람 403(보기·바꾸기 모두). 잘못된 목록을 보내도 주인 확인이 먼저다.
+    assert_eq!(
+        call(&r, "GET", &path, None, None).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        call(&r, "GET", &path, None, Some(&other)).await.0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        call(
+            &r,
+            "PUT",
+            &path,
+            Some(json!({"words": ["x"]})),
+            Some(&other)
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        call(
+            &r,
+            "PUT",
+            &path,
+            Some(json!({"words": ["\u{0}"]})),
+            Some(&other)
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    // 처음엔 비어 있다
+    let (st, v, _) = call(&r, "GET", &path, None, Some(&owner)).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(v, json!([]));
+    // 주인: 다듬어서 저장(빈칸·대문자·빈 단어·같은 단어)
+    let (st, v, _) = call(
+        &r,
+        "PUT",
+        &path,
+        Some(json!({"words": ["  Spam ", "", "spam", "광고", "  "]})),
+        Some(&owner),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(v, json!(["spam", "광고"]));
+    assert_eq!(
+        call(&r, "GET", &path, None, Some(&owner)).await.1,
+        json!(["spam", "광고"])
+    );
+    // 들어간 채팅은 400(대소문자 무시), 주인도 같다. 안 들어간 채팅은 된다.
+    let (st, j) = chat(&r, bid, "무료 SPAM 사이트", &other).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    assert!(j["error"].as_str().unwrap().contains("막은 단어"));
+    assert_eq!(
+        chat(&r, bid, "광고합니다", &owner).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        chat(&r, bid, "안녕하세요", &other).await.0,
+        StatusCode::NO_CONTENT
+    );
+    // 다른 방송에서는 막지 않는다
+    let (_, b2, _) = call(
+        &r,
+        "POST",
+        "/broadcasts",
+        Some(json!({"title": "둘"})),
+        Some(&other),
+    )
+    .await;
+    let bid2 = b2["id"].as_i64().unwrap();
+    assert_eq!(
+        chat(&r, bid2, "spam", &other).await.0,
+        StatusCode::NO_CONTENT
+    );
+    // 30개·20자를 넘거나 제어 문자는 400, 목록은 그대로
+    let many: Vec<String> = (0..31).map(|i| format!("w{i}")).collect();
+    assert_eq!(
+        call(
+            &r,
+            "PUT",
+            &path,
+            Some(json!({ "words": many })),
+            Some(&owner)
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    let thirty: Vec<String> = (0..30).map(|i| format!("w{i}")).collect();
+    assert_eq!(
+        call(
+            &r,
+            "PUT",
+            &path,
+            Some(json!({ "words": thirty })),
+            Some(&owner)
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        call(
+            &r,
+            "PUT",
+            &path,
+            Some(json!({"words": ["가".repeat(21)]})),
+            Some(&owner)
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        call(
+            &r,
+            "PUT",
+            &path,
+            Some(json!({"words": ["가".repeat(20)]})),
+            Some(&owner)
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        call(
+            &r,
+            "PUT",
+            &path,
+            Some(json!({"words": ["벨\u{7}"]})),
+            Some(&owner)
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        call(&r, "GET", &path, None, Some(&owner)).await.1,
+        json!(["가".repeat(20)])
+    );
+    // 빈 목록이면 모두 지운다. 다른 방송의 목록은 그대로(비어 있음)
+    assert_eq!(
+        call(&r, "PUT", &path, Some(json!({"words": []})), Some(&owner))
+            .await
+            .1,
+        json!([])
+    );
+    assert_eq!(
+        chat(&r, bid, "spam 광고", &other).await.0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        call(
+            &r,
+            "GET",
+            &format!("/broadcasts/{bid2}/banned-words"),
+            None,
+            Some(&other)
+        )
+        .await
+        .1,
+        json!([])
+    );
+    // 없는 방송 404
+    assert_eq!(
+        call(
+            &r,
+            "GET",
+            "/broadcasts/999999/banned-words",
+            None,
+            Some(&owner)
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+}

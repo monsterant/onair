@@ -298,12 +298,13 @@ pub async fn send(
     Json(input): Json<ChatInput>,
 ) -> Result<StatusCode, ApiError> {
     let text = clean_text(&input.text)?;
-    let row: Option<(String, i32, i64)> =
-        sqlx::query_as("SELECT status, slow_mode_secs, owner_id FROM broadcasts WHERE id = $1")
-            .bind(id)
-            .fetch_optional(&state.db)
-            .await?;
-    let Some((status, slow, owner)) = row else {
+    let row: Option<(String, i32, i64, Vec<String>)> = sqlx::query_as(
+        "SELECT status, slow_mode_secs, owner_id, banned_words FROM broadcasts WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await?;
+    let Some((status, slow, owner, words)) = row else {
         return Err(ApiError::NotFound);
     };
     if status == "ended" {
@@ -312,6 +313,12 @@ pub async fn send(
     // 방송 주인이 막은 사람은 쓸 수 없다(#87)
     if crate::moderation::banned(&state.db, id, user.id).await? {
         return Err(crate::moderation::BANNED);
+    }
+    // 방송 주인이 정한 금칙어가 들어간 글은 거절한다(#112). 주인 자신도 같다.
+    if crate::moderation::has_banned_word(&text, &words) {
+        return Err(ApiError::BadRequest(
+            "방송 주인이 막은 단어가 들어 있습니다",
+        ));
     }
     // 천천히 모드(#87). 방송 주인은 예외. 횟수 제한보다 먼저 봐서, 여기서 거절된 글은 1분 횟수를 쓰지 않는다(#94).
     if slow > 0 && owner != user.id && !state.chat.slow_ok(id, user.id, slow) {

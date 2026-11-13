@@ -25,6 +25,8 @@ import {
   listBans,
   setSlowMode,
   setNotice,
+  getBannedWords,
+  setBannedWords,
   unbanUser,
   deleteComment,
   listComments,
@@ -986,8 +988,33 @@ function chatPanel(broadcastId: number, current: () => Broadcast): HTMLElement {
         noticeSave.disabled = false;
       }
     };
+    // 채팅 금칙어(#112): 쉼표로 나눠 적고 저장. 서버가 다듬은 목록으로 칸을 다시 채운다
+    const wordsInput = el('input', { type: 'text', className: 'words-input', placeholder: '금칙어 (쉼표로 구분, 30개·한 단어 20자까지)', ariaLabel: '금칙어' });
+    const wordsSave = el('button', { type: 'button', className: 'small', textContent: '금칙어 저장' });
+    void getBannedWords(broadcastId)
+      .then((w) => {
+        wordsInput.value = w.join(', ');
+      })
+      .catch(() => {});
+    wordsSave.onclick = async () => {
+      wordsSave.disabled = true;
+      try {
+        const saved = await setBannedWords(broadcastId, wordsInput.value.split(','));
+        wordsInput.value = saved.join(', ');
+        error.textContent = saved.length ? `금칙어 ${saved.length}개를 저장했습니다.` : '금칙어를 모두 지웠습니다.';
+      } catch (e) {
+        error.textContent = message(e);
+      } finally {
+        wordsSave.disabled = false;
+      }
+    };
     bans.hidden = true;
-    panel.append(el('div', { className: 'row owner-tools' }, slow), el('div', { className: 'row owner-tools notice-tools' }, noticeInput, noticeSave), bans);
+    panel.append(
+      el('div', { className: 'row owner-tools' }, slow),
+      el('div', { className: 'row owner-tools notice-tools' }, noticeInput, noticeSave),
+      el('div', { className: 'row owner-tools words-tools' }, wordsInput, wordsSave),
+      bans,
+    );
     void loadBans();
     // 댓글 옆 버튼으로 막은 것, 기한이 지난 것도 목록에 맞춰지게 10초마다 다시 읽는다(#94)
     const bansTimer = setInterval(() => void loadBans(), 10_000);

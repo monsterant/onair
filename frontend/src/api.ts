@@ -112,6 +112,10 @@ export const banUser = (broadcastId: number, userId: number, tenMinutes: boolean
   api<void>('PUT', `/broadcasts/${broadcastId}/bans/${userId}`, { ten_minutes: tenMinutes });
 export const unbanUser = (broadcastId: number, userId: number) =>
   api<void>('DELETE', `/broadcasts/${broadcastId}/bans/${userId}`);
+/** 채팅 금칙어(#112). 방송 주인만 보고 바꾼다. 서버가 다듬은 목록을 돌려준다 */
+export const getBannedWords = (broadcastId: number) => api<string[]>('GET', `/broadcasts/${broadcastId}/banned-words`);
+export const setBannedWords = (broadcastId: number, words: string[]) =>
+  api<string[]>('PUT', `/broadcasts/${broadcastId}/banned-words`, { words });
 /** 공지 고정(#109). 빈 값이면 내린다. 방송 주인만 */
 export const setNotice = (broadcastId: number, text: string) => api<void>('PUT', `/broadcasts/${broadcastId}/notice`, { text });
 export const setSlowMode = (broadcastId: number, secs: number) => api<void>('PUT', `/broadcasts/${broadcastId}/slow`, { secs });
