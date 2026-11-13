@@ -726,6 +726,72 @@ async fn banned_words_block_chat(db: PgPool) {
         .0,
         StatusCode::OK
     );
+    // 저장해도 다른 방송의 금칙어는 그대로다(#117)
+    assert_eq!(
+        call(
+            &r,
+            "GET",
+            &format!("/broadcasts/{bid2}/banned-words"),
+            None,
+            Some(&other)
+        )
+        .await
+        .1,
+        json!([])
+    );
+    // 받는 목록이 100개를 넘으면 같은 단어여도 400. 100개(같은 단어 반복)는 된다(#117)
+    let many_same: Vec<&str> = vec!["w1"; 101];
+    assert_eq!(
+        call(
+            &r,
+            "PUT",
+            &path,
+            Some(json!({ "words": many_same })),
+            Some(&owner)
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    let hundred_same: Vec<&str> = vec!["w1"; 100];
+    assert_eq!(
+        call(
+            &r,
+            "PUT",
+            &path,
+            Some(json!({ "words": hundred_same })),
+            Some(&owner)
+        )
+        .await
+        .1,
+        json!(["w1"])
+    );
+    // 글자 방향 문자는 400(#117)
+    assert_eq!(
+        call(
+            &r,
+            "PUT",
+            &path,
+            Some(json!({"words": ["a\u{202E}b"]})),
+            Some(&owner)
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    // 글자 수는 소문자로 바꾸기 전에 센다: İ 20개는 된다(#117)
+    assert_eq!(
+        call(
+            &r,
+            "PUT",
+            &path,
+            Some(json!({"words": ["\u{130}".repeat(20)]})),
+            Some(&owner)
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
     assert_eq!(
         call(
             &r,
