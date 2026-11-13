@@ -94,6 +94,16 @@ try {
   await sleep(300);
   await say(owner, '주인은 예외 2');
   check('owner is not slowed', await waitFor(() => has(other, '주인은 예외 2'), 5000));
+  // 공지 고정(#109): 주인이 올리면 시청자에게 보인다. 시청자에게는 입력 칸이 없다
+  check('viewer has no notice input', !(await other.$('.notice-input')));
+  await owner.type('.notice-input', '오늘은 9시까지');
+  for (const b of await owner.$$('.notice-tools button')) if ((await b.evaluate((x) => x.textContent)) === '공지 올리기') await b.click();
+  check('owner sees notice', await waitFor(async () => (await text(owner, '.chat-notice')).includes('오늘은 9시까지'), 5000), await text(owner, '.chat-notice'));
+  check('viewer sees notice', await waitFor(async () => (await text(other, '.chat-notice')).includes('오늘은 9시까지'), 12000), await text(other, '.chat-notice'));
+  // 비우고 올리면 내려간다
+  await owner.$eval('.notice-input', (i) => (i.value = ''));
+  for (const b of await owner.$$('.notice-tools button')) if ((await b.evaluate((x) => x.textContent)) === '공지 올리기') await b.click();
+  check('notice removed for viewer', await waitFor(async () => other.$eval('.chat-notice', (e) => e.hidden), 12000));
 } catch (e) {
   check('no exception', false, e.stack);
 } finally {

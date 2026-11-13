@@ -20,6 +20,8 @@ export type Broadcast = {
   viewers?: number | null;
   /** 천천히 모드(초, 0이면 끔, #87) */
   slow_mode_secs: number;
+  /** 채팅 칸 위 고정 공지(#109). 빈 문자열이면 없음 */
+  notice: string;
 };
 
 export type PublishInfo = { stream_name: string; stream_key: string; whip_path: string };
@@ -110,6 +112,8 @@ export const banUser = (broadcastId: number, userId: number, tenMinutes: boolean
   api<void>('PUT', `/broadcasts/${broadcastId}/bans/${userId}`, { ten_minutes: tenMinutes });
 export const unbanUser = (broadcastId: number, userId: number) =>
   api<void>('DELETE', `/broadcasts/${broadcastId}/bans/${userId}`);
+/** 공지 고정(#109). 빈 값이면 내린다. 방송 주인만 */
+export const setNotice = (broadcastId: number, text: string) => api<void>('PUT', `/broadcasts/${broadcastId}/notice`, { text });
 export const setSlowMode = (broadcastId: number, secs: number) => api<void>('PUT', `/broadcasts/${broadcastId}/slow`, { secs });
 export const sendChat = (broadcastId: number, text: string) => api<void>('POST', `/broadcasts/${broadcastId}/chat`, { text });
 /** 채팅 받기 주소(SSE). 브라우저의 EventSource로 연다. */

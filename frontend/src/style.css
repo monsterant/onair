@@ -276,6 +276,19 @@ textarea {
   flex: none;
 }
 
+.chat-notice {
+  margin: 4px 0;
+  padding: 6px 8px;
+  border-left: 3px solid currentColor;
+  font-weight: 600;
+  word-break: break-word;
+}
+
+.notice-input {
+  flex: 1;
+  min-width: 0;
+}
+
 .follows ul {
   list-style: none;
   margin: 0;

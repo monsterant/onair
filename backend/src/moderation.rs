@@ -134,6 +134,61 @@ pub async fn unban(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// 공지 최대 글자 수(#109)
+pub const NOTICE_MAX: usize = 100;
+
+#[derive(Deserialize)]
+pub struct NoticeInput {
+    pub text: String,
+}
+
+/// 공지를 다듬는다. 한 줄로 만들고(줄바꿈·탭은 빈칸), 앞뒤 빈칸을 뺀다.
+/// 보이지 않는 글자만 있으면 빈 공지(내림). 제어 문자·글자 방향을 바꾸는 문자는 400.
+pub fn clean_notice(raw: &str) -> Result<String, ApiError> {
+    // \r\n은 빈칸 하나로. 줄 구분 문자(U+2028·U+2029)도 줄바꿈처럼 빈칸으로(#115)
+    let one_line: String = raw
+        .replace("\r\n", " ")
+        .chars()
+        .map(|c| {
+            if matches!(c, '\n' | '\r' | '\t' | '\u{2028}' | '\u{2029}') {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect();
+    let t = one_line.trim();
+    if t.chars()
+        .any(|c| c.is_control() || crate::comments::bidi_control(c))
+    {
+        return Err(ApiError::BadRequest("공지에 쓸 수 없는 글자가 있습니다"));
+    }
+    if t.chars().all(crate::comments::blank_like) {
+        return Ok(String::new());
+    }
+    if t.chars().count() > NOTICE_MAX {
+        return Err(ApiError::BadRequest("공지는 100자 이하여야 합니다"));
+    }
+    Ok(t.to_string())
+}
+
+/// 채팅 칸 위 공지를 정한다(#109). 빈 값이면 내린다. 방송 주인만.
+pub async fn set_notice(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Path(id): Path<i64>,
+    Json(input): Json<NoticeInput>,
+) -> Result<StatusCode, ApiError> {
+    owner_of(&state, id, &user).await?;
+    let text = clean_notice(&input.text)?;
+    sqlx::query("UPDATE broadcasts SET notice = $2 WHERE id = $1")
+        .bind(id)
+        .bind(text)
+        .execute(&state.db)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[derive(Deserialize)]
 pub struct SlowInput {
     pub secs: i32,
