@@ -246,6 +246,9 @@ async fn settle(state: &AppState, d: &Donation, p: &Payment) -> Result<Donation,
     .execute(&state.db)
     .await;
     match updated {
+        // 이 요청이 실제로 적립했을 때(1줄이 바뀜)만 채팅에 후원 안내를 보낸다(#86).
+        // 같은 승인·통지가 여러 번 와도 두 번째부터는 0줄이라 안내는 한 번이다.
+        Ok(r) if r.rows_affected() == 1 => announce(state, d).await,
         Ok(_) => {}
         // 같은 결제 키가 이미 다른 주문에 적립돼 있다(있어서는 안 되는 일). 이 주문은 적립하지 않는다.
         Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
@@ -260,6 +263,38 @@ async fn settle(state: &AppState, d: &Donation, p: &Payment) -> Result<Donation,
         "paid" => Err(ApiError::Conflict("다른 결제로 이미 처리된 후원입니다")),
         _ => Err(ApiError::Conflict("처리할 수 없는 후원 상태입니다")),
     }
+}
+
+/// 후원 안내를 그 방송 채팅에 보낸다(#86). 실패해도 적립에는 영향이 없다.
+async fn announce(state: &AppState, d: &Donation) {
+    let donor: Option<String> = match d.donor_id {
+        Some(id) => sqlx::query_scalar("SELECT username FROM users WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten(),
+        None => None,
+    };
+    let name = donor.unwrap_or_else(|| "알 수 없는 사용자".into());
+    let mut text = format!("{}원을 후원했습니다", won(d.amount));
+    if !d.message.is_empty() {
+        text.push_str(&format!(" — {}", d.message));
+    }
+    state.chat.publish(d.broadcast_id, "donation", &name, &text);
+}
+
+/// 1234567 → "1,234,567"
+fn won(n: i64) -> String {
+    let s = n.abs().to_string();
+    let mut out = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    if n < 0 { format!("-{out}") } else { out }
 }
 
 #[derive(Deserialize)]

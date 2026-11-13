@@ -270,6 +270,8 @@ pub async fn delete(
         .execute(&state.db)
         .await?;
     state.ome.stop_stream(&b.stream_name).await;
+    // 채팅방도 메모리에서 지운다(#86). 듣던 연결은 끝난다.
+    state.chat.remove(id);
     Ok(StatusCode::NO_CONTENT)
 }
 

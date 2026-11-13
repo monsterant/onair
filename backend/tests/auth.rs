@@ -13,6 +13,7 @@ use tower::ServiceExt;
 
 fn router(db: PgPool, demo_login: bool) -> Router {
     app(AppState {
+        chat: Default::default(),
         rec: Default::default(),
         toss: Default::default(),
         ome: Default::default(),
@@ -619,6 +620,7 @@ async fn cross_site_posts_are_rejected(db: PgPool) {
 #[sqlx::test]
 async fn auth_requests_are_rate_limited_per_client(db: PgPool) {
     let r = app(AppState {
+        chat: Default::default(),
         rec: Default::default(),
         toss: Default::default(),
         ome: Default::default(),
@@ -628,6 +630,7 @@ async fn auth_requests_are_rate_limited_per_client(db: PgPool) {
             limiter: onair_backend::guard::RateLimiter::new(2, std::time::Duration::from_secs(60)),
             comment_limiter: Default::default(),
             notify_limiter: Default::default(),
+            chat_limiter: Default::default(),
         },
     });
     let ip1 = [("x-forwarded-for", "1.1.1.1")];

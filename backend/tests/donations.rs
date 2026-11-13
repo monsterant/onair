@@ -153,7 +153,12 @@ impl FakeToss {
 // ---------- 요청 도우미 ----------
 
 fn router(db: PgPool, toss: Toss) -> Router {
+    router_with_chat(db, toss, Default::default())
+}
+
+fn router_with_chat(db: PgPool, toss: Toss, chat: onair_backend::chat::Hub) -> Router {
     app(AppState {
+        chat,
         rec: Default::default(),
         toss,
         ome: Default::default(),
@@ -349,6 +354,43 @@ async fn confirm_credits_once_even_if_repeated(db: PgPool) {
     assert_eq!(s["items"][0]["donor_username"], "demo2");
     assert_eq!(s["items"][0]["message"], "응원해요");
     assert!(s["items"][0]["paid_at"].is_string());
+}
+
+#[sqlx::test]
+async fn chat_announces_a_donation_once(db: PgPool) {
+    // #86: 적립된 후원은 그 방송 채팅에 한 번만 안내한다(같은 승인·통지가 여러 번 와도)
+    let (fake, toss) = fake_toss().await;
+    let hub = onair_backend::chat::Hub::default();
+    let r = router_with_chat(db, toss, hub.clone());
+    let (bid, donor, oid) = setup(&r, 5000).await;
+    // 주문만 만들고 결제 전에는 안내가 없다
+    assert!(hub.subscribe(bid).0.is_empty());
+    fake.pay("pk_1", &oid, 5000);
+    for _ in 0..3 {
+        let c = call(
+            &r,
+            "POST",
+            "/donations/confirm",
+            confirm_body("pk_1", &oid, 5000),
+            Some(&donor),
+        )
+        .await;
+        assert_eq!(c.status, StatusCode::OK);
+    }
+    let n = call(
+        &r,
+        "POST",
+        "/donations/notify",
+        Some(json!({"paymentKey": "pk_1"})),
+        None,
+    )
+    .await;
+    assert_eq!(n.status, StatusCode::OK, "{:?}", n.json);
+    let (recent, _) = hub.subscribe(bid);
+    assert_eq!(recent.len(), 1, "{recent:?}");
+    assert_eq!(recent[0].kind, "donation");
+    assert_eq!(recent[0].username, "demo2");
+    assert_eq!(recent[0].text, "5,000원을 후원했습니다 — 응원해요");
 }
 
 #[sqlx::test]

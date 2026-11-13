@@ -215,6 +215,7 @@ fn temp_dir() -> PathBuf {
 
 fn router(db: PgPool, ome: OmeApi, dir: Option<PathBuf>) -> Router {
     app(AppState {
+        chat: Default::default(),
         rec: RecConfig { dir },
         toss: Default::default(),
         ome,
