@@ -207,7 +207,7 @@ docker compose -f deploy/docker-compose.yml --env-file deploy/.env up -d --build
 ### 지원 환경 (PC 방송)
 | 브라우저 | 화면 공유 | 탭 소리 | 시스템 소리 |
 |---|---|---|---|
-| Chrome·Edge (Windows) | 됨 | 됨 (탭 공유) | 됨 (전체 화면 공유) |
+| Chrome·Edge (Windows) | 됨 (Chrome 실기기 확인) | 됨 (탭 공유. Chrome에서 유튜브 탭 소리를 송출해 갤럭시에서 들리는 것 확인) | 됨 (전체 화면 공유, 문서 기준) |
 | Chrome·Edge (macOS) | 됨 | 됨 (탭 공유) | 버전에 따라 다름 (안 될 수 있음) |
 | Firefox, Safari | 됨 | 안 됨 | 안 됨 |
 | 휴대폰 브라우저 | 화면 공유 없음 → 카메라 방송 | | |
@@ -215,11 +215,12 @@ docker compose -f deploy/docker-compose.yml --env-file deploy/.env up -d --build
 ### 지원 환경 (휴대폰 카메라 방송)
 | 브라우저 | 카메라·마이크 송출 | 비고 |
 |---|---|---|
-| Android Chrome | 문서 기준 됨 (실기기 확인 전) | https 필요 |
-| iPhone Safari (iOS 16.4 이상 권장) | 문서 기준 됨 (실기기 확인 전) | https 필요. 화면 꺼짐 막기는 16.4 이상 |
-- 자동 시험은 휴대폰 화면을 흉내 낸 Chrome(375px, 가짜 카메라)으로 했다. 진짜 휴대폰 시험은 사용자가 따로 한다.
+| Android Chrome | 됨 (갤럭시 Chrome에서 카메라·마이크 송출, 시청, 다시보기 확인) | https 필요 |
+| iPhone Safari (iOS 16.4 이상 권장) | 문서 기준 됨 (실기기로는 확인하지 않음) | https 필요. 화면 꺼짐 막기는 16.4 이상 |
+- 실기기 확인(2026-11-13): 갤럭시 Chrome으로 카메라·마이크 송출 → 다른 기기에서 시청, 종료 뒤 다시보기 재생. PC(Windows Chrome)에서 탭 소리를 함께 송출 → 갤럭시 Chrome에서 소리를 들음.
+- 자동 시험은 휴대폰 화면을 흉내 낸 Chrome(375px, 가짜 카메라)으로도 했다(`e2e/mobile.mjs`).
 
-- 표는 브라우저 문서를 바탕으로 적었다. 자동 시험은 Windows Chrome(가짜 화면·마이크)으로 했다.
+- "실기기 확인"이 없는 칸은 브라우저 문서를 바탕으로 적었다. 자동 시험은 Windows Chrome(가짜 화면·마이크)으로 했다.
 - 소리는 **탭**이나 **전체 화면**을 공유할 때만 고를 수 있다. **창**을 공유하면 소리 칸이 없다.
 - macOS는 처음 쓸 때 "시스템 설정 → 개인정보 보호 및 보안 → 화면 기록"에서 브라우저를 허용하고 브라우저를 다시 열어야 한다.
 - 시청은 WebRTC를 먼저 쓰고, 안 되면 LL-HLS로 넘어간다(최신 Chrome·Edge·Firefox·Safari, 휴대폰 브라우저).
