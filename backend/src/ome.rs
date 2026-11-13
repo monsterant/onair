@@ -148,7 +148,7 @@ async fn decide_opening(
                 "UPDATE broadcasts
                     SET started_at = CASE WHEN status = 'live' AND started_at IS NOT NULL
                                           THEN started_at ELSE now() END,
-                        status = 'live', updated_at = now()
+                        status = 'live', updated_at = now(), scheduled_at = NULL
                   WHERE stream_name = $1 AND status <> 'ended' AND stream_key = $2",
             )
             .bind(&name)
@@ -253,7 +253,7 @@ pub async fn reconcile(db: &sqlx::PgPool, api: &crate::ome_api::OmeApi) -> Resul
     .execute(db)
     .await?;
     sqlx::query(
-        "UPDATE broadcasts SET status = 'live', started_at = now(), updated_at = now()
+        "UPDATE broadcasts SET status = 'live', started_at = now(), updated_at = now(), scheduled_at = NULL
           WHERE status = 'ready' AND stream_name = ANY($1)",
     )
     .bind(&present)

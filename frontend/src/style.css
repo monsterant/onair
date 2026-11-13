@@ -323,6 +323,7 @@ textarea {
 
 .upcoming li {
   padding: 2px 0;
+  overflow-wrap: anywhere;
 }
 
 .search {

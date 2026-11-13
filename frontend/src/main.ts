@@ -472,7 +472,10 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
     const vt = viewersText(b);
     if (vt) statusBox.append(el('span', { className: 'viewers', textContent: vt }));
     titleEl.textContent = b.title;
-    scheduleNote.textContent = b.status === 'ready' && b.scheduled_at ? `시작 예정: ${shortTime(b.scheduled_at)}` : '';
+    scheduleNote.textContent =
+      b.status === 'ready' && b.scheduled_at
+        ? `시작 예정: ${shortTime(b.scheduled_at)}${Date.parse(b.scheduled_at) < Date.now() ? ' · 늦어지는 중' : ''}`
+        : '';
     scheduleNote.hidden = !scheduleNote.textContent;
     if (descEl.textContent !== b.description) {
       descEl.textContent = b.description;

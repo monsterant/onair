@@ -1107,6 +1107,7 @@ async fn owner_can_schedule_a_ready_broadcast(db: PgPool) {
     for bad in [
         fmt(time::Duration::minutes(-1)),
         fmt(time::Duration::days(8)),
+        fmt(time::Duration::days(7) + time::Duration::minutes(1)),
     ] {
         assert_eq!(
             call(&r, "PUT", &path, Some(json!({ "at": bad })), Some(&owner))
@@ -1154,6 +1155,18 @@ async fn owner_can_schedule_a_ready_broadcast(db: PgPool) {
     assert!(v2["scheduled_at"].is_null());
     // 시작한(방송 중) 방송과 종료된 방송에는 정할 수 없다(409)
     sqlx::query("UPDATE broadcasts SET status = 'live' WHERE id = $1")
+        .bind(id)
+        .execute(&db)
+        .await
+        .unwrap();
+    assert_eq!(
+        call(&r, "PUT", &path, Some(json!({ "at": soon })), Some(&owner))
+            .await
+            .0,
+        StatusCode::CONFLICT
+    );
+    // 종료된 방송도 409(#121)
+    sqlx::query("UPDATE broadcasts SET status = 'ended' WHERE id = $1")
         .bind(id)
         .execute(&db)
         .await
