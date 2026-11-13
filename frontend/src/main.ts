@@ -720,7 +720,8 @@ function chatPanel(broadcastId: number, current: () => Broadcast): HTMLElement {
     const nearBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 40;
     const li =
       m.kind === 'donation'
-        ? el('li', { className: 'chat-line donation' }, el('strong', { textContent: m.username }), ` 님이 ${m.text}`)
+        ? // 진짜 후원 안내에는 화면이 '후원' 표시를 붙인다. 일반 채팅 글로는 이 표시를 만들 수 없다(#90 R4: 안내 흉내)
+          el('li', { className: 'chat-line donation' }, el('span', { className: 'chat-tag', textContent: '후원' }), ' ', el('strong', { textContent: m.username }), ` 님이 ${m.text}`)
         : el('li', { className: 'chat-line' }, el('strong', { textContent: m.username }), ` ${m.text}`);
     li.dataset.id = String(m.id);
     list.append(li);
@@ -789,8 +790,12 @@ function chatPanel(broadcastId: number, current: () => Broadcast): HTMLElement {
   });
 
   const panel = el('section', { className: 'chat-panel panel' }, el('h3', {}, '실시간 채팅', state), list);
-  if (me) {
-    const input = el('input', { type: 'text', maxLength: 200, placeholder: '채팅 (200자까지, Enter로 보내기)', ariaLabel: '채팅 입력', autocomplete: 'off' });
+  if (me && current().status === 'ended') {
+    // 종료된 방송에는 쓸 수 없으니 입력 칸 대신 안내를 보여 준다(#90 R5)
+    panel.append(el('p', { className: 'hint', textContent: '종료된 방송이라 채팅을 쓸 수 없습니다.' }));
+  } else if (me) {
+    // 글자 수는 서버가 센다(200자). 화면의 maxLength는 이모지를 두 글자로 세어 더 엄격해서 두지 않는다(#90 R7)
+    const input = el('input', { type: 'text', placeholder: '채팅 (200자까지, Enter로 보내기)', ariaLabel: '채팅 입력', autocomplete: 'off' });
     const send = el('button', { type: 'submit', textContent: '보내기' });
     const form = el('form', { className: 'chat-form row' }, input, send);
     form.onsubmit = (ev) => {

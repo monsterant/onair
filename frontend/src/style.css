@@ -271,6 +271,21 @@ textarea {
   min-width: 0;
 }
 
+/* 휴대폰에서도 보내기 버튼은 글자만큼만(입력 칸이 좁아지지 않게, #90 R6) */
+.chat-form.row > button {
+  flex: none;
+}
+
+.chat-tag {
+  display: inline-block;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: #ffd166;
+  color: #1a1a1a;
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
 /* 댓글 (#37) */
 .comments {
   list-style: none;

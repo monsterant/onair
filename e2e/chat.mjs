@@ -48,6 +48,12 @@ try {
   await other.waitForSelector('.chat-form input');
   check('anonymous has no chat input', !(await anon.$('.chat-form')));
   check('anonymous sees login hint', (await anon.$eval('.chat-panel', (e) => e.textContent)).includes('로그인하면 채팅할 수 있습니다'));
+  // 휴대폰 너비에서 입력 칸이 버튼보다 넓다(#90 R6)
+  await other.setViewport({ width: 375, height: 740, isMobile: true, hasTouch: true });
+  await sleep(300);
+  const w = await other.evaluate(() => [document.querySelector('.chat-form input').getBoundingClientRect().width, document.querySelector('.chat-form button').getBoundingClientRect().width, document.documentElement.scrollWidth <= innerWidth + 1]);
+  check('phone: input wider than send button, no horizontal scroll', w[0] > w[1] && w[2], JSON.stringify(w));
+  await other.setViewport({ width: 1280, height: 800 });
   await sleep(1000);
 
   // 방송자가 쓴 글이 다른 두 창에 바로 온다
@@ -78,6 +84,11 @@ try {
   await say(other, '끝났나요');
   await sleep(1500);
   check('cannot chat on ended broadcast', !(await has(owner, '끝났나요')) && (await other.$eval('.chat-panel .error', (e) => e.textContent)).includes('종료된 방송'), await other.$eval('.chat-panel .error', (e) => e.textContent).catch(() => ''));
+
+  // 종료된 방송을 새로 열면 입력 칸 대신 안내(#90 R5)
+  await other.reload({ waitUntil: 'networkidle2' });
+  await other.waitForSelector('.chat-panel');
+  check('ended broadcast shows notice instead of input', !(await other.$('.chat-form')) && (await other.$eval('.chat-panel', (e) => e.textContent)).includes('종료된 방송이라'));
 } catch (e) {
   check('no exception', false, e.stack);
 } finally {
