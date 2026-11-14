@@ -121,6 +121,7 @@ cd frontend && npm install && npm run dev
 cd backend && DATABASE_URL=postgres://onair:onair-local-only@127.0.0.1:55432/onair cargo test
 ```
 - 권한(비로그인·소유자·다른 사용자), 방송 상태, 송출 허락, 테스트 계정, 댓글, 도네이션(가짜 토스 서버로 중복 적립·동시 요청·금액 바꿔치기), 채팅·시청자 제한·검색·후원 순위·즐겨찾기 등 187개의 시험이 있다(2026-11-14 기준). GitHub Actions에서 PR마다 돈다.
+- CI는 PR마다 의존성의 알려진 취약점도 본다(Rust는 `cargo audit`, 화면·브라우저 시험은 `npm audit --audit-level=high`). 실제 빌드에 들어가지 않아 예외로 둔 항목은 `backend/.cargo/audit.toml`에 이유와 함께 있다.
 - 주소는 `localhost` 대신 `127.0.0.1`을 쓴다. Windows에서 `localhost`로 붙으면 연결마다 몇 초씩 기다려, 1분 안에 끝나야 하는 횟수 제한 시험이 실패할 수 있다.
 
 브라우저 시험(`e2e/`, puppeteer, 24개 파일)은 진짜 Chrome을 자동으로 움직여 화면에서 송출하고 시청한다. 실제 서버(배포 주소)에서도 18개 파일을 모두 돌렸다(2026-11-13). 17개 파일 243개 항목은 통과했고, donate는 결제위젯이 늦게 그려져 2개가 실패했다. 기다리는 시간을 고친 뒤(PR #105) donate 13개 항목도 통과했다. 카메라·마이크·화면 공유는 Chrome의 가짜 장치를 쓴다.
@@ -131,7 +132,7 @@ node run-all.mjs                      # 모두 (http://localhost:5173)
 node pc.mjs                           # 하나만
 node run-all.mjs https://<배포 주소>/ --gap 60   # 실제 서버. 같은 IP 요청 제한(분당 20회) 때문에 시험 사이를 띄운다
 ```
-- Node.js 20.11 이상이 필요하다. Chrome 위치가 다르면 `CHROME_PATH` 환경변수로 알려 준다.
+- Node.js 22.12 이상이 필요하다(puppeteer-core 25). Chrome 위치가 다르면 `CHROME_PATH` 환경변수로 알려 준다.
 - `ranking.mjs`·`follows.mjs`는 로컬 DB 컨테이너에 직접 SQL을 넣는다. 컨테이너 이름은 기본 `rodlspr-db-1`이고, 저장소 폴더 이름이 다르면 `E2E_DB_CONTAINER=<폴더이름>-db-1`처럼 알려 준다(`docker ps`로 확인).
 - `recording.mjs`는 `.env`의 `RECORDINGS_DIR`, `donate.mjs`는 `TOSS_CLIENT_KEY`·`TOSS_SECRET_KEY`(토스 **테스트** 키)가 있어야 통과한다. 비어 있으면 그 기능이 꺼져 실패로 나온다.
 - 시험 하나를 따로 돌리면 실패가 있어도 끝 코드는 0이다. 실패 여부는 `FAIL` 줄로 본다(`run-all.mjs`는 실패가 있으면 1).
