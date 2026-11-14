@@ -45,6 +45,9 @@ pub struct AuthConfig {
     pub comment_ip_limiter: Option<crate::guard::RateLimiter>,
     /// 결제 승인 통지 횟수 제한(IP 하나당). 로그인 없이 부르는 길이라 따로 둔다(#41 리뷰).
     pub notify_limiter: crate::guard::RateLimiter,
+    /// 로그인 실패 횟수 제한(아이디 하나당, #136). IP 몫만 있으면 IP를 바꿔 가며 한 아이디의 비밀번호를 계속 맞혀 볼 수 있다.
+    /// 실패할 때만 센다. None이면 걸지 않는다(시험 기본값). 운영 값은 main.rs.
+    pub login_fail_limiter: Option<crate::guard::RateLimiter>,
 }
 
 /// 데모 사용자 아이디. 일반 가입에서는 `demo`로 시작하는 아이디를 쓸 수 없다.
@@ -358,6 +361,20 @@ pub async fn login(
     if !login_input_ok(&c.password) {
         return Err(FAIL);
     }
+    // 같은 아이디로 너무 많이 틀렸으면 비밀번호를 확인하지 않고 거절한다(#136).
+    // 없는 아이디도 똑같이 세므로, 막혔다는 것으로 어떤 아이디가 있는지는 알 수 없다.
+    // 형식이 맞는 아이디(정규화한 값)만 센다. 형식이 틀린 아이디는 로그인할 수 없고, 아주 긴 글로
+    // 횟수표 메모리를 채우지 못하게 한다(#136 리뷰).
+    let fail_key = normalize_username(&c.username)
+        .ok()
+        .map(|u| format!("login:{u}"));
+    let blocked = || match (&state.auth.login_fail_limiter, &fail_key) {
+        (Some(l), Some(k)) => l.blocked(k),
+        _ => false,
+    };
+    if blocked() {
+        return Err(ApiError::TooManyRequests);
+    }
     // 형식이 틀린 아이디도, 없는 아이디도 같은 시간을 들여 같은 실패 메시지로 돌려준다(어떤 아이디가 있는지 알려 주지 않는다).
     let row: Option<(i64, String)> = match normalize_username(&c.username) {
         Ok(username) => {
@@ -374,8 +391,16 @@ pub async fn login(
     };
     let ok = verify_password_async(c.password, stored).await;
     let (Some(id), true) = (id, ok) else {
+        if let (Some(l), Some(k)) = (&state.auth.login_fail_limiter, &fail_key) {
+            l.allow(k);
+        }
         return Err(FAIL);
     };
+    // 비밀번호 확인을 기다리는 사이(동시에 2개만 확인한다) 다른 요청들이 실패 횟수를 채웠을 수 있다.
+    // 한꺼번에 몰아 보낸 요청이 줄을 서서 맞는 비밀번호를 찾지 못하게, 성공으로 처리하기 전에 한 번 더 본다(#136 리뷰).
+    if blocked() {
+        return Err(ApiError::TooManyRequests);
+    }
     let username = normalize_username(&c.username).map_err(|_| FAIL)?;
     let jar = start_session(&state, jar, id).await?;
     Ok((jar, Json(Me { id, username })))

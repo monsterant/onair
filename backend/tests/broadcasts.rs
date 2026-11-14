@@ -769,6 +769,7 @@ async fn create_is_rate_limited_per_client(db: PgPool) {
                 std::time::Duration::from_secs(60),
             ),
             notify_limiter: Default::default(),
+            login_fail_limiter: None,
             chat_limiter: Default::default(),
             shared_demo_off: false,
             chat_ip_limiter: None,

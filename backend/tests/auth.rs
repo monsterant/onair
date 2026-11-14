@@ -630,6 +630,7 @@ async fn auth_requests_are_rate_limited_per_client(db: PgPool) {
             limiter: onair_backend::guard::RateLimiter::new(2, std::time::Duration::from_secs(60)),
             comment_limiter: Default::default(),
             notify_limiter: Default::default(),
+            login_fail_limiter: None,
             chat_limiter: Default::default(),
             shared_demo_off: false,
             chat_ip_limiter: None,
@@ -690,4 +691,83 @@ async fn session_is_200_with_null_user_when_not_logged_in(db: PgPool) {
         StatusCode::NO_CONTENT
     );
     assert!(call(&r, "GET", "/auth/session", None, Some(&c)).await.json["user"].is_null());
+}
+
+/// #136: 같은 아이디로 너무 많이 틀리면 그 아이디만 막힌다(맞는 비밀번호도 거절). 다른 아이디는 그대로다.
+/// 없는 아이디도 똑같이 막혀서, 막힘으로 아이디가 있는지 알 수 없다.
+#[sqlx::test]
+async fn login_failures_lock_only_that_username(db: PgPool) {
+    let r = app(AppState {
+        chat: Default::default(),
+        rec: Default::default(),
+        toss: Default::default(),
+        ome: Default::default(),
+        db,
+        auth: AuthConfig {
+            login_fail_limiter: Some(onair_backend::guard::RateLimiter::new(
+                3,
+                std::time::Duration::from_secs(60),
+            )),
+            ..Default::default()
+        },
+    });
+    for name in ["victim_a", "victim_b"] {
+        let s = call(
+            &r,
+            "POST",
+            "/auth/signup",
+            Some(json!({"username": name, "password": "right-password-1"})),
+            None,
+        )
+        .await;
+        assert_eq!(s.status, StatusCode::CREATED, "{:?}", s.json);
+    }
+    let login = |name: &'static str, pw: &'static str| {
+        let r = r.clone();
+        async move {
+            call(
+                &r,
+                "POST",
+                "/auth/login",
+                Some(json!({"username": name, "password": pw})),
+                None,
+            )
+            .await
+            .status
+        }
+    };
+    for _ in 0..3 {
+        assert_eq!(
+            login("victim_a", "wrong-password").await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            login("nobody_here", "wrong-password").await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    // 막힌 아이디는 맞는 비밀번호도 429, 없는 아이디도 똑같이 429
+    assert_eq!(
+        login("victim_a", "right-password-1").await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(
+        login("nobody_here", "wrong-password").await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    // 대소문자·앞뒤 빈칸을 바꿔도 같은 아이디로 센다
+    assert_eq!(
+        login(" VICTIM_A ", "right-password-1").await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    // 다른 아이디는 그대로
+    assert_eq!(login("victim_b", "right-password-1").await, StatusCode::OK);
+    // 형식이 틀린(아주 긴) 아이디는 세지 않는다: 몇 번 틀려도 429가 아니라 401(#136 리뷰, 횟수표 메모리 보호)
+    let long: &'static str = Box::leak("x".repeat(5000).into_boxed_str());
+    for _ in 0..5 {
+        assert_eq!(
+            login(long, "wrong-password").await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
 }

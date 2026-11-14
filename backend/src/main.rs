@@ -87,6 +87,11 @@ async fn main() {
             30,
             Duration::from_secs(60),
         )),
+        // 같은 아이디로 15분에 10번 틀리면 15분 동안 그 아이디의 로그인을 막는다(#136)
+        login_fail_limiter: Some(onair_backend::guard::RateLimiter::new(
+            10,
+            Duration::from_secs(15 * 60),
+        )),
         ..Default::default()
     };
     if auth.demo_login {
