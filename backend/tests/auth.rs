@@ -668,3 +668,26 @@ async fn auth_requests_are_rate_limited_per_client(db: PgPool) {
         StatusCode::NO_CONTENT
     );
 }
+
+/// #134: 로그인 상태 확인은 로그인하지 않았어도 200(user: null)이다. 세션이 끝나면 다시 null이다.
+#[sqlx::test]
+async fn session_is_200_with_null_user_when_not_logged_in(db: PgPool) {
+    let r = router(db, true);
+    for cookie in [None, Some("deadbeef")] {
+        let s = call(&r, "GET", "/auth/session", None, cookie).await;
+        assert_eq!(s.status, StatusCode::OK);
+        assert!(s.json["user"].is_null(), "{:?}", s.json);
+    }
+    let login = call(&r, "POST", "/auth/demo/1", None, None).await;
+    let c = login.cookie.unwrap();
+    let s = call(&r, "GET", "/auth/session", None, Some(&c)).await;
+    assert_eq!(s.status, StatusCode::OK);
+    assert_eq!(s.json["user"]["username"], "demo1");
+    assert_eq!(
+        call(&r, "POST", "/auth/logout", None, Some(&c))
+            .await
+            .status,
+        StatusCode::NO_CONTENT
+    );
+    assert!(call(&r, "GET", "/auth/session", None, Some(&c)).await.json["user"].is_null());
+}
