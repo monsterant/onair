@@ -67,12 +67,13 @@ struct Inner {
     last_sent: HashMap<(i64, i64), Instant>,
     /// 보낸 곳(IP)마다 지금 열려 있는 채팅 스트림 수(#91)
     streams: HashMap<String, usize>,
-    /// (방송, 사용자): 서버를 켠 뒤 그 방송에서 채팅을 쓴 사람(#125). 방송 주인이 막을 수 있는 대상을 고른다.
-    chatters: HashSet<(i64, i64)>,
+    /// 방송 → 서버를 켠 뒤 그 방송에서 채팅을 쓴 사람(#125). 방송 주인이 막을 수 있는 대상을 고른다.
+    chatters: HashMap<i64, HashSet<i64>>,
 }
 
-/// 채팅한 사람 기록의 최대 수(#125). 넘으면 더 적지 않는다(메모리가 끝없이 늘지 않게).
-const CHATTERS_MAX: usize = 200_000;
+/// 방송 하나에 적는 채팅한 사람 수의 상한(#125 리뷰). 방송마다 따로 세서, 한 사람이 자기 방송들을 채워도
+/// 다른 방송의 기록은 막히지 않는다.
+pub const CHATTERS_PER_BROADCAST: usize = 2_000;
 
 impl Default for Inner {
     /// 메시지 번호는 서버를 켠 시각(마이크로초)에서 시작한다. 서버를 다시 켜도 번호가 앞 번호와 겹치지 않아,
@@ -84,7 +85,7 @@ impl Default for Inner {
             next_id: i64::try_from(now).unwrap_or(0),
             last_sent: HashMap::new(),
             streams: HashMap::new(),
-            chatters: HashSet::new(),
+            chatters: HashMap::new(),
         }
     }
 }
@@ -121,10 +122,11 @@ impl Hub {
         text: &str,
     ) -> Arc<Message> {
         let mut inner = self.0.lock().unwrap();
-        if let ("chat", Some(uid)) = (kind, user_id)
-            && inner.chatters.len() < CHATTERS_MAX
-        {
-            inner.chatters.insert((broadcast_id, uid));
+        if let ("chat", Some(uid)) = (kind, user_id) {
+            let set = inner.chatters.entry(broadcast_id).or_default();
+            if set.len() < CHATTERS_PER_BROADCAST {
+                set.insert(uid);
+            }
         }
         inner.next_id += 1;
         let msg = Arc::new(Message {
@@ -198,7 +200,16 @@ impl Hub {
         let mut inner = self.0.lock().unwrap();
         inner.rooms.remove(&broadcast_id);
         inner.last_sent.retain(|(b, _), _| *b != broadcast_id);
-        inner.chatters.retain(|(b, _)| *b != broadcast_id);
+        inner.chatters.remove(&broadcast_id);
+    }
+
+    /// DB에 남아 있는 방송만 남기고 나머지 방·기록을 지운다(#125 리뷰). 테스트 계정 정리가 방송을 DB에서
+    /// 지울 때(CASCADE) 메모리의 방·천천히 모드·채팅한 사람 기록이 남지 않게 한 시간마다 부른다.
+    pub fn retain_broadcasts(&self, alive: &HashSet<i64>) {
+        let mut inner = self.0.lock().unwrap();
+        inner.rooms.retain(|b, _| alive.contains(b));
+        inner.last_sent.retain(|(b, _), _| alive.contains(b));
+        inner.chatters.retain(|b, _| alive.contains(b));
     }
 
     /// 이 사람이 (서버를 켠 뒤) 이 방송에서 채팅을 쓴 적이 있는지(#125)
@@ -207,7 +218,8 @@ impl Hub {
             .lock()
             .unwrap()
             .chatters
-            .contains(&(broadcast_id, user_id))
+            .get(&broadcast_id)
+            .is_some_and(|s| s.contains(&user_id))
     }
 
     /// 천천히 모드(#87): 이 사람이 이 방송에서 마지막으로 쓴 지 secs초가 지났으면 true를 돌려주고 지금 시각을 적는다.
