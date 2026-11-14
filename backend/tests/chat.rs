@@ -555,3 +555,29 @@ async fn one_user_over_their_limit_does_not_use_up_the_shared_ip_limit(db: PgPoo
         StatusCode::TOO_MANY_REQUESTS
     );
 }
+
+/// #110: 보낸 채팅 수를 방송마다 센다(방송 기록 요약용). 거절된 채팅(빈 글)은 세지 않는다.
+#[sqlx::test]
+async fn sent_chats_are_counted_for_the_summary(db: PgPool) {
+    let r = router(db.clone(), Hub::default(), 100);
+    let (bid, owner) = broadcast(&r).await;
+    let viewer = login(&r, 2).await;
+    assert_eq!(
+        say(&r, bid, "안녕하세요", Some(&viewer)).await.0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        say(&r, bid, "반가워요", Some(&owner)).await.0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        say(&r, bid, "   ", Some(&viewer)).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    let n: i32 = sqlx::query_scalar("SELECT chat_count FROM broadcasts WHERE id = $1")
+        .bind(bid)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(n, 2);
+}

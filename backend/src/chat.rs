@@ -374,5 +374,13 @@ pub async fn send(
     state
         .chat
         .publish(id, "chat", Some(user.id), &user.username, &text);
+    // 방송 기록 요약(#110): 채팅은 메모리에만 있어 수만 DB에 센다. 세기가 실패해도 채팅은 이미 갔으니 오류로 돌려주지 않는다.
+    if let Err(e) = sqlx::query("UPDATE broadcasts SET chat_count = chat_count + 1 WHERE id = $1")
+        .bind(id)
+        .execute(&state.db)
+        .await
+    {
+        tracing::warn!(error = %e, id, "채팅 수 세기 실패");
+    }
     Ok(StatusCode::NO_CONTENT)
 }

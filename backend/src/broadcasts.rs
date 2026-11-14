@@ -65,6 +65,64 @@ async fn fill_viewers(state: &AppState, rows: &mut [Broadcast]) {
     while let Some(Ok((i, v))) = set.join_next().await {
         rows[i].viewers = v;
     }
+    // 방송 기록 요약(#110): 받은 시청자 수가 지금까지 최고보다 크면 갱신한다(커질 때만 DB에 쓴다).
+    for b in rows.iter() {
+        let Some(v) = b.viewers.filter(|v| *v > 0) else {
+            continue;
+        };
+        if let Err(e) = sqlx::query(
+            "UPDATE broadcasts SET peak_viewers = $2 WHERE id = $1 AND peak_viewers < $2",
+        )
+        .bind(b.id)
+        .bind(v.min(i32::MAX as i64) as i32)
+        .execute(&state.db)
+        .await
+        {
+            tracing::warn!(error = %e, id = b.id, "최고 시청자 수 갱신 실패");
+        }
+    }
+}
+
+/// 방송 기록 요약(#110). 방송 주인만 본다.
+#[derive(Serialize)]
+pub struct Summary {
+    /// 처음 시작부터 종료(방송 중이면 지금)까지 초. 중간에 멈춘 시간도 들어간다. 시작한 적 없으면 null.
+    pub duration_secs: Option<i64>,
+    /// 최고 시청자 수(WebRTC로 본 사람, 누군가 방송 화면을 열어 둔 동안 5초마다 잰 값 중 최고)
+    pub peak_viewers: i32,
+    pub chat_count: i32,
+    pub donation_total: i64,
+    pub donation_count: i64,
+}
+
+pub async fn summary(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Path(id): Path<i64>,
+) -> Result<Json<Summary>, ApiError> {
+    owned(&state, id, &user).await?;
+    let (duration_secs, peak_viewers, chat_count): (Option<i64>, i32, i32) = sqlx::query_as(
+        "SELECT CASE WHEN COALESCE(first_started_at, started_at) IS NULL THEN NULL
+                     ELSE EXTRACT(EPOCH FROM (COALESCE(ended_at, now()) - COALESCE(first_started_at, started_at)))::BIGINT END,
+                peak_viewers, chat_count
+           FROM broadcasts WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_one(&state.db)
+    .await?;
+    let (donation_total, donation_count): (i64, i64) = sqlx::query_as(
+        "SELECT COALESCE(SUM(amount), 0)::BIGINT, COUNT(*) FROM donations WHERE broadcast_id = $1 AND status = 'paid'",
+    )
+    .bind(id)
+    .fetch_one(&state.db)
+    .await?;
+    Ok(Json(Summary {
+        duration_secs: duration_secs.map(|s| s.max(0)),
+        peak_viewers,
+        chat_count,
+        donation_total,
+        donation_count,
+    }))
 }
 
 /// 방송 조회 SQL 앞부분. sqlx는 SQL을 문자열 상수로만 받으므로(SQL 끼워 넣기 방지) concat!으로 붙인다.
