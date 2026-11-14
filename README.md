@@ -177,6 +177,8 @@ docker compose -f deploy/docker-compose.yml --env-file deploy/.env up -d --build
     find ~ -maxdepth 1 -name 'db-backup-*.sql.gz' -mtime +14 -delete
     ```
   - 녹화는 다시보기 3GB(넘으면 테스트 계정 것부터, 그다음 오래된 것부터 지움), 녹화 중인 파일까지 합쳐 비상 한도 4.5GB다. 빌드 캐시를 지우면 남는 공간이 약 12GB라 이 상한으로 둔다.
+- 메모리 상한(#135): db 384MB, backend 256MB, ome 512MB, web 128MB(`mem_limit`). 11-14 송출·녹화 시험 중 잰 최대값(ome 30MB, db 38MB, web 19MB, backend 4MB)보다 넉넉히 잡았다. 넘으면 그 컨테이너만 다시 시작된다.
+- DB 자동 백업(#135): 서버 cron이 하루 한 번(한국 03:30) `deploy/backup-db.sh`를 돌려 `~/db-backup-daily-<날짜>.sql.gz`를 만들고 최근 7개만 남긴다. 설치와 되살리는 방법은 스크립트 맨 위에 있다.
 
 ## 기능
 
