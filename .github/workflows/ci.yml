@@ -65,6 +65,28 @@ jobs:
       - name: 타입 검사 + 빌드
         run: npm run build
 
+  # 의존성에 알려진 취약점이 있는지 본다(#136). Rust는 RustSec 목록(cargo audit), 화면·브라우저 시험은 npm audit(높음 이상이면 실패).
+  # 실제 빌드에 들어가지 않아 예외로 둔 항목은 backend/.cargo/audit.toml에 이유와 함께 적는다.
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - name: Rust 의존성 (cargo audit)
+        working-directory: backend
+        run: cargo audit
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: 화면 의존성 (npm audit)
+        working-directory: frontend
+        run: npm audit --audit-level=high
+      - name: 브라우저 시험 의존성 (npm audit)
+        working-directory: e2e
+        run: npm audit --audit-level=high
+
   # 배포용 이미지를 실제로 만들고 띄워 본다(#22).
   # 2026-11-11 배포 장애(#44): 로컬 시험은 통과했는데 배포 이미지에서만 백엔드가 시작하자마자 멈췄다.
   # 그래서 배포와 같은 Dockerfile로 이미지를 만들고, DB에 붙여 시작되는지·응답하는지까지 본다.

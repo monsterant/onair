@@ -1,0 +1,6 @@
+# cargo audit 설정(#136). CI의 의존성 검사가 읽는다.
+[advisories]
+# RUSTSEC-2026-0459(libsqlite3-sys, C SQLite): sqlx의 선택 기능(SQLite)이라 Cargo.lock에 이름만 있고
+# 실제 빌드에는 들어가지 않는다(`cargo tree -i libsqlite3-sys --target all -e all` 결과 없음, 2026-11-14 확인).
+# sqlx 0.9.0이 sqlx-sqlite를 고정해 고친 버전(0.39)으로 올릴 수 없다. sqlx를 올릴 때 이 줄을 지운다.
+ignore = ["RUSTSEC-2026-0459"]
