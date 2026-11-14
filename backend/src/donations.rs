@@ -485,12 +485,18 @@ pub async fn list(
         .fetch_optional(&state.db)
         .await?;
     exists.ok_or(ApiError::NotFound)?;
+    // 합계·내역·순위를 한 시점의 데이터로 읽는다(#136). 따로 읽으면 그 사이에 후원이 적립돼 합계는 3건인데 내역은 4건처럼 어긋날 수 있다.
+    // REPEATABLE READ: 이 트랜잭션 안의 조회는 모두 처음 조회한 순간의 데이터를 본다. 읽기만 하니 READ ONLY.
+    let mut tx = state.db.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .execute(&mut *tx)
+        .await?;
     let (total, count): (i64, i64) = sqlx::query_as(
         "SELECT COALESCE(SUM(amount), 0)::BIGINT, COUNT(*) FROM donations
           WHERE broadcast_id = $1 AND status = 'paid'",
     )
     .bind(broadcast_id)
-    .fetch_one(&state.db)
+    .fetch_one(&mut *tx)
     .await?;
     let items = sqlx::query_as::<_, DonationItem>(
         "SELECT d.id, COALESCE(u.username, '(탈퇴한 사용자)') AS donor_username, d.amount, d.message, d.paid_at
@@ -499,7 +505,7 @@ pub async fn list(
           ORDER BY d.paid_at DESC, d.id DESC LIMIT 100",
     )
     .bind(broadcast_id)
-    .fetch_all(&state.db)
+    .fetch_all(&mut *tx)
     .await?;
     // 후원 순위(#99): 적립된 것만 사람마다 더한다. 합계가 같으면 그 금액에 먼저 다다른 사람(마지막 후원이 이른 사람)이 앞.
     // 탈퇴한 사용자(donor_id NULL)는 뺀다. 여러 사람이 한 줄로 합쳐져 틀린 순위가 되기 때문이다.
@@ -513,8 +519,9 @@ pub async fn list(
     )
     .bind(broadcast_id)
     .bind(TOP_DONORS)
-    .fetch_all(&state.db)
+    .fetch_all(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(Json(DonationList {
         total,
         count,
