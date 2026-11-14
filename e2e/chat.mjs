@@ -85,10 +85,10 @@ try {
   check('message is text, not HTML', !(await owner.evaluate(() => window.__xss)) && !(await owner.$('.chat-list img')));
   // 방송이 끝나면 쓸 수 없다
   for (const b of await owner.$$('.owner button')) if ((await b.evaluate((x) => x.textContent)) === '방송 종료') await b.click();
-  await sleep(2500);
-  await say(other, '끝났나요');
-  await sleep(1500);
-  check('cannot chat on ended broadcast', !(await has(owner, '끝났나요')) && (await other.$eval('.chat-panel .error', (e) => e.textContent)).includes('종료된 방송'), await other.$eval('.chat-panel .error', (e) => e.textContent).catch(() => ''));
+  // 보고 있던 화면의 입력 칸이 안내로 바뀐다(#136). 상세 화면은 5초마다 방송을 다시 읽고 채팅 칸은 2초마다 본다.
+  // 끝난 방송에 보내면 서버가 거절하는 것은 백엔드 시험(backend/tests/chat.rs)이 본다.
+  const replaced = await waitFor(async () => !(await other.$('.chat-form')), 12000);
+  check('cannot chat on ended broadcast', replaced && (await other.$eval('.chat-panel', (e) => e.textContent)).includes('종료된 방송이라'));
 
   // 종료된 방송을 새로 열면 입력 칸 대신 안내(#90 R5)
   await other.reload({ waitUntil: 'networkidle2' });
