@@ -388,3 +388,43 @@ async fn shared_demo_can_be_closed_while_guest_stays_open(db: PgPool) {
     let cfg = call(&r, "GET", "/config", None, None).await;
     assert_eq!(cfg.json["demo_login"], true);
 }
+
+/// #136: 송출이 잠깐 끊겨 대기가 된 몇 초 사이에는 24시간 지난 테스트 계정이라도 지우지 않는다.
+/// 10분 넘게 대기였거나 시작한 적 없는 방송뿐이면 지운다.
+#[sqlx::test]
+async fn cleanup_keeps_guests_whose_broadcast_just_dropped(db: PgPool) {
+    let r = router(db.clone(), true);
+    let mut ids = Vec::new();
+    for _ in 0..3 {
+        let (id, _, cookie) = guest(&r).await;
+        let b = call(
+            &r,
+            "POST",
+            "/broadcasts",
+            Some(json!({"title": "방송", "description": ""})),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(b.status, StatusCode::CREATED);
+        ids.push(id);
+    }
+    let (dropped, stale, never) = (ids[0], ids[1], ids[2]);
+    sqlx::query("UPDATE users SET created_at = now() - interval '25 hours'")
+        .execute(&db)
+        .await
+        .unwrap();
+    // 방금 끊김: 시작한 적 있고 1분 전에 대기가 됨
+    sqlx::query("UPDATE broadcasts SET status = 'ready', started_at = now() - interval '1 hour', updated_at = now() - interval '1 minute' WHERE owner_id = $1")
+        .bind(dropped).execute(&db).await.unwrap();
+    // 오래전에 끊김: 20분 전에 대기가 됨
+    sqlx::query("UPDATE broadcasts SET status = 'ready', started_at = now() - interval '1 hour', updated_at = now() - interval '20 minutes' WHERE owner_id = $1")
+        .bind(stale).execute(&db).await.unwrap();
+    // never: 시작한 적 없는 방송(started_at 없음)
+    assert_eq!(cleanup_guests(&db).await.unwrap(), 2);
+    let left: Vec<i64> = sqlx::query_scalar("SELECT id FROM users ORDER BY id")
+        .fetch_all(&db)
+        .await
+        .unwrap();
+    assert_eq!(left, vec![dropped]);
+    let _ = never;
+}

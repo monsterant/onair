@@ -1274,3 +1274,47 @@ async fn rotating_key_reports_when_the_old_stream_cannot_be_stopped(db: PgPool) 
     assert_eq!(j["stream_key"].as_str().unwrap().len(), 64);
     assert!(!fake.streams.lock().unwrap().contains(&name));
 }
+
+/// #136: 맞춰 보기가 목록을 받은 뒤에 바뀐 방송(웹훅이 먼저 반영)은 옛 목록대로 되돌리지 않는다.
+/// "목록 받음 → 송출 멈춤(웹훅이 대기로)"을 updated_at이 목록보다 나중인 것으로 흉내 낸다.
+#[sqlx::test]
+async fn reconcile_does_not_undo_changes_made_after_it_listed_streams(db: PgPool) {
+    let (fake, ome) = fake_ome().await;
+    let r = router(db.clone(), ome.clone()).await;
+    let owner = login(&r, 1).await;
+    let stopped = create(&r, &owner, "막 멈춤").await;
+    let started = create(&r, &owner, "막 시작").await;
+    let old_ready = create(&r, &owner, "오래된 대기").await;
+    let id = |b: &Value| b["id"].as_i64().unwrap();
+    // 막 멈춘 방송: 대기, 목록에는 아직 있음, 목록보다 나중에 바뀜
+    sqlx::query("UPDATE broadcasts SET status = 'ready', started_at = now() - interval '1 minute', updated_at = now() + interval '1 minute' WHERE id = $1")
+        .bind(id(&stopped)).execute(&db).await.unwrap();
+    // 막 시작한 방송: 방송 중, 목록에는 아직 없음, 시작 시각은 오래됐지만 목록보다 나중에 바뀜
+    sqlx::query("UPDATE broadcasts SET status = 'live', started_at = now() - interval '1 minute', updated_at = now() + interval '1 minute' WHERE id = $1")
+        .bind(id(&started)).execute(&db).await.unwrap();
+    // 비교용: 목록보다 먼저 바뀐 대기 방송이 목록에 있으면 방송 중이 된다(예전 동작)
+    sqlx::query("UPDATE broadcasts SET updated_at = now() - interval '1 minute' WHERE id = $1")
+        .bind(id(&old_ready))
+        .execute(&db)
+        .await
+        .unwrap();
+    {
+        let mut s = fake.streams.lock().unwrap();
+        s.insert(stopped["stream_name"].as_str().unwrap().to_string());
+        s.insert(old_ready["stream_name"].as_str().unwrap().to_string());
+    }
+    onair_backend::ome::reconcile(&db, &ome).await.unwrap();
+    let status = |i: i64| {
+        let db = db.clone();
+        async move {
+            sqlx::query_scalar::<_, String>("SELECT status FROM broadcasts WHERE id = $1")
+                .bind(i)
+                .fetch_one(&db)
+                .await
+                .unwrap()
+        }
+    };
+    assert_eq!(status(id(&stopped)).await, "ready");
+    assert_eq!(status(id(&started)).await, "live");
+    assert_eq!(status(id(&old_ready)).await, "live");
+}

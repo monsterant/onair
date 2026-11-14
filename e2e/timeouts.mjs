@@ -103,10 +103,13 @@ try {
   if (ome) {
     execSync(`docker pause ${ome}`);
     const t2 = Date.now();
-    const gaveUp3 = await waitFor(() => isIdle(owner).then(async (i) => i && /끊겨|끊겼/.test(await note(owner))), 60_000);
+    // 서버는 아직 이 방송을 "방송 중"으로 본다(OME가 멈춰 닫힘 알림이 없음). 그래서 바로 멈추지 않고 15초를 기다리거나
+    // 브라우저가 실패로 판단한 뒤 멈춰야 한다. "서버에서 끊겼다" 문구가 나오면 잘못 멈춘 것이다(#136 리뷰).
+    const gaveUp3 = await waitFor(() => isIdle(owner).then(async (i) => i && /15초 넘게|연결이 끊겨/.test(await note(owner))), 60_000);
     const took3 = Math.round((Date.now() - t2) / 1000);
     execSync(`docker unpause ${ome}`);
     check('lost connection -> stops with reason within 45s', gaveUp3 && took3 <= 45, `${took3}s ${await note(owner)}`);
+    check('lost connection is not reported as a server stop', !(await note(owner)).includes('서버에서'), await note(owner));
     results.push(`INFO lost connection stop took ${took3}s (disconnected 감지 시간 + 15초)`);
   }
 } catch (e) {
