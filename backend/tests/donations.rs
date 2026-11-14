@@ -1546,7 +1546,7 @@ async fn late_done_confirm_does_not_credit_a_canceled_order(db: PgPool) {
         Some(&donor),
     )
     .await;
-    assert_ne!(c.status, StatusCode::OK, "{:?}", c.json);
+    assert_eq!(c.status, StatusCode::CONFLICT, "{:?}", c.json);
     let st: String = sqlx::query_scalar("SELECT status FROM donations WHERE order_id = $1")
         .bind(&oid)
         .fetch_one(&db)
@@ -1554,4 +1554,35 @@ async fn late_done_confirm_does_not_credit_a_canceled_order(db: PgPool) {
         .unwrap();
     assert_eq!(st, "canceled");
     assert_eq!(summary(&r, bid).await["total"], 0);
+}
+
+/// #136 리뷰: 한 주문의 첫 결제가 취소돼 주문이 '취소'가 됐어도, 다시 낸 다른 결제가 완료되면 적립한다(#41 리뷰의 동작 유지).
+#[sqlx::test]
+async fn another_payment_is_credited_after_the_first_one_was_canceled(db: PgPool) {
+    let (fake, toss) = fake_toss().await;
+    let r = router(db.clone(), toss);
+    let (bid, donor, oid) = setup(&r, 5000).await;
+    fake.pay("pk_first", &oid, 5000);
+    fake.set_status("pk_first", "CANCELED");
+    let n = call(
+        &r,
+        "POST",
+        "/donations/notify",
+        Some(json!({"paymentKey": "pk_first"})),
+        None,
+    )
+    .await;
+    assert_eq!(n.status, StatusCode::CONFLICT);
+    fake.pay("pk_second", &oid, 5000);
+    let c = call(
+        &r,
+        "POST",
+        "/donations/confirm",
+        confirm_body("pk_second", &oid, 5000),
+        Some(&donor),
+    )
+    .await;
+    assert_eq!(c.status, StatusCode::OK, "{:?}", c.json);
+    assert_eq!(c.json["status"], "paid");
+    assert_eq!(summary(&r, bid).await["total"], 5000);
 }

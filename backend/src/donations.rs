@@ -233,8 +233,9 @@ async fn mark_failed(state: &AppState, id: i64) -> Result<(), ApiError> {
 }
 
 /// 토스가 확인해 준 결제를 대기 주문과 맞춰 보고 한 번만 적립한다.
-/// 주문번호·금액이 맞고 DONE인 결제는 주문이 failed여도 적립한다. 토스가 이미 돈을 받았기 때문이다.
-/// (예: 결제창을 두 번 열어 첫 결제는 취소, 두 번째는 승인된 경우. 취소 통지가 먼저 와서 failed가 됐어도 승인된 결제를 잃지 않게, #41 리뷰)
+/// 주문번호·금액이 맞고 DONE인 결제는 주문이 failed여도, 다른 결제 키로 canceled여도 적립한다. 토스가 이미 돈을 받았기 때문이다.
+/// (예: 결제창을 두 번 열어 첫 결제는 취소, 두 번째는 승인된 경우. 취소 통지가 먼저 와도 승인된 결제를 잃지 않게, #41 리뷰)
+/// 취소된 바로 그 결제(같은 결제 키)는 늦게 "완료"로 와도 적립하지 않는다(#136).
 async fn settle(state: &AppState, d: &Donation, p: &Payment) -> Result<Donation, ApiError> {
     if p.order_id != d.order_id || p.total_amount != d.amount {
         tracing::warn!(order_id = %d.order_id, "토스 결제와 주문이 맞지 않음");
@@ -243,14 +244,15 @@ async fn settle(state: &AppState, d: &Donation, p: &Payment) -> Result<Donation,
     }
     // 전액 취소(환불)된 결제는 주문을 '취소'로 바꾼다(#41 리뷰, #136).
     // - 이미 이 결제 키로 적립했으면 합계에서 뺀다.
-    // - 아직 대기·실패면 '실패'가 아니라 '취소'로 둔다. 적립은 대기·실패에서만 되므로, 취소를 본 뒤 늦게 도착한
-    //   "결제 완료" 확인(취소 전에 토스에 물어본 요청)이 이 주문을 다시 적립하지 못한다(#136 경쟁).
+    // - 아직 대기·실패면 '실패'가 아니라 '취소'로 두고, 어느 결제가 취소됐는지(결제 키)를 함께 적는다.
+    //   취소를 본 뒤 늦게 도착한 같은 결제의 "완료" 확인(취소 전에 토스에 물어본 요청)은 이 주문을 다시 적립하지 못한다.
+    //   다른 결제(결제창을 다시 열어 새로 낸 것)가 완료되면 적립한다(#136 경쟁, #136 리뷰).
     // - 판단은 이 한 문장의 조건으로 DB가 한다. 앞에서 읽은 주문 상태(d.status)가 옛 값이어도, 그 사이 다른 요청이
     //   적립했으면 같은 결제 키일 때 함께 취소된다.
     // 부분 취소(PARTIAL_CANCELED)는 전액을 빼면 틀리므로 여기서 다루지 않는다. 부분 환불은 이 서비스에서 일어나지 않는다.
     if p.status == "CANCELED" {
         sqlx::query(
-            "UPDATE donations SET status = 'canceled'
+            "UPDATE donations SET status = 'canceled', payment_key = $2
               WHERE id = $1 AND (status IN ('pending', 'failed') OR (status = 'paid' AND payment_key = $2))",
         )
         .bind(d.id)
@@ -277,7 +279,8 @@ async fn settle(state: &AppState, d: &Donation, p: &Payment) -> Result<Donation,
     }
     let updated = sqlx::query(
         "UPDATE donations SET status = 'paid', payment_key = $1, paid_at = now()
-          WHERE id = $2 AND status IN ('pending', 'failed')",
+          WHERE id = $2 AND (status IN ('pending', 'failed')
+                             OR (status = 'canceled' AND payment_key IS DISTINCT FROM $1))",
     )
     .bind(&p.payment_key)
     .bind(d.id)
