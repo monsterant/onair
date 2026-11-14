@@ -120,6 +120,12 @@ async fn main() {
                 if let Err(e) = onair_backend::auth::cleanup_sessions(&db).await {
                     tracing::warn!(error = %e, "만료 세션 정리 실패");
                 }
+                // 결제하지 않고 하루 지난 후원 주문 정리(#136)
+                match onair_backend::donations::cleanup_pending(&db).await {
+                    Ok(0) => {}
+                    Ok(n) => tracing::info!(count = n, "지난 대기 후원 주문을 지웠습니다"),
+                    Err(e) => tracing::warn!(error = %e, "대기 후원 주문 정리 실패"),
+                }
             }
         });
     }

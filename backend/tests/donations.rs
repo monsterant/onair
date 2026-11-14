@@ -1437,3 +1437,82 @@ async fn deleting_a_broadcast_keeps_its_donation_records(db: PgPool) {
         .unwrap();
     assert_eq!(paid, 2);
 }
+
+/// #136: 끝난 방송에는 새 후원 주문을 만들지 않는다(409). 끝나기 전에 만든 주문은 결제할 수 있다.
+#[sqlx::test]
+async fn ended_broadcast_does_not_take_new_donation_orders(db: PgPool) {
+    let (fake, toss) = fake_toss().await;
+    let r = router(db.clone(), toss);
+    let (bid, donor, oid) = setup(&r, 3000).await;
+    sqlx::query("UPDATE broadcasts SET status = 'ended' WHERE id = $1")
+        .bind(bid)
+        .execute(&db)
+        .await
+        .unwrap();
+    let o = call(
+        &r,
+        "POST",
+        &format!("/broadcasts/{bid}/donations"),
+        Some(json!({"amount": 1000, "message": "늦었어요"})),
+        Some(&donor),
+    )
+    .await;
+    assert_eq!(o.status, StatusCode::CONFLICT, "{:?}", o.json);
+    fake.pay("pk_136", &oid, 3000);
+    let c = call(
+        &r,
+        "POST",
+        "/donations/confirm",
+        confirm_body("pk_136", &oid, 3000),
+        Some(&donor),
+    )
+    .await;
+    assert_eq!(c.status, StatusCode::OK, "{:?}", c.json);
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM donations")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(n, 1);
+}
+
+/// #136: 결제하지 않고 하루 지난 대기 주문만 지운다. 하루 안 된 대기 주문, 실패·적립 기록은 남는다.
+#[sqlx::test]
+async fn stale_pending_orders_are_cleaned_up(db: PgPool) {
+    let (_fake, toss) = fake_toss().await;
+    let r = router(db.clone(), toss);
+    let (bid, donor, old) = setup(&r, 1000).await;
+    let fresh = order(&r, bid, &donor, 1000).await;
+    let old_failed = order(&r, bid, &donor, 1000).await;
+    let old_paid = order(&r, bid, &donor, 1000).await;
+    sqlx::query(
+        "UPDATE donations SET created_at = now() - interval '25 hours' WHERE order_id = ANY($1)",
+    )
+    .bind(vec![old.clone(), old_failed.clone(), old_paid.clone()])
+    .execute(&db)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE donations SET status = 'failed' WHERE order_id = $1")
+        .bind(&old_failed)
+        .execute(&db)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE donations SET status = 'paid', paid_at = now(), payment_key = 'pk_old' WHERE order_id = $1")
+        .bind(&old_paid)
+        .execute(&db)
+        .await
+        .unwrap();
+    assert_eq!(
+        onair_backend::donations::cleanup_pending(&db)
+            .await
+            .unwrap(),
+        1
+    );
+    let mut left: Vec<String> = sqlx::query_scalar("SELECT order_id FROM donations")
+        .fetch_all(&db)
+        .await
+        .unwrap();
+    left.sort();
+    let mut want = vec![fresh, old_failed, old_paid];
+    want.sort();
+    assert_eq!(left, want);
+}
