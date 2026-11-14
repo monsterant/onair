@@ -449,6 +449,7 @@ async fn settle_finishing(db: &sqlx::PgPool, dir: &FsPath) -> Result<(), sqlx::E
 }
 
 /// 4. 다시보기 합계가 몫을 넘으면 테스트 계정의 다시보기부터, 그다음 오래된 다시보기부터 지운다.
+///
 /// 테스트 계정의 녹화로 3GB를 채워 일반 회원의 다시보기가 밀려 지워지지 않게 한다(#132).
 /// 테스트 계정은 auth::cleanup_guests와 같은 기준(이름 + 비밀번호 표시 값)으로 가린다.
 async fn enforce_cap(db: &sqlx::PgPool, dir: &FsPath) -> Result<(), sqlx::Error> {
