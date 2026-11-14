@@ -497,8 +497,24 @@ pub async fn rotate_key(
             "종료된 방송은 송출 키를 바꿀 수 없습니다",
         ));
     }
-    // 옛 키로 붙어 있는 송출을 끊는다
-    state.ome.stop_stream(&b.stream_name).await;
+    // 옛 키로 붙어 있는 송출을 끊는다. 키를 먼저 바꿨으니 옛 송출이 다시 붙으려 해도 거절된다.
+    // 끊기가 실패하면 3번까지 다시 해 보고, 그래도 안 되면 알린다(#131). 조용히 성공으로 보이면
+    // 옛 키 송출이 계속되는데도 주인은 끊긴 줄 안다. 다시 누르면 키를 또 바꾸고 다시 끊는다.
+    let mut stopped = false;
+    for attempt in 0..3 {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        if state.ome.stop_stream(&b.stream_name).await {
+            stopped = true;
+            break;
+        }
+    }
+    if !stopped {
+        return Err(ApiError::BadGateway(
+            "송출 키는 바꿨지만 지금 송출을 끊지 못했습니다. 잠시 뒤 다시 '송출 키 다시 만들기'를 누르세요",
+        ));
+    }
     let whip_path = format!("/app/{}?direction=whip&key={key}", b.stream_name);
     Ok((
         [(header::CACHE_CONTROL, "no-store")],

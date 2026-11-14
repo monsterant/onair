@@ -79,8 +79,10 @@ impl OmeApi {
     }
 
     /// 스트림을 끊는다. 실패해도 오류를 돌려주지 않고 기록만 남긴다.
-    pub async fn stop_stream(&self, name: &str) {
-        let Some(i) = &self.inner else { return };
+    /// 스트림을 끊는다. 끊었거나 원래 없으면(404) true, OME가 실패하거나 닿지 않으면 false(#131).
+    /// OME API가 설정되지 않았으면(로컬 등) 할 일이 없으니 true.
+    pub async fn stop_stream(&self, name: &str) -> bool {
+        let Some(i) = &self.inner else { return true };
         let url = format!("{}/{}", Self::streams_url(&i.base), name);
         match i
             .http
@@ -89,9 +91,17 @@ impl OmeApi {
             .send()
             .await
         {
-            Ok(r) if r.status().is_success() || r.status() == reqwest::StatusCode::NOT_FOUND => {}
-            Ok(r) => tracing::warn!(status = %r.status(), name, "OME 스트림 끊기 실패"),
-            Err(e) => tracing::warn!(error = %e, name, "OME API에 닿지 못함"),
+            Ok(r) if r.status().is_success() || r.status() == reqwest::StatusCode::NOT_FOUND => {
+                true
+            }
+            Ok(r) => {
+                tracing::warn!(status = %r.status(), name, "OME 스트림 끊기 실패");
+                false
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, name, "OME API에 닿지 못함");
+                false
+            }
         }
     }
 
