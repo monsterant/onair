@@ -13,7 +13,8 @@
 		Content-Security-Policy "frame-ancestors 'none'"
 		# 스크립트 출처 제한(#136) 1단계: 막지 않고 어기는 것을 브라우저 콘솔에 보고만 한다. 운영에서 화면·결제위젯·플레이어에
 		# 위반이 없는 것을 확인한 뒤 위의 Content-Security-Policy로 옮긴다. 토스 결제위젯은 *.tosspayments.com에서,
-		# 플레이어(OvenPlayer·hls.js)는 화면 코드와 함께 우리 주소에서 온다. hls.js는 blob: 주소로 작업 스레드를 띄운다.
+		# 플레이어(OvenPlayer·hls.js)는 화면 코드와 함께 우리 주소에서 온다. worker-src blob:은 대비로 둔다
+		# (OvenPlayer parseStream이나 hls.js UMD 빌드는 blob 작업 스레드를 쓸 수 있다. 지금 설정에서는 쓰지 않는다).
 		Content-Security-Policy-Report-Only "script-src 'self' https://*.tosspayments.com; worker-src 'self' blob:; object-src 'none'; base-uri 'self'"
 		Referrer-Policy "strict-origin-when-cross-origin"
 		# 카메라·마이크·화면 공유는 우리 화면에서만 쓸 수 있다(다른 사이트를 겹쳐 띄워 몰래 켜지 못하게). 위치 정보는 쓰지 않는다.
