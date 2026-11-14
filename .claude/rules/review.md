@@ -125,7 +125,7 @@ pstack(Cursor의 `cursor/plugins` 저장소, MIT)을 onair 폴더에만 설치�
 |---|---|
 | autopilot-full, shipping 플레이북 (PR 머지까지 함) | 머지는 사용자가 한다 |
 | never-block-on-the-human 원칙 중 "승인 없이 진행" | 이슈 묶음 승인, 공모 밖 기능 보고, 돈 드는 일 보고는 그대로 지킨다 |
-| `/pstack:setup-pstack` | `~/.claude/rules/`에 파일을 써서 다른 프로젝트까지 모든 프로젝트에 영향을 준다 |
+| `/pstack:setup-pstack` | `~/.claude/rules/`에 파일을 써서 다른 프로젝트를 포함한 모든 프로젝트에 영향을 준다 |
 | Cursor 전용 기능 (Bugbot, Automations, grok 모델) | Claude Code에 없다. 지금 세션 모델로 대신한다 |
 
 ### 정말 모르겠을 때
