@@ -132,7 +132,7 @@ node run-all.mjs                      # 모두 (http://localhost:5173)
 node pc.mjs                           # 하나만
 node run-all.mjs https://<배포 주소>/ --gap 60   # 실제 서버. 같은 IP 요청 제한(분당 20회) 때문에 시험 사이를 띄운다
 ```
-- Node.js 20.11 이상이 필요하다. Chrome 위치가 다르면 `CHROME_PATH` 환경변수로 알려 준다.
+- Node.js 22.12 이상이 필요하다(puppeteer-core 25). Chrome 위치가 다르면 `CHROME_PATH` 환경변수로 알려 준다.
 - `ranking.mjs`·`follows.mjs`는 로컬 DB 컨테이너에 직접 SQL을 넣는다. 컨테이너 이름은 기본 `rodlspr-db-1`이고, 저장소 폴더 이름이 다르면 `E2E_DB_CONTAINER=<폴더이름>-db-1`처럼 알려 준다(`docker ps`로 확인).
 - `recording.mjs`는 `.env`의 `RECORDINGS_DIR`, `donate.mjs`는 `TOSS_CLIENT_KEY`·`TOSS_SECRET_KEY`(토스 **테스트** 키)가 있어야 통과한다. 비어 있으면 그 기능이 꺼져 실패로 나온다.
 - 시험 하나를 따로 돌리면 실패가 있어도 끝 코드는 0이다. 실패 여부는 `FAIL` 줄로 본다(`run-all.mjs`는 실패가 있으면 1).
