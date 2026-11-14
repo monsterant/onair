@@ -522,6 +522,10 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
     studio?.update(b);
   };
 
+  // 이 화면에서 쓰는 송출기(소유자만). 화면을 떠나면 송출을 멈춘다.
+  const publisher = isOwner ? new Publisher() : null;
+  const owner = publisher ? ownerPanel(b, (nb) => { b = nb; paint(); }, publisher) : null;
+  const studio = publisher ? studioPanel(() => b, publisher) : null;
   main.append(
     el('div', { className: 'detail-head' }, statusBox, titleEl),
     el('p', { className: 'hint owner-line' }, `방송자: ${b.owner_username} `, followButton(b.owner_id, b.owner_username)),
@@ -530,12 +534,10 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
     soundBtn,
     netNote,
     offAir,
-    chatPanel(id, () => b),
   );
-  // 이 화면에서 쓰는 송출기(소유자만). 화면을 떠나면 송출을 멈춘다.
-  const publisher = isOwner ? new Publisher() : null;
-  const owner = publisher ? ownerPanel(b, (nb) => { b = nb; paint(); }, publisher) : null;
-  const studio = publisher ? studioPanel(() => b, publisher) : null;
+  // 소유자는 방송하기 칸(시작 버튼·미리보기)을 채팅보다 먼저 본다(#124: 채팅 칸에 밀려 첫 화면 밖에 있었다)
+  if (studio) main.append(studio.el);
+  main.append(chatPanel(id, () => b));
   // 송출이 시작·멈추면 방송 상태를 바로 다시 읽어 위쪽 표시(대기/방송 중)를 맞춘다. 5초 새로고침을 기다리지 않는다.
   if (publisher) {
     const showStudio = publisher.onState;
@@ -554,8 +556,6 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
       }
     };
   }
-  // 소유자는 방송하기 칸을 설명보다 먼저 본다(긴 설명 아래에 묻히지 않게)
-  if (studio) main.append(studio.el);
   main.append(descEl, moreBtn);
   if (owner) main.append(owner.el);
   main.append(recordingsPanel(id), donationsPanel(b, gen), commentsPanel(id, gen, b.owner_id));
