@@ -65,14 +65,10 @@ export async function api<T>(method: string, path: string, body?: unknown): Prom
   return data as T;
 }
 
-/** 지금 로그인한 사용자. 로그인하지 않았으면 null */
+/** 지금 로그인한 사용자. 로그인하지 않았으면 null.
+ *  /auth/session은 로그인하지 않아도 200이라 개발자 도구에 401 오류가 찍히지 않는다(#134). */
 export async function currentUser(): Promise<User | null> {
-  try {
-    return await api<User>('GET', '/auth/me');
-  } catch (e) {
-    if (e instanceof ApiError && e.status === 401) return null;
-    throw e;
-  }
+  return (await api<{ user: User | null }>('GET', '/auth/session')).user;
 }
 
 export const signup = (username: string, password: string) =>
