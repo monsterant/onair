@@ -75,7 +75,8 @@ pub struct DonationList {
 pub struct Donation {
     pub id: i64,
     pub order_id: String,
-    pub broadcast_id: i64,
+    /// 방송이 지워지면 None(#128). 후원 기록은 남긴다.
+    pub broadcast_id: Option<i64>,
     /// 후원자가 탈퇴(테스트 계정 정리 등)하면 None. 후원 기록과 합계는 남긴다.
     pub donor_id: Option<i64>,
     pub amount: i64,
@@ -290,6 +291,10 @@ async fn settle(state: &AppState, d: &Donation, p: &Payment) -> Result<Donation,
 
 /// 후원 안내를 그 방송 채팅에 보낸다(#86). 실패해도 적립에는 영향이 없다.
 async fn announce(state: &AppState, d: &Donation) {
+    // 방송이 지워진 뒤 결제가 끝났으면 안내할 채팅방이 없다(#128)
+    let Some(broadcast_id) = d.broadcast_id else {
+        return;
+    };
     let donor: Option<String> = match d.donor_id {
         Some(id) => sqlx::query_scalar("SELECT username FROM users WHERE id = $1")
             .bind(id)
@@ -304,7 +309,7 @@ async fn announce(state: &AppState, d: &Donation) {
     // 주문 뒤 결제 사이에 금칙어가 바뀌었을 수 있어 지금 목록으로 한 번 더 본다. 들어 있으면 메시지만 뺀다.
     let row: Option<(String, Vec<String>)> =
         match sqlx::query_as("SELECT status, banned_words FROM broadcasts WHERE id = $1")
-            .bind(d.broadcast_id)
+            .bind(broadcast_id)
             .fetch_optional(&state.db)
             .await
         {
@@ -322,7 +327,7 @@ async fn announce(state: &AppState, d: &Donation) {
     }
     // 막히기 전에 만든 주문을 막힌 뒤 결제해도 메시지는 채팅에 내보내지 않는다(#127 리뷰). 금액 안내만 남긴다.
     let donor_banned = match d.donor_id {
-        Some(id) => crate::moderation::banned(&state.db, d.broadcast_id, id)
+        Some(id) => crate::moderation::banned(&state.db, broadcast_id, id)
             .await
             .unwrap_or(true),
         None => false,
@@ -336,7 +341,7 @@ async fn announce(state: &AppState, d: &Donation) {
     }
     state
         .chat
-        .publish(d.broadcast_id, "donation", None, &name, &text);
+        .publish(broadcast_id, "donation", None, &name, &text);
 }
 
 /// 1234567 → "1,234,567"

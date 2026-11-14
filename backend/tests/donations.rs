@@ -1374,3 +1374,66 @@ async fn banned_users_and_banned_words_cannot_use_donations(db: PgPool) {
     assert_eq!(summary(&r, bid).await["total"], 3000);
     assert_eq!(hub.subscribe(bid).0.len(), 2);
 }
+
+/// #128: 방송을 지워도(주인이 지우거나 테스트 계정 정리) 적립된 후원 기록은 남는다. 방송 번호만 비운다.
+/// 방송이 지워진 뒤 결제가 끝나도 적립은 되고(기록), 채팅 안내는 없다.
+#[sqlx::test]
+async fn deleting_a_broadcast_keeps_its_donation_records(db: PgPool) {
+    let (fake, toss) = fake_toss().await;
+    let r = router(db.clone(), toss);
+    let (bid, donor, oid) = setup(&r, 5000).await;
+    let owner = login(&r, 1).await;
+    fake.pay("pk_128", &oid, 5000);
+    let c = call(
+        &r,
+        "POST",
+        "/donations/confirm",
+        confirm_body("pk_128", &oid, 5000),
+        Some(&donor),
+    )
+    .await;
+    assert_eq!(c.status, StatusCode::OK, "{:?}", c.json);
+    // 결제 전 주문도 하나 만들어 둔다
+    let pending = order(&r, bid, &donor, 1000).await;
+    assert_eq!(
+        call(
+            &r,
+            "DELETE",
+            &format!("/broadcasts/{bid}"),
+            None,
+            Some(&owner)
+        )
+        .await
+        .status,
+        StatusCode::NO_CONTENT
+    );
+    // 기록은 남고 방송 번호만 비었다
+    let rows: Vec<(String, Option<i64>, i64, String)> =
+        sqlx::query_as("SELECT order_id, broadcast_id, amount, status FROM donations ORDER BY id")
+            .fetch_all(&db)
+            .await
+            .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|(_, b, _, _)| b.is_none()));
+    assert_eq!(
+        (rows[0].0.as_str(), rows[0].2, rows[0].3.as_str()),
+        (oid.as_str(), 5000, "paid")
+    );
+    // 방송이 지워진 뒤 결제가 끝나도 적립은 되고 오류가 나지 않는다
+    fake.pay("pk_128b", &pending, 1000);
+    let c = call(
+        &r,
+        "POST",
+        "/donations/confirm",
+        confirm_body("pk_128b", &pending, 1000),
+        Some(&donor),
+    )
+    .await;
+    assert_eq!(c.status, StatusCode::OK, "{:?}", c.json);
+    assert!(c.json["broadcast_id"].is_null());
+    let paid: i64 = sqlx::query_scalar("SELECT count(*) FROM donations WHERE status = 'paid'")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(paid, 2);
+}
