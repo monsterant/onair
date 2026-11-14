@@ -73,7 +73,8 @@ async fn main() {
         }
     }
 
-    // 심사용 테스트 계정 로그인(/auth/demo/1, /auth/demo/2). "true"일 때만 켠다.
+    // 테스트 계정 로그인(/auth/guest)과 공용 데모(/auth/demo/1,2). "true"일 때만 켠다.
+    // SHARED_DEMO_OFF=true면 공용 데모만 닫는다(#130, 배포 compose 기본값).
     let auth = onair_backend::auth::AuthConfig {
         demo_login: std::env::var("DEMO_LOGIN").is_ok_and(|v| v.trim() == "true"),
         shared_demo_off: std::env::var("SHARED_DEMO_OFF").is_ok_and(|v| v.trim() == "true"),

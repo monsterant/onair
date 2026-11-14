@@ -395,7 +395,7 @@ pub async fn me(user: CurrentUser) -> Json<Me> {
     })
 }
 
-/// 심사용 테스트 계정으로 바로 로그인한다. `DEMO_LOGIN=true`일 때만 열린다.
+/// 공용 데모 계정(demo1·demo2)으로 바로 로그인한다. `DEMO_LOGIN=true`이고 `SHARED_DEMO_OFF`가 아닐 때만 열린다(#130).
 /// n=1이면 demo1, n=2이면 demo2. 소유자와 다른 사용자를 둘 다 시험할 수 있게 두 명을 둔다.
 /// 데모 사용자의 비밀번호는 쓸 수 없는 값이라, 이 길로만 로그인할 수 있다.
 pub async fn demo_login(
