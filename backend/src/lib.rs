@@ -199,3 +199,41 @@ async fn config(State(state): State<AppState>) -> Json<PublicConfig> {
         donations: state.toss.is_configured(),
     })
 }
+
+/// DB 연결 풀 설정. main.rs와 시험이 같이 쓴다.
+/// - 연결 5개, 연결을 받는 데 3초까지 기다린다.
+/// - 연결이 풀로 돌아올 때 아직 트랜잭션 안에 남아 있으면 버린다(11-14). 요청이 도중에 끊기는 등으로 트랜잭션이
+///   정리되지 않은 연결이 풀에 돌아오면, 그 연결을 받은 다음 요청들이 엉뚱한 트랜잭션 안에서 돌거나
+///   "이미 실패한 트랜잭션"(current transaction is aborted) 오류로 모두 실패한다. 로컬 시험에서 실제로 일어났고 원인은
+///   재현하지 못했다. 원인과 상관없이 다른 요청으로 번지지 않게 막고, 일어나면 경고 로그로 남긴다.
+///   확인 방법: 트랜잭션 밖에서 단순 프로토콜로 보낸 문장은 그 문장이 곧 트랜잭션이라 now()(트랜잭션 시작 시각)와
+///   statement_timestamp()가 같다. 트랜잭션이 남아 있으면 now()가 더 이르고, 실패한 트랜잭션이면 쿼리가 오류다.
+///   정상적으로 버린 트랜잭션은 sqlx가 이 확인 쿼리 앞에 ROLLBACK을 먼저 보내 정리한다.
+pub fn pool_options() -> sqlx::postgres::PgPoolOptions {
+    sqlx::postgres::PgPoolOptions::new()
+        .max_connections(5)
+        .acquire_timeout(std::time::Duration::from_secs(3))
+        .after_release(|conn, _meta| {
+            Box::pin(async move {
+                use sqlx::Row;
+                // 단순 프로토콜(raw_sql)로 보낸다. 확장 프로토콜(query)은 트랜잭션 밖에서도 두 시각이 조금 달라
+                // 정상 연결까지 버리게 된다(시험에서 확인).
+                match sqlx::raw_sql("SELECT now() = statement_timestamp()")
+                    .fetch_one(&mut *conn)
+                    .await
+                    .and_then(|row| row.try_get::<bool, _>(0))
+                {
+                    Ok(true) => Ok(true),
+                    Ok(false) => {
+                        tracing::warn!("트랜잭션이 남은 DB 연결을 풀에서 버림");
+                        Ok(false)
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "상태 확인에 실패한 DB 연결을 풀에서 버림");
+                        // 오류를 돌려주면 sqlx가 깨진 연결로 보고 바로 끊는다(close_hard)
+                        Err(e)
+                    }
+                }
+            })
+        })
+}

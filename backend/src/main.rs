@@ -1,7 +1,6 @@
 use std::time::Duration;
 
 use onair_backend::{AppState, app};
-use sqlx::postgres::PgPoolOptions;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -18,9 +17,7 @@ async fn main() {
 
     // connect_lazy: 시작할 때 DB에 바로 붙지 않고, 처음 쓸 때 붙는다.
     // DB가 조금 늦게 떠도 서버가 죽지 않게 하려는 것이다. DB 상태는 /health로 확인한다.
-    let db = PgPoolOptions::new()
-        .max_connections(5)
-        .acquire_timeout(Duration::from_secs(3))
+    let db = onair_backend::pool_options()
         .connect_lazy(&database_url)
         .expect("DATABASE_URL 형식이 잘못되었습니다");
 
