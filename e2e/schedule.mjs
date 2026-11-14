@@ -3,11 +3,12 @@
 import { execFileSync } from 'child_process';
 import puppeteer from 'puppeteer-core';
 import { CHROME } from './chrome.mjs';
+import { DB_CONTAINER } from './local-db.mjs';
 
 const BASE = (process.argv[2] ?? 'http://localhost:5173/').replace(/\/$/, '');
 const LOCAL = /localhost|127.0.0.1/.test(BASE);
 // 지난 예정은 API로 만들 수 없어서(앞으로 7일 안만 받음) 로컬에서만 DB로 시각을 바꿔 본다(#136)
-const psql = (sql) => execFileSync('docker', ['exec', process.env.E2E_DB_CONTAINER || 'rodlspr-db-1', 'psql', '-U', 'onair', '-d', 'onair', '-tAc', sql], { encoding: 'utf8' }).trim();
+const psql = (sql) => execFileSync('docker', ['exec', DB_CONTAINER, 'psql', '-U', 'onair', '-d', 'onair', '-tAc', sql], { encoding: 'utf8' }).trim();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const results = [];
 const check = (name, ok, extra = '') => results.push(`${ok ? 'PASS' : 'FAIL'} ${name} ${ok ? '' : extra}`);
