@@ -1229,7 +1229,7 @@ async fn banned_users_and_banned_words_cannot_use_donations(db: PgPool) {
             &r,
             "PUT",
             &words,
-            Some(json!({"words": ["광고"]})),
+            Some(json!({"words": ["광고", "Spam"]})),
             Some(&owner)
         )
         .await
@@ -1250,10 +1250,18 @@ async fn banned_users_and_banned_words_cannot_use_donations(db: PgPool) {
             .await
         }
     };
-    // 금칙어가 든 메시지는 400(대소문자 무시). 없는 메시지는 된다.
+    // 금칙어가 든 메시지는 400(영문은 대소문자 무시). 없는 메시지는 된다.
     let o = order_with("무료 광고합니다").await;
     assert_eq!(o.status, StatusCode::BAD_REQUEST);
     assert!(o.json["error"].as_str().unwrap().contains("막은 단어"));
+    assert_eq!(
+        order_with("no SPAM here").await.status,
+        StatusCode::BAD_REQUEST
+    );
+    // 막히기 전에 만들어 둔 주문(메시지 있음)
+    let early = order_with("미리 쌓은 메시지").await;
+    assert_eq!(early.status, StatusCode::CREATED);
+    let early_oid = early.json["order_id"].as_str().unwrap().to_string();
     let ok = order_with("응원해요").await;
     assert_eq!(ok.status, StatusCode::CREATED);
     let oid = ok.json["order_id"].as_str().unwrap().to_string();
@@ -1299,6 +1307,20 @@ async fn banned_users_and_banned_words_cannot_use_donations(db: PgPool) {
     let o = order_with("").await;
     assert_eq!(o.status, StatusCode::FORBIDDEN);
     assert!(o.json["error"].as_str().unwrap().contains("막았습니다"));
+    // 막히기 전 주문을 막힌 뒤 결제하면 적립은 되지만 채팅 안내에는 메시지가 없다(#127 리뷰)
+    fake.pay("pk_127e", &early_oid, 1000);
+    let c = call(
+        &r,
+        "POST",
+        "/donations/confirm",
+        confirm_body("pk_127e", &early_oid, 1000),
+        Some(&donor),
+    )
+    .await;
+    assert_eq!(c.status, StatusCode::OK, "{:?}", c.json);
+    let (recent, _) = hub.subscribe(bid);
+    assert_eq!(recent.len(), 2);
+    assert_eq!(recent[1].text, "1,000원을 후원했습니다");
     // 풀면 다시 된다. 방송을 끝낸 뒤 결제가 끝나면 적립은 되지만 채팅 안내는 없다.
     assert_eq!(
         call(
@@ -1337,6 +1359,6 @@ async fn banned_users_and_banned_words_cannot_use_donations(db: PgPool) {
     )
     .await;
     assert_eq!(c.status, StatusCode::OK, "{:?}", c.json);
-    assert_eq!(summary(&r, bid).await["total"], 2000);
-    assert_eq!(hub.subscribe(bid).0.len(), 1);
+    assert_eq!(summary(&r, bid).await["total"], 3000);
+    assert_eq!(hub.subscribe(bid).0.len(), 2);
 }

@@ -303,20 +303,35 @@ async fn announce(state: &AppState, d: &Donation) {
     // 끝난 방송에는 채팅 안내를 올리지 않는다(#127, 채팅도 끝난 방송에는 쓸 수 없다).
     // 주문 뒤 결제 사이에 금칙어가 바뀌었을 수 있어 지금 목록으로 한 번 더 본다. 들어 있으면 메시지만 뺀다.
     let row: Option<(String, Vec<String>)> =
-        sqlx::query_as("SELECT status, banned_words FROM broadcasts WHERE id = $1")
+        match sqlx::query_as("SELECT status, banned_words FROM broadcasts WHERE id = $1")
             .bind(d.broadcast_id)
             .fetch_optional(&state.db)
             .await
-            .ok()
-            .flatten();
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("후원 안내용 방송 조회 실패, 안내를 건너뜀: {e}");
+                return;
+            }
+        };
     let Some((status, words)) = row else {
         return;
     };
     if status == "ended" {
         return;
     }
+    // 막히기 전에 만든 주문을 막힌 뒤 결제해도 메시지는 채팅에 내보내지 않는다(#127 리뷰). 금액 안내만 남긴다.
+    let donor_banned = match d.donor_id {
+        Some(id) => crate::moderation::banned(&state.db, d.broadcast_id, id)
+            .await
+            .unwrap_or(true),
+        None => false,
+    };
     let mut text = format!("{}원을 후원했습니다", won(d.amount));
-    if !d.message.is_empty() && !crate::moderation::has_banned_word(&d.message, &words) {
+    if !d.message.is_empty()
+        && !donor_banned
+        && !crate::moderation::has_banned_word(&d.message, &words)
+    {
         text.push_str(&format!(" — {}", d.message));
     }
     state
