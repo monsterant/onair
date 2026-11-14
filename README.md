@@ -105,7 +105,7 @@ cd frontend && npm install && npm run dev
 | `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` | 예 | onair / onair-local-only / onair | 로컬 DB 계정 |
 | `DB_PORT` | 아니오 | 55432 | 로컬 DB 포트 |
 | `DATABASE_URL` | 예 | postgres://onair:onair-local-only@localhost:55432/onair | 백엔드가 붙을 DB |
-| `BIND_ADDR` | 아니오 | 127.0.0.1:8080 (로컬, Windows·Mac) / 0.0.0.0:8080 (로컬 Linux, 배포 컨테이너) | 백엔드가 받는 주소. 비우면 0.0.0.0:8080. Linux는 아래 "Linux에서 실행할 때"를 본다 |
+| `BIND_ADDR` | 아니오 | 127.0.0.1:8080 (로컬, Windows·Mac) / 0.0.0.0:8080 (로컬 Linux, 배포 컨테이너) | 백엔드가 받는 주소. 줄이 없으면 0.0.0.0:8080(값만 비워 두면 시작하지 못한다). Linux는 아래 "Linux에서 실행할 때"를 본다 |
 | `OME_HOST_IP` | 예 | 127.0.0.1 | 브라우저가 영상 통로로 붙을 IP(배포는 서버 공인 IP) |
 | `OME_ADMISSION_SECRET` | 예 | 16자 이상 임의 값 | 미디어 서버 송출 허락 웹훅 서명 키 |
 | `OME_API_TOKEN`, `OME_API_URL` | 예 | 16자 이상 임의 값 / http://localhost:8081 | 미디어 서버 관리 API |
@@ -321,7 +321,7 @@ fetch('/api/broadcasts/12', { method: 'DELETE' }).then(async r => console.log(r.
 4. `403 {"error":"..."}`가 나오고 방송은 그대로다. 같은 줄을 첫 번째 창(소유자)에서 보내면 `204`로 지워진다.
 - 같은 사이트에서 보낸 요청이라 "다른 사이트 요청 거절"에는 걸리지 않고, 소유자 검사에서 거절된다.
 
-주요 API(모두 `/api`로 시작한다. 화면이 `/api`를 떼고 백엔드로 넘긴다):
+주요 API(모두 `/api`로 시작한다. 로컬은 개발 서버(Vite), 배포는 Caddy가 `/api`를 떼고 백엔드로 넘긴다):
 
 | 메서드 | 주소 | 하는 일 | 권한 |
 |---|---|---|---|
@@ -336,9 +336,11 @@ fetch('/api/broadcasts/12', { method: 'DELETE' }).then(async r => console.log(r.
 | GET / POST | `/api/broadcasts/{id}/comments` | 댓글 목록 / 쓰기 | 누구나 / 로그인 |
 | PATCH / DELETE | `/api/comments/{id}` | 댓글 수정 / 삭제 | 작성자 |
 | GET / POST | `/api/broadcasts/{id}/chat/stream`, `/api/broadcasts/{id}/chat` | 채팅 받기(SSE) / 보내기 | 누구나 / 로그인 |
-| GET, PUT / DELETE | `/api/broadcasts/{id}/bans`, `/api/broadcasts/{id}/bans/{user_id}` | 시청자 제한 목록, 제한 / 해제 | 소유자 |
-| PUT | `/api/broadcasts/{id}/slow`, `/notice`, `/banned-words`(GET도) | 천천히 모드, 공지, 금칙어 | 소유자 |
-| GET / POST | `/api/broadcasts/{id}/donations` | 후원 내역 / 주문 | 누구나 / 로그인 |
+| GET | `/api/broadcasts/{id}/bans` | 시청자 제한 목록 | 소유자 |
+| PUT / DELETE | `/api/broadcasts/{id}/bans/{user_id}` | 시청자 제한 / 해제 | 소유자 |
+| PUT | `/api/broadcasts/{id}/slow`, `/api/broadcasts/{id}/notice` | 천천히 모드, 공지 | 소유자 |
+| GET / PUT | `/api/broadcasts/{id}/banned-words` | 금칙어 보기 / 바꾸기 | 소유자 |
+| GET / POST | `/api/broadcasts/{id}/donations` | 후원 내역 / 주문 | 누구나 / 로그인(자기 방송 제외) |
 | GET | `/api/recordings`, `/api/recordings/{id}`, `/api/broadcasts/{id}/recordings` | 다시보기 | 누구나 |
 | GET / PUT, DELETE | `/api/follows`, `/api/follows/{user_id}` | 내 즐겨찾기 / 즐겨찾기·해제 | 로그인 |
 - 수정은 `PATCH`다. `PUT`으로 보내면 405(허용하지 않는 메서드)다.
