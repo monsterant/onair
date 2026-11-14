@@ -262,11 +262,18 @@ pub async fn create(
     let title = clean_title(&input.title)?;
     let description = clean_description(&input.description)?;
     let category = check_category(input.category.as_deref().unwrap_or("etc"))?;
+    // 세기와 만들기를 한 트랜잭션에서, 사용자마다 잠금을 잡고 한다(#129). 따로 하면 동시에 보낸 요청들이
+    // 모두 "아직 4개"를 보고 통과해 5개를 넘는다. pg_advisory_xact_lock은 트랜잭션이 끝나면 저절로 풀린다.
+    let mut tx = state.db.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(user.id)
+        .execute(&mut *tx)
+        .await?;
     let open: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM broadcasts WHERE owner_id = $1 AND status <> 'ended'",
     )
     .bind(user.id)
-    .fetch_one(&state.db)
+    .fetch_one(&mut *tx)
     .await?;
     if open >= OPEN_BROADCASTS_MAX {
         return Err(ApiError::Conflict(
@@ -283,8 +290,9 @@ pub async fn create(
     .bind(random_hex(8)?)
     .bind(random_hex(32)?)
     .bind(&category)
-    .fetch_one(&state.db)
+    .fetch_one(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok((StatusCode::CREATED, Json(find(&state, id).await?)))
 }
 

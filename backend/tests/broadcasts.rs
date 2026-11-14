@@ -1194,3 +1194,43 @@ async fn owner_can_schedule_a_ready_broadcast(db: PgPool) {
         StatusCode::NOT_FOUND
     );
 }
+
+/// #129: 끝나지 않은 방송 5개 한도는 요청을 동시에 보내도 넘지 않는다.
+#[sqlx::test]
+async fn open_broadcast_limit_holds_under_concurrent_requests(db: PgPool) {
+    let r = router(db.clone(), OmeApi::default()).await;
+    let owner = login(&r, 1).await;
+    let mut tasks = Vec::new();
+    for i in 0..12 {
+        let r = r.clone();
+        let owner = owner.clone();
+        tasks.push(tokio::spawn(async move {
+            call(
+                &r,
+                "POST",
+                "/broadcasts",
+                Some(json!({ "title": format!("동시 {i}") })),
+                Some(&owner),
+            )
+            .await
+            .0
+        }));
+    }
+    let mut created = 0;
+    for t in tasks {
+        let st = t.await.unwrap();
+        assert!(
+            st == StatusCode::CREATED || st == StatusCode::CONFLICT,
+            "{st}"
+        );
+        if st == StatusCode::CREATED {
+            created += 1;
+        }
+    }
+    assert_eq!(created, 5);
+    let open: i64 = sqlx::query_scalar("SELECT count(*) FROM broadcasts WHERE status <> 'ended'")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(open, 5);
+}
