@@ -31,6 +31,7 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 url = "2.5.8"
+unicode-normalization = "0.1"
 
 [dev-dependencies]
 tower = { version = "0.5.3", features = ["util"] }

@@ -151,14 +151,20 @@ pub async fn create(
     };
     check_amount(input.amount)?;
     let message = clean_message(&input.message)?;
-    let row: Option<(i64, String, Vec<String>)> =
-        sqlx::query_as("SELECT owner_id, title, banned_words FROM broadcasts WHERE id = $1")
-            .bind(broadcast_id)
-            .fetch_optional(&state.db)
-            .await?;
-    let (owner_id, title, words) = row.ok_or(ApiError::NotFound)?;
+    let row: Option<(i64, String, Vec<String>, String)> = sqlx::query_as(
+        "SELECT owner_id, title, banned_words, status FROM broadcasts WHERE id = $1",
+    )
+    .bind(broadcast_id)
+    .fetch_optional(&state.db)
+    .await?;
+    let (owner_id, title, words, status) = row.ok_or(ApiError::NotFound)?;
     if owner_id == user.id {
         return Err(ApiError::Forbidden("자기 방송에는 후원할 수 없습니다"));
+    }
+    // 끝난 방송에는 새 후원 주문을 만들지 않는다(#136). 끝난 방송의 후원은 채팅에 안내되지도 않는다(#127).
+    // 이미 만든 주문을 결제하는 것은 막지 않는다(결제창을 연 사이에 방송이 끝날 수 있다).
+    if status == "ended" {
+        return Err(ApiError::Conflict("끝난 방송에는 후원할 수 없습니다"));
     }
     // 방송 주인이 막은 사람은 후원도 못 한다(#127). 테스트 결제는 공짜라 후원 메시지가 채팅 제한을 피하는 길이 된다.
     if crate::moderation::banned(&state.db, broadcast_id, user.id).await? {
@@ -515,6 +521,20 @@ pub async fn list(
         top,
         items,
     }))
+}
+
+/// 결제하지 않고 하루가 지난 대기 주문을 지운다(#136). 한 시간마다 부른다.
+/// 화면은 주문을 만들자마자 결제창을 열고, 토스는 결제 인증 뒤 10분 안에 승인하지 않으면 결제를 만료시킨다.
+/// 결제창을 하루 넘게 열어 두는 일은 없다고 보고, 하루 지난 대기 주문은 다시 결제로 이어지지 않는다고 판단한다.
+/// 남는 경우: 토스 승인은 됐는데 응답을 놓치고 하루 안에 다시 확인하지 않으면, 이 주문이 지워져 나중의 승인 통지가 404가 된다(테스트 결제라 영향이 작다).
+/// 결제 실패(failed)·적립(paid) 기록은 남긴다.
+pub async fn cleanup_pending(db: &sqlx::PgPool) -> Result<u64, sqlx::Error> {
+    Ok(sqlx::query(
+        "DELETE FROM donations WHERE status = 'pending' AND created_at < now() - interval '1 day'",
+    )
+    .execute(db)
+    .await?
+    .rows_affected())
 }
 
 #[cfg(test)]
