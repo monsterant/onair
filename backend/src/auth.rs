@@ -45,6 +45,9 @@ pub struct AuthConfig {
     pub comment_ip_limiter: Option<crate::guard::RateLimiter>,
     /// 결제 승인 통지 횟수 제한(IP 하나당). 로그인 없이 부르는 길이라 따로 둔다(#41 리뷰).
     pub notify_limiter: crate::guard::RateLimiter,
+    /// 비밀번호 해시 자리를 기다리는 최대 시간(#136). None이면 5초. 넘으면 503으로 돌려보낸다.
+    /// 시험에서 짧게 주려고 설정으로 뺐다.
+    pub hash_wait: Option<std::time::Duration>,
     /// 로그인 실패 횟수 제한(아이디 하나당, #136). IP 몫만 있으면 IP를 바꿔 가며 한 아이디의 비밀번호를 계속 맞혀 볼 수 있다.
     /// 실패할 때만 센다. None이면 걸지 않는다(시험 기본값). 운영 값은 main.rs.
     pub login_fail_limiter: Option<crate::guard::RateLimiter>,
@@ -171,8 +174,28 @@ static HASH_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2)
 // 요청이 중간에 끊기면 async 쪽은 버려지지만 계산은 끝까지 돈다. 허가를 async 쪽에 두면
 // 그 순간 허가가 풀려 동시 계산이 2개를 넘을 수 있다(#24 2바퀴).
 
-async fn hash_password_async(pw: String) -> Result<String, ApiError> {
-    let slot = HASH_SLOTS.acquire().await.map_err(|_| ApiError::Internal)?;
+/// 해시 자리를 기다리는 기본 최대 시간(#136)
+const HASH_WAIT_DEFAULT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// 해시 자리를 정해진 시간까지만 기다린다(#136). 전에는 끝없이 기다려서, 여러 곳에서 로그인·가입을 몰아 보내면
+/// 줄이 길어져 진짜 사용자의 로그인이 한참 늦어졌다. 넘으면 503으로 바로 돌려보낸다.
+async fn hash_slot(
+    wait: Option<std::time::Duration>,
+) -> Result<tokio::sync::SemaphorePermit<'static>, ApiError> {
+    match tokio::time::timeout(wait.unwrap_or(HASH_WAIT_DEFAULT), HASH_SLOTS.acquire()).await {
+        Ok(Ok(slot)) => Ok(slot),
+        Ok(Err(_)) => Err(ApiError::Internal),
+        Err(_) => Err(ApiError::Unavailable(
+            "지금 로그인·가입 요청이 많습니다. 잠시 뒤 다시 시도하세요",
+        )),
+    }
+}
+
+async fn hash_password_async(
+    pw: String,
+    wait: Option<std::time::Duration>,
+) -> Result<String, ApiError> {
+    let slot = hash_slot(wait).await?;
     tokio::task::spawn_blocking(move || {
         let _slot = slot;
         hash_password(&pw)
@@ -182,11 +205,14 @@ async fn hash_password_async(pw: String) -> Result<String, ApiError> {
 }
 
 /// 비밀번호 확인. `stored`가 None이면(아이디가 없을 때) 가짜 해시로 같은 시간만큼 계산하고 false를 돌려준다.
-async fn verify_password_async(pw: String, stored: Option<String>) -> bool {
-    let Ok(slot) = HASH_SLOTS.acquire().await else {
-        return false;
-    };
-    tokio::task::spawn_blocking(move || {
+/// 자리를 기다리다 시간이 넘으면 Err(503). 이때는 비밀번호를 확인하지 않았으니 로그인 실패로 세지 않는다.
+async fn verify_password_async(
+    pw: String,
+    stored: Option<String>,
+    wait: Option<std::time::Duration>,
+) -> Result<bool, ApiError> {
+    let slot = hash_slot(wait).await?;
+    Ok(tokio::task::spawn_blocking(move || {
         let _slot = slot;
         match stored {
             Some(s) => verify_password(&pw, &s),
@@ -197,7 +223,7 @@ async fn verify_password_async(pw: String, stored: Option<String>) -> bool {
         }
     })
     .await
-    .unwrap_or(false)
+    .unwrap_or(false))
 }
 
 /// 시험용: 지금 비어 있는 해시 허가 수(최대 2)
@@ -334,7 +360,7 @@ pub async fn signup(
         ));
     }
     check_password(&c.password).map_err(ApiError::BadRequest)?;
-    let hash = hash_password_async(c.password).await?;
+    let hash = hash_password_async(c.password, state.auth.hash_wait).await?;
 
     // 같은 아이디가 있으면 아무것도 넣지 않는다. 동시에 두 요청이 와도 UNIQUE 제약 덕분에 하나만 들어간다.
     let id: Option<i64> = sqlx::query_scalar(
@@ -389,7 +415,7 @@ pub async fn login(
         Some((id, stored)) => (Some(id), Some(stored)),
         None => (None, None),
     };
-    let ok = verify_password_async(c.password, stored).await;
+    let ok = verify_password_async(c.password, stored, state.auth.hash_wait).await?;
     let (Some(id), true) = (id, ok) else {
         if let (Some(l), Some(k)) = (&state.auth.login_fail_limiter, &fail_key) {
             l.allow(k);

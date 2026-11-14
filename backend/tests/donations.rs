@@ -564,7 +564,8 @@ async fn unfinished_or_canceled_payments_are_not_credited(db: PgPool) {
         .status,
         StatusCode::CONFLICT
     );
-    assert_eq!(status(db.clone(), oid.clone()).await, "failed");
+    // 적립 전에 전액 취소된 주문은 '취소'다(#136: 예전에는 '실패'라 늦게 온 완료 확인이 다시 적립할 수 있었다)
+    assert_eq!(status(db.clone(), oid.clone()).await, "canceled");
     // 취소된 결제로 다시 확인해도 토스가 거절하므로 적립되지 않는다
     let again = call(
         &r,
@@ -1515,4 +1516,73 @@ async fn stale_pending_orders_are_cleaned_up(db: PgPool) {
     let mut want = vec![fresh, old_failed, old_paid];
     want.sort();
     assert_eq!(left, want);
+}
+
+/// #136: 취소를 본 뒤 늦게 도착한 "결제 완료" 확인이 취소된 주문을 다시 적립하지 못한다.
+/// 순서: 결제 → 토스에서 취소 → 승인 통지가 취소를 봄 → (취소 전에 토스에 물어본) 확인 요청이 "완료"를 들고 늦게 도착.
+#[sqlx::test]
+async fn late_done_confirm_does_not_credit_a_canceled_order(db: PgPool) {
+    let (fake, toss) = fake_toss().await;
+    let r = router(db.clone(), toss);
+    let (bid, donor, oid) = setup(&r, 4000).await;
+    fake.pay("pk_late", &oid, 4000);
+    fake.set_status("pk_late", "CANCELED");
+    let n = call(
+        &r,
+        "POST",
+        "/donations/notify",
+        Some(json!({"paymentKey": "pk_late"})),
+        None,
+    )
+    .await;
+    assert_eq!(n.status, StatusCode::CONFLICT);
+    // 늦게 온 확인 요청은 취소 전의 "완료"를 본 것으로 흉내 낸다
+    fake.set_status("pk_late", "DONE");
+    let c = call(
+        &r,
+        "POST",
+        "/donations/confirm",
+        confirm_body("pk_late", &oid, 4000),
+        Some(&donor),
+    )
+    .await;
+    assert_eq!(c.status, StatusCode::CONFLICT, "{:?}", c.json);
+    let st: String = sqlx::query_scalar("SELECT status FROM donations WHERE order_id = $1")
+        .bind(&oid)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(st, "canceled");
+    assert_eq!(summary(&r, bid).await["total"], 0);
+}
+
+/// #136 리뷰: 한 주문의 첫 결제가 취소돼 주문이 '취소'가 됐어도, 다시 낸 다른 결제가 완료되면 적립한다(#41 리뷰의 동작 유지).
+#[sqlx::test]
+async fn another_payment_is_credited_after_the_first_one_was_canceled(db: PgPool) {
+    let (fake, toss) = fake_toss().await;
+    let r = router(db.clone(), toss);
+    let (bid, donor, oid) = setup(&r, 5000).await;
+    fake.pay("pk_first", &oid, 5000);
+    fake.set_status("pk_first", "CANCELED");
+    let n = call(
+        &r,
+        "POST",
+        "/donations/notify",
+        Some(json!({"paymentKey": "pk_first"})),
+        None,
+    )
+    .await;
+    assert_eq!(n.status, StatusCode::CONFLICT);
+    fake.pay("pk_second", &oid, 5000);
+    let c = call(
+        &r,
+        "POST",
+        "/donations/confirm",
+        confirm_body("pk_second", &oid, 5000),
+        Some(&donor),
+    )
+    .await;
+    assert_eq!(c.status, StatusCode::OK, "{:?}", c.json);
+    assert_eq!(c.json["status"], "paid");
+    assert_eq!(summary(&r, bid).await["total"], 5000);
 }
