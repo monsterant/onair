@@ -27,8 +27,11 @@ pub const SESSION_DAYS: i64 = 7;
 /// 인증 관련 설정. main.rs가 환경변수에서 읽는다.
 #[derive(Clone, Debug, Default)]
 pub struct AuthConfig {
-    /// true면 `/auth/demo/{1,2}`로 데모 사용자에 바로 로그인할 수 있다(심사용 테스트 계정, 공모 6절).
+    /// true면 테스트 계정 로그인이 열린다(`/auth/guest`, 공모 6절). `/auth/demo/{1,2}`도 이 값을 본다.
     pub demo_login: bool,
+    /// true면 누구나 같은 계정이 되는 공용 데모(`/auth/demo/{1,2}`)만 닫는다(#130). 테스트 계정(`/auth/guest`)은 그대로.
+    /// 저장소가 공개되면 누구나 demo1로 방송을 바꾸고 송출할 수 있어서, 운영에서는 닫는다.
+    pub shared_demo_off: bool,
     /// 로그인·가입·데모 로그인 횟수 제한(IP 하나당). 기본은 1분에 20번.
     pub limiter: crate::guard::RateLimiter,
     /// 댓글 작성 횟수 제한(사용자 하나당). 기본은 1분에 20번.
@@ -392,7 +395,7 @@ pub async fn me(user: CurrentUser) -> Json<Me> {
     })
 }
 
-/// 심사용 테스트 계정으로 바로 로그인한다. `DEMO_LOGIN=true`일 때만 열린다.
+/// 공용 데모 계정(demo1·demo2)으로 바로 로그인한다. `DEMO_LOGIN=true`이고 `SHARED_DEMO_OFF`가 아닐 때만 열린다(#130).
 /// n=1이면 demo1, n=2이면 demo2. 소유자와 다른 사용자를 둘 다 시험할 수 있게 두 명을 둔다.
 /// 데모 사용자의 비밀번호는 쓸 수 없는 값이라, 이 길로만 로그인할 수 있다.
 pub async fn demo_login(
@@ -400,7 +403,7 @@ pub async fn demo_login(
     jar: CookieJar,
     Path(n): Path<String>,
 ) -> Result<(CookieJar, Json<Me>), ApiError> {
-    if !state.auth.demo_login {
+    if !state.auth.demo_login || state.auth.shared_demo_off {
         return Err(ApiError::NotFound);
     }
     // "1"과 "2"만 받는다. 01, +1 같은 다른 표기는 없는 길로 본다(#25 A15). %31은 주소 규칙상 "1"과 같은 글자라 1로 받는다.

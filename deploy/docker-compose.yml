@@ -35,6 +35,8 @@ services:
       OME_ADMISSION_SECRET: ${OME_ADMISSION_SECRET:?deploy/.env에 OME_ADMISSION_SECRET을 넣으세요}
       # 심사용 테스트 계정 로그인(#4). 값이 없으면 꺼진다.
       DEMO_LOGIN: ${DEMO_LOGIN:-false}
+      # 공용 데모 계정(/auth/demo/1,2)은 운영에서 닫는다(#130). 테스트 계정 버튼(/auth/guest)은 DEMO_LOGIN을 따른다.
+      SHARED_DEMO_OFF: ${SHARED_DEMO_OFF:-true}
       # OME 관리 API(#3): 방송 종료 때 스트림 끊기, 15초마다 맞춰 보기. Docker 안쪽 주소라 인터넷에는 열리지 않는다.
       OME_API_URL: http://ome:8081
       OME_API_TOKEN: ${OME_API_TOKEN:?deploy/.env에 OME_API_TOKEN을 넣으세요}

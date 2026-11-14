@@ -631,6 +631,7 @@ async fn auth_requests_are_rate_limited_per_client(db: PgPool) {
             comment_limiter: Default::default(),
             notify_limiter: Default::default(),
             chat_limiter: Default::default(),
+            shared_demo_off: false,
         },
     });
     let ip1 = [("x-forwarded-for", "1.1.1.1")];
