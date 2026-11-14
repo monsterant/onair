@@ -90,3 +90,44 @@ async fn connection_after_a_dropped_sqlx_transaction_is_reused(db: PgPool) {
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(pid(&pool).await, first, "정상적으로 정리된 연결을 버렸다");
 }
+
+/// 실제 원인 재현(11-14): BEGIN 응답을 기다리는 순간에 요청이 끊기면 sqlx는 아직 트랜잭션이 시작되지 않았다고 보고
+/// ROLLBACK을 보내지 않는다(sqlx-postgres transaction.rs begin/start_rollback). 그러면 BEGIN만 서버에 남은 연결이
+/// 풀에 돌아온다. 안전장치가 있으면 그런 연결을 버려서 다음 요청은 트랜잭션 밖에서 돈다.
+/// 끊기는 순간이 드물어서 끊는 시점을 바꿔 가며 반복하고, 끊김이 몇 번 일어날 때까지 확인한다.
+#[sqlx::test]
+async fn cancelled_begin_does_not_leak_a_transaction(db: PgPool) {
+    use sqlx::Row;
+    let pool = one_connection_pool(&db).await;
+    let (mut cancelled, mut leaked) = (0, 0);
+    for attempt in 0..3000u64 {
+        {
+            let mut conn = pool.acquire().await.unwrap();
+            let begin = sqlx::Connection::begin_with(
+                &mut *conn,
+                "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY",
+            );
+            if tokio::time::timeout(Duration::from_micros(attempt % 300), begin)
+                .await
+                .is_err()
+            {
+                cancelled += 1;
+            }
+        }
+        let mut conn = pool.acquire().await.unwrap();
+        let outside = sqlx::raw_sql("SELECT now() = statement_timestamp()")
+            .fetch_one(&mut *conn)
+            .await
+            .map(|r| r.get::<bool, _>(0))
+            .unwrap_or(false);
+        if !outside {
+            leaked += 1;
+            let _ = sqlx::raw_sql("ROLLBACK").execute(&mut *conn).await;
+        }
+        if cancelled >= 3 {
+            break;
+        }
+    }
+    eprintln!("begin을 도중에 끊은 횟수 {cancelled}, 트랜잭션이 남은 연결 {leaked}");
+    assert_eq!(leaked, 0, "트랜잭션이 남은 연결을 다시 받았다");
+}
