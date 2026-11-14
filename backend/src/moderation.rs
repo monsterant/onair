@@ -201,12 +201,9 @@ pub fn clean_words(raw: &[String]) -> Result<Vec<String>, ApiError> {
 fn for_matching(s: &str) -> String {
     use unicode_normalization::UnicodeNormalization;
     s.nfkc()
-        .filter(|c| {
-            !matches!(
-                c,
-                '\u{00AD}' | '\u{180E}' | '\u{200B}'..='\u{200F}' | '\u{2060}'..='\u{2064}' | '\u{FEFF}'
-            )
-        })
+        // 보이지 않는 글자(폭 없는 공백, 한글 채움 문자 등)는 댓글 검사와 같은 목록(blank_like)으로 가린다.
+        // 보통 빈칸은 남긴다. 빼면 "바다 보기"처럼 평범한 글이 "바보"로 걸린다.
+        .filter(|&c| !(crate::comments::blank_like(c) && !c.is_whitespace()))
         .collect::<String>()
         .to_lowercase()
 }
@@ -347,6 +344,11 @@ mod tests {
         assert!(has_banned_word("ＢＡＤ!", &words));
         assert!(has_banned_word("바\u{FEFF}보야", &words));
         assert!(has_banned_word("b\u{00AD}a\u{2060}d", &words));
+        // 한글 채움 문자(#136 리뷰): NFKC가 U+3164를 U+1160으로 바꾼 뒤에도 빠져야 한다
+        assert!(has_banned_word("바\u{3164}보", &words));
+        assert!(has_banned_word("바\u{115F}보", &words));
+        assert!(has_banned_word("바\u{034F}보", &words));
+        assert!(has_banned_word("b\u{180E}a\u{200C}d", &words));
         assert!(!has_banned_word("good", &words));
         assert!(!has_banned_word("바다 보기", &words));
     }
