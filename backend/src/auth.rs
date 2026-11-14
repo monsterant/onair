@@ -402,6 +402,29 @@ pub async fn me(user: CurrentUser) -> Json<Me> {
     })
 }
 
+#[derive(Serialize)]
+pub struct SessionInfo {
+    /// 로그인하지 않았거나 세션이 끝났으면 null
+    pub user: Option<Me>,
+}
+
+/// 지금 로그인 상태를 늘 200으로 알려 준다(#134). 화면이 화면을 바꿀 때마다 부른다.
+/// `/auth/me`는 로그인하지 않으면 401이라, 로그인하지 않은 방문자의 개발자 도구에 빨간 오류가 계속 찍혔다.
+/// `/auth/me`(401)는 그대로 둔다. 로그아웃·세션 만료 시험과 API 약속이 그것을 쓴다.
+/// DB 오류처럼 로그인 여부와 상관없는 실패는 그대로 오류로 돌려준다.
+pub async fn session(user: Result<CurrentUser, ApiError>) -> Result<Json<SessionInfo>, ApiError> {
+    match user {
+        Ok(u) => Ok(Json(SessionInfo {
+            user: Some(Me {
+                id: u.id,
+                username: u.username,
+            }),
+        })),
+        Err(ApiError::Unauthorized(_)) => Ok(Json(SessionInfo { user: None })),
+        Err(e) => Err(e),
+    }
+}
+
 /// 공용 데모 계정(demo1·demo2)으로 바로 로그인한다. `DEMO_LOGIN=true`이고 `SHARED_DEMO_OFF`가 아닐 때만 열린다(#130).
 /// n=1이면 demo1, n=2이면 demo2. 소유자와 다른 사용자를 둘 다 시험할 수 있게 두 명을 둔다.
 /// 데모 사용자의 비밀번호는 쓸 수 없는 값이라, 이 길로만 로그인할 수 있다.

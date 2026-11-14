@@ -54,6 +54,7 @@ pub fn app(state: AppState) -> Router {
         .route("/config", get(config))
         .route("/auth/logout", post(auth::logout))
         .route("/auth/me", get(auth::me))
+        .route("/auth/session", get(auth::session))
         .route(
             "/broadcasts",
             get(broadcasts::list).post(broadcasts::create),
