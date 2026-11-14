@@ -1,6 +1,6 @@
 // 후원 순위 시험 (#99): 후원이 없으면 순위 칸이 숨고, 적립된 후원이 있으면 합계가 큰 사람부터 보인다.
 // node ranking.mjs [BASE]
-// 결제를 끝까지 할 수 없어서, 로컬(docker 컨테이너 rodlspr-db-1)에서만 DB에 적립된 후원을 직접 넣어 본다.
+// 결제를 끝까지 할 수 없어서, 로컬(docker 컨테이너 rodlspr-db-1, 다르면 E2E_DB_CONTAINER)에서만 DB에 적립된 후원을 직접 넣어 본다.
 // 운영 주소에서는 DB를 건드리지 않고 "후원이 없으면 숨김"만 본다.
 import { execFileSync } from 'child_process';
 import puppeteer from 'puppeteer-core';
@@ -12,7 +12,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const results = [];
 const check = (name, ok, extra = '') => results.push(`${ok ? 'PASS' : 'FAIL'} ${name} ${ok ? '' : extra}`);
 const browser = await puppeteer.launch({ executablePath: CHROME, headless: true });
-const psql = (sql) => execFileSync('docker', ['exec', 'rodlspr-db-1', 'psql', '-U', 'onair', '-d', 'onair', '-tAc', sql], { encoding: 'utf8' }).trim();
+const psql = (sql) => execFileSync('docker', ['exec', process.env.E2E_DB_CONTAINER || 'rodlspr-db-1', 'psql', '-U', 'onair', '-d', 'onair', '-tAc', sql], { encoding: 'utf8' }).trim();
 
 let p; let bid; let tag;
 try {
