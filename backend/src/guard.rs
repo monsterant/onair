@@ -301,6 +301,21 @@ mod tests {
 mod cap_tests {
     use super::*;
 
+    /// #136 리뷰: blocked는 세지 않고 보기만 하며, 창이 지나면 다시 false다.
+    #[test]
+    fn blocked_peeks_without_counting_and_expires() {
+        let l = RateLimiter::new(2, std::time::Duration::from_millis(80));
+        assert!(!l.blocked("k"));
+        assert!(l.allow("k"));
+        assert!(!l.blocked("k"));
+        assert!(l.allow("k"));
+        assert!(l.blocked("k"));
+        assert!(l.blocked("k"), "보기만 해서 바뀌지 않는다");
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        assert!(!l.blocked("k"));
+        assert!(!l.blocked("other"));
+    }
+
     #[test]
     fn limiter_refuses_new_keys_when_full_but_keeps_known_keys() {
         let l = RateLimiter::new(5, Duration::from_secs(60));

@@ -61,7 +61,9 @@ try {
     // 10분 지난 예정은 '늦어지는 중'으로 남고, 1시간 넘게 지난 예정은 칸에서 빠진다(#136)
     psql(`UPDATE broadcasts SET scheduled_at = now() - interval '10 minutes' WHERE id = ${Number(bid)}`);
     await anon.reload({ waitUntil: 'networkidle2' });
-    check('10 min late stays as late', await waitFor(async () => (await text(anon, '.upcoming')).includes('늦어지는 중'), 5000), await text(anon, '.upcoming'));
+    // 이 방송 줄에 '늦어지는 중'이 있는지 본다(다른 늦은 방송이 있어도 헷갈리지 않게)
+    const lateLine = () => anon.$$eval('.upcoming li', (ls, t) => ls.some((l) => l.textContent.includes(t) && l.textContent.includes('늦어지는 중')), title).catch(() => false);
+    check('10 min late stays as late', await waitFor(lateLine, 5000), await text(anon, '.upcoming'));
     psql(`UPDATE broadcasts SET scheduled_at = now() - interval '2 hours' WHERE id = ${Number(bid)}`);
     await anon.reload({ waitUntil: 'networkidle2' });
     await sleep(800);

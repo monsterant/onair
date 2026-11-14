@@ -363,10 +363,16 @@ pub async fn login(
     }
     // 같은 아이디로 너무 많이 틀렸으면 비밀번호를 확인하지 않고 거절한다(#136).
     // 없는 아이디도 똑같이 세므로, 막혔다는 것으로 어떤 아이디가 있는지는 알 수 없다.
-    let fail_key = format!("login:{}", c.username.trim().to_lowercase());
-    if let Some(l) = &state.auth.login_fail_limiter
-        && l.blocked(&fail_key)
-    {
+    // 형식이 맞는 아이디(정규화한 값)만 센다. 형식이 틀린 아이디는 로그인할 수 없고, 아주 긴 글로
+    // 횟수표 메모리를 채우지 못하게 한다(#136 리뷰).
+    let fail_key = normalize_username(&c.username)
+        .ok()
+        .map(|u| format!("login:{u}"));
+    let blocked = || match (&state.auth.login_fail_limiter, &fail_key) {
+        (Some(l), Some(k)) => l.blocked(k),
+        _ => false,
+    };
+    if blocked() {
         return Err(ApiError::TooManyRequests);
     }
     // 형식이 틀린 아이디도, 없는 아이디도 같은 시간을 들여 같은 실패 메시지로 돌려준다(어떤 아이디가 있는지 알려 주지 않는다).
@@ -385,11 +391,16 @@ pub async fn login(
     };
     let ok = verify_password_async(c.password, stored).await;
     let (Some(id), true) = (id, ok) else {
-        if let Some(l) = &state.auth.login_fail_limiter {
-            l.allow(&fail_key);
+        if let (Some(l), Some(k)) = (&state.auth.login_fail_limiter, &fail_key) {
+            l.allow(k);
         }
         return Err(FAIL);
     };
+    // 비밀번호 확인을 기다리는 사이(동시에 2개만 확인한다) 다른 요청들이 실패 횟수를 채웠을 수 있다.
+    // 한꺼번에 몰아 보낸 요청이 줄을 서서 맞는 비밀번호를 찾지 못하게, 성공으로 처리하기 전에 한 번 더 본다(#136 리뷰).
+    if blocked() {
+        return Err(ApiError::TooManyRequests);
+    }
     let username = normalize_username(&c.username).map_err(|_| FAIL)?;
     let jar = start_session(&state, jar, id).await?;
     Ok((jar, Json(Me { id, username })))

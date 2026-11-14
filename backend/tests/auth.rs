@@ -762,4 +762,12 @@ async fn login_failures_lock_only_that_username(db: PgPool) {
     );
     // 다른 아이디는 그대로
     assert_eq!(login("victim_b", "right-password-1").await, StatusCode::OK);
+    // 형식이 틀린(아주 긴) 아이디는 세지 않는다: 몇 번 틀려도 429가 아니라 401(#136 리뷰, 횟수표 메모리 보호)
+    let long: &'static str = Box::leak("x".repeat(5000).into_boxed_str());
+    for _ in 0..5 {
+        assert_eq!(
+            login(long, "wrong-password").await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
 }
