@@ -41,6 +41,8 @@ pub const FINISH_WAIT: Duration = Duration::from_secs(120);
 pub const MIN_BYTES: u64 = 64 * 1024;
 /// 동시에 녹화하는 방송 수 상한(서버 디스크·CPU 보호). 넘으면 다음 차례까지 기다린다.
 pub const MAX_CONCURRENT: i64 = 3;
+// 한 사람(방송 주인)이 동시에 녹화할 수 있는 방송 수(#132). 한 사람이 방송 여러 개를 동시에 송출해
+// 서버 전체 녹화 자리(3개)를 다 차지하면 다른 사람 방송이 녹화되지 않는다.
 
 /// "녹화를 서둘러 시작하라"는 신호(#59). 웹훅이 보내고 맞춰 보기 반복문(main.rs)이 받는다.
 /// tokio `Notify`(기다리는 쪽을 깨우는 종): 받는 쪽이 아직 기다리지 않을 때 보내도 한 번은 기억해 둔다.
@@ -89,7 +91,9 @@ async fn waiting(db: &sqlx::PgPool) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar(
         "SELECT (SELECT count(*) FROM recordings WHERE status = 'recording') < $1
             AND EXISTS (SELECT 1 FROM broadcasts b WHERE b.status = 'live'
-              AND NOT EXISTS (SELECT 1 FROM recordings r WHERE r.broadcast_id = b.id AND r.status = 'recording'))",
+              AND NOT EXISTS (SELECT 1 FROM recordings r WHERE r.broadcast_id = b.id AND r.status = 'recording')
+              AND NOT EXISTS (SELECT 1 FROM recordings r JOIN broadcasts o ON o.id = r.broadcast_id
+                               WHERE o.owner_id = b.owner_id AND r.status = 'recording'))",
     )
     .bind(MAX_CONCURRENT)
     .fetch_one(db)
@@ -264,19 +268,27 @@ async fn start_missing(db: &sqlx::PgPool, api: &OmeApi) -> Result<(), sqlx::Erro
     // 못 잡는 경우: 이미 live인 방송에 closing 없이 opening이 다시 오면 started_at이 그대로다(ome.rs, #27 V18).
     // closing이 늦게라도 오면 on_closing이 녹화를 멈추므로, closing이 아예 사라진 때(백엔드 재시작 중 등)만 남는다.
     // 그때는 이미 돌던 녹화도 같은 문제라(#62 리뷰) 이 검사로 따로 막지 않는다.
-    let rows: Vec<(i64, String, String, String, OffsetDateTime)> = sqlx::query_as(
-        "SELECT b.id, b.stream_name, b.title, u.username, b.started_at FROM broadcasts b JOIN users u ON u.id = b.owner_id
+    // 이미 녹화 중인 방송이 있는 사람의 방송은 고르지 않는다(사람마다 동시 녹화 1개, #132)
+    let rows: Vec<(i64, String, String, String, OffsetDateTime, i64)> = sqlx::query_as(
+        "SELECT b.id, b.stream_name, b.title, u.username, b.started_at, b.owner_id FROM broadcasts b JOIN users u ON u.id = b.owner_id
           WHERE b.status = 'live' AND b.started_at IS NOT NULL
             AND NOT EXISTS (SELECT 1 FROM recordings r WHERE r.broadcast_id = b.id AND r.status = 'recording')
+            AND NOT EXISTS (SELECT 1 FROM recordings r JOIN broadcasts o ON o.id = r.broadcast_id
+                             WHERE o.owner_id = b.owner_id AND r.status = 'recording')
           ORDER BY b.started_at",
     )
     .fetch_all(db)
     .await?;
     // 실제로 시작한 수만 센다. 코덱을 몰라 건너뛴 방송이 자리를 차지해 새 방송이 계속 밀리지 않게 한다(#47 2바퀴)
     let mut started = 0_i64;
-    for (bid, stream, title, owner, seen) in rows {
+    // 이번 차례에 녹화를 시작한 사람. 같은 사람의 다른 방송은 이번에 건너뛴다(#132)
+    let mut started_owners = std::collections::HashSet::new();
+    for (bid, stream, title, owner, seen, owner_id) in rows {
         if started >= room {
             break;
+        }
+        if started_owners.contains(&owner_id) {
+            continue;
         }
         // 코덱을 모르면(스트림이 막 붙는 중) 다음 차례에 다시 본다
         let Some(codec) = api.video_codec(&stream).await else {
@@ -330,6 +342,7 @@ async fn start_missing(db: &sqlx::PgPool, api: &OmeApi) -> Result<(), sqlx::Erro
                 .await?;
         } else {
             started += 1;
+            started_owners.insert(owner_id);
             tracing::info!(broadcast = bid, %file, "녹화 시작");
             // 녹화를 거는 동안 송출이 닫혔거나 다시 열렸으면 바로 멈춘다(같은 이유, #59 리뷰).
             // 다음 맞춰 보기가 지금 송출로 새 녹화를 시작한다.

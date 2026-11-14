@@ -297,6 +297,23 @@ async fn live_broadcast(r: &Router, db: &PgPool, title: &str) -> (i64, String) {
     (id, b["stream_name"].as_str().unwrap().to_string())
 }
 
+/// 방송 주인을 새 사용자로 바꾼다. 사람마다 녹화 1개(#132)라서, 서버 전체 자리(3개)를 시험하려면 주인이 달라야 한다.
+async fn give_to_new_owner(db: &PgPool, broadcast_id: i64) {
+    let uid: i64 = sqlx::query_scalar(
+        "INSERT INTO users (username, password_hash) VALUES ('owner_' || $1, 'x') RETURNING id",
+    )
+    .bind(broadcast_id.to_string())
+    .fetch_one(db)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE broadcasts SET owner_id = $1 WHERE id = $2")
+        .bind(uid)
+        .bind(broadcast_id)
+        .execute(db)
+        .await
+        .unwrap();
+}
+
 async fn statuses(db: &PgPool) -> Vec<String> {
     sqlx::query_scalar("SELECT status FROM recordings ORDER BY id")
         .fetch_all(db)
@@ -973,7 +990,8 @@ async fn at_most_three_recordings_at_once(db: PgPool) {
     };
     let r = router(db.clone(), api.clone(), Some(dir.clone()));
     for i in 0..4 {
-        let (_, stream) = live_broadcast(&r, &db, &format!("방송 {i}")).await;
+        let (bid, stream) = live_broadcast(&r, &db, &format!("방송 {i}")).await;
+        give_to_new_owner(&db, bid).await;
         fake.streams.lock().unwrap().insert(stream, "H264".into());
     }
     sync(&db, &api, &cfg).await.unwrap();
@@ -1214,7 +1232,8 @@ async fn start_soon_does_not_wait_when_all_recording_slots_are_full(db: PgPool) 
     let cfg = RecConfig { dir: Some(dir) };
     let r = router(db.clone(), api.clone(), cfg.dir.clone());
     for i in 0..4 {
-        let (_, s) = live_broadcast(&r, &db, &format!("방송{i}")).await;
+        let (bid, s) = live_broadcast(&r, &db, &format!("방송{i}")).await;
+        give_to_new_owner(&db, bid).await;
         fake.streams.lock().unwrap().insert(s, "H264".into());
     }
     // 4개 중 3개만 녹화할 수 있다. 남은 1개를 위해 헛되이 10번 돌지 않는다.
@@ -1396,4 +1415,60 @@ async fn closing_webhook_answers_at_once_and_stops_the_recording_afterwards(db: 
     assert_eq!(fake.stopped.lock().unwrap().len(), 1);
     let s = statuses(&db).await;
     assert!(s == ["finishing"] || s == ["ready"], "{s:?}");
+}
+
+/// #132: 한 사람이 방송 여러 개를 동시에 송출해도 녹화는 한 개만 한다. 다른 사람 방송은 녹화 자리를 받는다.
+#[sqlx::test]
+async fn one_owner_records_only_one_broadcast_at_a_time(db: PgPool) {
+    let dir = temp_dir();
+    let (fake, api) = fake_ome(dir.clone()).await;
+    let cfg = RecConfig {
+        dir: Some(dir.clone()),
+    };
+    let r = router(db.clone(), api.clone(), Some(dir.clone()));
+    // demo1이 3개를 동시에 송출
+    for i in 0..3 {
+        let (_, stream) = live_broadcast(&r, &db, &format!("한 사람 {i}")).await;
+        fake.streams.lock().unwrap().insert(stream, "H264".into());
+    }
+    sync(&db, &api, &cfg).await.unwrap();
+    assert_eq!(statuses(&db).await, ["recording"]);
+    // 다른 사람(demo2)의 방송은 남은 자리로 녹화된다. 두 번 돌려도 demo1은 여전히 1개.
+    let c2 = call(&r, "POST", "/auth/demo/2", None, None, None)
+        .await
+        .3
+        .unwrap();
+    let (_, b, _, _) = call(
+        &r,
+        "POST",
+        "/broadcasts",
+        Some(json!({"title": "다른 사람"})),
+        Some(&c2),
+        None,
+    )
+    .await;
+    let other = b["id"].as_i64().unwrap();
+    sqlx::query("UPDATE broadcasts SET status = 'live', started_at = now() WHERE id = $1")
+        .bind(other)
+        .execute(&db)
+        .await
+        .unwrap();
+    fake.streams.lock().unwrap().insert(
+        b["stream_name"].as_str().unwrap().to_string(),
+        "H264".into(),
+    );
+    sync(&db, &api, &cfg).await.unwrap();
+    sync(&db, &api, &cfg).await.unwrap();
+    let per_owner: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT u.username, count(*) FROM recordings r JOIN broadcasts b ON b.id = r.broadcast_id
+           JOIN users u ON u.id = b.owner_id WHERE r.status = 'recording' GROUP BY u.username ORDER BY u.username",
+    )
+    .fetch_all(&db)
+    .await
+    .unwrap();
+    assert_eq!(
+        per_owner,
+        [("demo1".to_string(), 1), ("demo2".to_string(), 1)]
+    );
+    let _ = std::fs::remove_dir_all(dir);
 }
