@@ -26,6 +26,8 @@ struct FakeOme {
     deleted: Arc<Mutex<Vec<String>>>,
     /// Some(코드)면 목록 조회가 그 상태 코드로 실패한다(OME 오류 흉내)
     list_error: Arc<Mutex<Option<u16>>>,
+    /// Some(코드)면 스트림 끊기가 그 상태 코드로 실패한다(#131)
+    delete_error: Arc<Mutex<Option<u16>>>,
 }
 
 /// 진짜 OME처럼 `Authorization: Basic base64(토큰)`이 없으면 401
@@ -64,6 +66,10 @@ async fn fake_ome() -> (FakeOme, OmeApi) {
                 |State(f): State<FakeOme>, h: HeaderMap, Path(name): Path<String>| async move {
                     if !authorized(&h) {
                         return StatusCode::UNAUTHORIZED;
+                    }
+                    if let Some(code) = *f.delete_error.lock().unwrap() {
+                        f.deleted.lock().unwrap().push(format!("failed:{name}"));
+                        return StatusCode::from_u16(code).unwrap();
                     }
                     f.streams.lock().unwrap().remove(&name);
                     f.deleted.lock().unwrap().push(name);
@@ -1233,4 +1239,36 @@ async fn open_broadcast_limit_holds_under_concurrent_requests(db: PgPool) {
         .await
         .unwrap();
     assert_eq!(open, 5);
+}
+
+/// #131: 송출 키를 바꿀 때 OME가 옛 송출을 끊지 못하면 성공으로 보이지 않고 502로 알린다(3번 시도).
+/// 다시 누르면(OME가 돌아오면) 끊기고 새 키를 받는다.
+#[sqlx::test]
+async fn rotating_key_reports_when_the_old_stream_cannot_be_stopped(db: PgPool) {
+    let (fake, ome) = fake_ome().await;
+    let r = router(db, ome).await;
+    let owner = login(&r, 1).await;
+    let b = create(&r, &owner, "키 바꾸기 실패").await;
+    let id = b["id"].as_i64().unwrap();
+    let name = b["stream_name"].as_str().unwrap().to_string();
+    fake.streams.lock().unwrap().insert(name.clone());
+    *fake.delete_error.lock().unwrap() = Some(500);
+    let path = format!("/broadcasts/{id}/stream-key");
+    let (code, j) = call(&r, "POST", &path, None, Some(&owner)).await;
+    assert_eq!(code, StatusCode::BAD_GATEWAY);
+    assert!(j["error"].as_str().unwrap().contains("끊지 못했습니다"));
+    let failed = fake
+        .deleted
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|d| d.starts_with("failed:"))
+        .count();
+    assert_eq!(failed, 3);
+    // OME가 돌아오면 다시 눌러 끊기고 새 키를 받는다
+    *fake.delete_error.lock().unwrap() = None;
+    let (code, j) = call(&r, "POST", &path, None, Some(&owner)).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(j["stream_key"].as_str().unwrap().len(), 64);
+    assert!(!fake.streams.lock().unwrap().contains(&name));
 }

@@ -1713,7 +1713,16 @@ function ownerPanel(b: Broadcast, onChange: (b: Broadcast) => void, publisher: P
       if (!confirm('송출 키를 새로 만들까요? 옛 주소는 더 쓸 수 없고, 옛 키로 송출 중이면 끊깁니다.')) return;
       // 이 브라우저에서 송출 중이면 먼저 멈춘다(서버도 옛 키 송출을 끊는다)
       await publisher.stop('송출 키를 새로 만들어 송출을 멈췄습니다. 다시 시작하면 새 키로 송출합니다.');
-      const p = await rotateStreamKey(b.id);
+      let p;
+      try {
+        p = await rotateStreamKey(b.id);
+      } catch (e) {
+        // 실패해도(502, #131) 키는 이미 바뀌었을 수 있다. 옛 주소를 보여 두지 않는다.
+        publishBox.replaceChildren(
+          el('p', { className: 'hint', textContent: "'송출 주소 보기'를 다시 눌러 지금 주소를 확인하세요." }),
+        );
+        throw e;
+      }
       showKey(p.whip_path, true);
     });
     publishBox.replaceChildren(
