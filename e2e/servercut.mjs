@@ -1,6 +1,6 @@
 // 서버가 송출을 끊었을 때 방송자 화면이 바로 아는지 시험 (#136).
 // 주인 창에서 화면 공유 송출 → 다른 창(같은 계정)에서 송출 키를 다시 만듦(서버가 옛 송출을 끊음)
-// → 주인 창이 브라우저의 "연결 실패" 판단(약 9초)이나 15초 기다림 없이 "서버에서 송출이 끊겼습니다"를 보여 준다.
+// → 주인 창이 브라우저의 "연결 실패" 판단(약 10초)이나 15초 기다림 없이 "서버에서 송출이 끊겼습니다"를 보여 준다.
 // node servercut.mjs [BASE]
 import puppeteer from 'puppeteer-core';
 import { CHROME } from './chrome.mjs';
@@ -48,7 +48,8 @@ try {
   const secs = ((Date.now() - t0) / 1000).toFixed(1);
   results.push(`INFO owner noticed after ${secs}s`);
   check('owner told the server cut the stream', msg.includes('서버에서 송출이 끊겼습니다'), msg.replace(/\s+/g, ' ').slice(0, 200));
-  check('noticed within 8s', Number(secs) <= 8, `${secs}s`);
+  // 11-14 로컬 5.6~5.8초, 고치기 전 10.8초. 느린 PC·실제 서버의 여유를 두고 9초로 본다.
+  check('noticed within 9s', Number(secs) <= 9, `${secs}s`);
 } catch (e) {
   check('no exception', false, e.stack);
 } finally {

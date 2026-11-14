@@ -531,7 +531,13 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
   // 이 화면에서 쓰는 송출기(소유자만). 화면을 떠나면 송출을 멈춘다.
   const publisher = isOwner ? new Publisher() : null;
   // 송출 연결이 끊기면 서버가 이 방송을 아직 "방송 중"으로 보는지 묻는다(#136). 못 물어보면 예전처럼 기다린다.
-  if (publisher) publisher.serverStopped = async () => (await getBroadcast(id)).status !== 'live';
+  // 종료된 방송은 다시 시작할 수 없으니 문구를 나눈다(#136 리뷰).
+  if (publisher)
+    publisher.serverStopped = async () => {
+      const s = (await getBroadcast(id)).status;
+      if (s === 'live') return null;
+      return s === 'ended' ? '방송이 종료돼 송출을 멈췄습니다' : '서버에서 송출이 끊겼습니다. 다시 시작할 수 있습니다.';
+    };
   const owner = publisher ? ownerPanel(b, (nb) => { b = nb; paint(); }, publisher) : null;
   const studio = publisher ? studioPanel(() => b, publisher) : null;
   main.append(

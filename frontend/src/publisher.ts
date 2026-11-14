@@ -96,8 +96,9 @@ export class Publisher {
   state: PublishState = 'idle';
   /** 상태가 바뀔 때마다 부른다(화면 갱신용). detail은 멈춘 이유나 실패 이유. */
   onState: (s: PublishState, detail?: string) => void = () => {};
-  /** 연결이 끊겼을 때 서버에서도 송출이 끝났는지 묻는다(#136). true면 15초를 기다리지 않고 바로 멈춘다. */
-  serverStopped: () => Promise<boolean> = async () => false;
+  /** 연결이 끊겼을 때 서버에서도 송출이 끝났는지 묻는다(#136). 멈춘 이유 문구를 돌려주면 15초를 기다리지 않고
+   *  바로 멈추고, null이면(서버가 아직 방송 중) 잠깐 끊긴 것으로 보고 예전처럼 기다린다. */
+  serverStopped: () => Promise<string | null> = async () => null;
 
   private current: Attempt | null = null;
 
@@ -173,9 +174,9 @@ export class Publisher {
           // 서버가 이미 송출을 끝냈으면(다른 기기에서 종료·키 다시 만들기 등) 브라우저가 "실패"로 판단할 때까지
           // 기다리지 않고 바로 멈춘다(#136, 전에는 약 9초 늦게 알았다). 서버가 아직 방송 중이면 잠깐 끊긴 것으로 본다.
           void this.serverStopped()
-            .then((gone) => {
-              if (gone && this.current === a && pc.connectionState === 'disconnected') {
-                void this.stop('서버에서 송출이 끊겼습니다. 다시 시작할 수 있습니다.');
+            .then((reason) => {
+              if (reason && this.current === a && pc.connectionState === 'disconnected') {
+                void this.stop(reason);
               }
             })
             .catch(() => {});
