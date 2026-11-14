@@ -85,8 +85,11 @@ async fn main() {
     }
     // 한 시간마다 24시간 지난 테스트 계정(guest_)을 지운다(#35). 첫 번째는 바로 돈다.
     // DEMO_LOGIN을 나중에 꺼도 남은 테스트 계정이 지워지도록 설정과 상관없이 돌린다(#35 리뷰).
+    // 채팅방(메모리). 정리 작업과 라우터가 같은 것을 쓴다.
+    let chat = onair_backend::chat::Hub::default();
     {
         let db = db.clone();
+        let chat = chat.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(3600));
             loop {
@@ -95,6 +98,14 @@ async fn main() {
                     Ok(0) => {}
                     Ok(n) => tracing::info!(count = n, "지난 테스트 계정을 지웠습니다"),
                     Err(e) => tracing::warn!(error = %e, "테스트 계정 정리 실패"),
+                }
+                // DB에서 사라진 방송(테스트 계정 정리 등)의 채팅방·기록을 메모리에서도 지운다(#125 리뷰)
+                match sqlx::query_scalar::<_, i64>("SELECT id FROM broadcasts")
+                    .fetch_all(&db)
+                    .await
+                {
+                    Ok(ids) => chat.retain_broadcasts(&ids.into_iter().collect()),
+                    Err(e) => tracing::warn!(error = %e, "채팅방 정리용 방송 목록 조회 실패"),
                 }
                 // 만료된 세션 정리(#25 A11)
                 if let Err(e) = onair_backend::auth::cleanup_sessions(&db).await {
@@ -178,7 +189,7 @@ async fn main() {
     };
 
     let router = app(AppState {
-        chat: Default::default(),
+        chat,
         db,
         auth,
         ome: ome_api,

@@ -98,6 +98,18 @@ pub async fn ban(
     if target == user.id {
         return Err(ApiError::BadRequest("자기 자신은 제한할 수 없습니다"));
     }
+    // 그 방송에서 채팅·댓글을 쓴 사람만 막을 수 있다(#125). 아니면 번호를 차례로 막고 목록을 읽어 회원 아이디를 모을 수 있다.
+    // 없는 사용자와 관계없는 사용자는 같은 404라서, 응답으로 회원이 있는지도 알 수 없다.
+    let commented: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM comments WHERE broadcast_id = $1 AND author_id = $2)",
+    )
+    .bind(id)
+    .bind(target)
+    .fetch_one(&state.db)
+    .await?;
+    if !commented && !state.chat.chatted(id, target) {
+        return Err(NOT_ACTIVE);
+    }
     let minutes: Option<i64> = input.ten_minutes.then_some(BAN_MINUTES);
     // 대상 사용자가 없으면(외래 키) 0행이라 404
     let done = sqlx::query(
@@ -114,10 +126,14 @@ pub async fn ban(
     .await?
     .rows_affected();
     if done == 0 {
-        return Err(ApiError::NotFound);
+        return Err(NOT_ACTIVE);
     }
     Ok(StatusCode::NO_CONTENT)
 }
+
+/// 막을 수 없는 대상(#125). 없는 사용자와 이 방송에서 쓴 적 없는 사용자를 구분하지 않는다.
+const NOT_ACTIVE: ApiError =
+    ApiError::NotFoundBecause("이 방송에서 채팅·댓글을 쓴 적이 있는 사용자만 제한할 수 있습니다");
 
 /// 제한을 푼다. 없어도 204(여러 번 불러도 결과가 같다).
 pub async fn unban(

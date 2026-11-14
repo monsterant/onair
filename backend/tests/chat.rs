@@ -395,3 +395,26 @@ async fn chat_streams_are_capped_per_client(db: PgPool) {
     assert_eq!(hub.open_streams("1.1.1.1"), 0);
     assert_eq!(hub.open_streams("2.2.2.2"), 0);
 }
+
+/// #125 리뷰: 채팅한 사람 기록은 방송마다 상한이 따로다(한 방송을 채워도 다른 방송은 기록된다).
+/// DB에 없는 방송의 방·기록은 retain_broadcasts로 지운다.
+#[test]
+fn chatters_are_capped_per_broadcast_and_pruned() {
+    use onair_backend::chat::CHATTERS_PER_BROADCAST;
+    let hub = Hub::default();
+    for uid in 0..(CHATTERS_PER_BROADCAST as i64 + 10) {
+        hub.publish(1, "chat", Some(uid), "u", "x");
+    }
+    assert!(hub.chatted(1, 0));
+    assert!(!hub.chatted(1, CHATTERS_PER_BROADCAST as i64 + 5));
+    // 다른 방송은 따로 센다
+    hub.publish(2, "chat", Some(7), "u", "x");
+    assert!(hub.chatted(2, 7));
+    // 후원 안내(사용자 없음)는 적지 않는다
+    hub.publish(2, "donation", None, "u", "x");
+    // 방송 2만 DB에 남았다면 방송 1의 기록·방은 지워진다
+    hub.retain_broadcasts(&[2].into_iter().collect());
+    assert!(!hub.chatted(1, 0));
+    assert!(hub.subscribe(1).0.is_empty());
+    assert!(hub.chatted(2, 7));
+}
