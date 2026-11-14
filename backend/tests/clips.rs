@@ -265,3 +265,51 @@ async fn deleting_the_recording_removes_its_clips(db: PgPool) {
         .unwrap();
     assert_eq!(left, 0);
 }
+
+/// #111 리뷰: 다시보기 하나에 장면은 200개까지. 동시에 여러 요청이 와도 넘지 않는다.
+#[sqlx::test]
+async fn clips_per_recording_limit_holds_under_concurrent_requests(db: PgPool) {
+    let r = router(db.clone());
+    let rid = recording(&r, &db, "ready").await;
+    // 197개를 미리 넣어 둔다(만든 사람은 demo1)
+    sqlx::query(
+        "INSERT INTO clips (recording_id, user_id, title, start_ms, end_ms)
+         SELECT $1, u.id, '미리', 0, 1000 FROM users u, generate_series(1, 197) WHERE u.username = 'demo1'",
+    )
+    .bind(rid)
+    .execute(&db)
+    .await
+    .unwrap();
+    let maker = login(&r, 2).await;
+    let mut tasks = Vec::new();
+    for _ in 0..8 {
+        let r = r.clone();
+        let maker = maker.clone();
+        tasks.push(tokio::spawn(async move {
+            call(
+                &r,
+                "POST",
+                &format!("/recordings/{rid}/clips"),
+                Some(json!({"title": "동시", "start": 0, "end": 2})),
+                Some(&maker),
+            )
+            .await
+            .0
+        }));
+    }
+    let (mut created, mut full) = (0, 0);
+    for t in tasks {
+        match t.await.unwrap() {
+            StatusCode::CREATED => created += 1,
+            StatusCode::CONFLICT => full += 1,
+            other => panic!("예상하지 못한 응답 {other}"),
+        }
+    }
+    assert_eq!((created, full), (3, 5));
+    let total: i64 = sqlx::query_scalar("SELECT count(*) FROM clips WHERE recording_id = $1")
+        .bind(rid)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(total, 200);
+}

@@ -795,6 +795,13 @@ async function clipPage(main: HTMLElement, id: number, gen: number) {
       video.currentTime = c.end;
     }
   });
+  // 끝에서 기본 재생 버튼을 누르면 장면 처음부터, 시작보다 앞으로 넘기면 시작으로(그 구간만 보게, #111 리뷰)
+  video.addEventListener('play', () => {
+    if (video.currentTime >= c.end - 0.05) video.currentTime = c.start;
+  });
+  video.addEventListener('seeked', () => {
+    if (video.currentTime < c.start - 0.25) video.currentTime = c.start;
+  });
   const again = el('button', { type: 'button', className: 'small', textContent: '장면 다시 보기' });
   again.onclick = () => {
     toStart();

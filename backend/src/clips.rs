@@ -163,24 +163,38 @@ pub async fn create(
     {
         return Err(ApiError::TooManyRequests);
     }
-    // 다시보기 하나에 장면이 너무 많으면 막는다. 세기와 넣기를 한 문장으로 해서 동시에 와도 넘지 않게 한다.
-    let id: Option<i64> = sqlx::query_scalar(
+    // 다시보기 하나에 장면이 너무 많으면 막는다(#111 리뷰). 트랜잭션 안에서 그 다시보기 줄을 먼저 잠근다(FOR UPDATE).
+    // 그러면 같은 다시보기에 대한 장면 저장이 한 번에 하나씩 돌아, 동시에 와도 세기와 넣기 사이에 개수가 넘지 않는다.
+    // 잠그는 동안 다시보기가 지워지지도 않는다(지워졌으면 404).
+    let mut tx = state.db.begin().await?;
+    sqlx::query_scalar::<_, i64>(
+        "SELECT id FROM recordings WHERE id = $1 AND status = 'ready' FOR UPDATE",
+    )
+    .bind(recording_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or(ApiError::NotFound)?;
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM clips WHERE recording_id = $1")
+        .bind(recording_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    if count >= CLIPS_PER_RECORDING {
+        return Err(ApiError::Conflict(
+            "이 다시보기에는 장면을 더 만들 수 없습니다",
+        ));
+    }
+    let id: i64 = sqlx::query_scalar(
         "INSERT INTO clips (recording_id, user_id, title, start_ms, end_ms)
-         SELECT $1, $2, $3, $4, $5
-          WHERE (SELECT count(*) FROM clips WHERE recording_id = $1) < $6
-         RETURNING id",
+         VALUES ($1, $2, $3, $4, $5) RETURNING id",
     )
     .bind(recording_id)
     .bind(user.id)
     .bind(&title)
     .bind(start_ms)
     .bind(end_ms)
-    .bind(CLIPS_PER_RECORDING)
-    .fetch_optional(&state.db)
+    .fetch_one(&mut *tx)
     .await?;
-    let id = id.ok_or(ApiError::Conflict(
-        "이 다시보기에는 장면을 더 만들 수 없습니다",
-    ))?;
+    tx.commit().await?;
     let clip: Clip = sqlx::query_as(select_clip!("WHERE c.id = $1"))
         .bind(id)
         .fetch_one(&state.db)
