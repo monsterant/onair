@@ -360,3 +360,31 @@ async fn guest_login_shares_the_login_rate_limit(db: PgPool) {
     assert_eq!(login.status, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(count(&db, "SELECT count(*) FROM users").await, 20);
 }
+
+/// #130: 운영에서 공용 데모(demo1·demo2)만 닫는다. 테스트 계정 버튼(/auth/guest)과 설정 응답은 그대로다.
+#[sqlx::test]
+async fn shared_demo_can_be_closed_while_guest_stays_open(db: PgPool) {
+    let r = app(AppState {
+        chat: Default::default(),
+        rec: Default::default(),
+        toss: Default::default(),
+        ome: Default::default(),
+        db,
+        auth: AuthConfig {
+            demo_login: true,
+            shared_demo_off: true,
+            ..Default::default()
+        },
+    });
+    for n in ["1", "2"] {
+        let res = call(&r, "POST", &format!("/auth/demo/{n}"), None, None).await;
+        assert_eq!(res.status, StatusCode::NOT_FOUND, "demo {n}");
+        assert!(res.cookie.is_none());
+    }
+    // 테스트 계정은 그대로 만들어진다
+    let (_, name, _) = guest(&r).await;
+    assert!(name.starts_with("guest_"));
+    // 화면은 이 값을 보고 테스트 계정 버튼을 보인다(계속 true)
+    let cfg = call(&r, "GET", "/config", None, None).await;
+    assert_eq!(cfg.json["demo_login"], true);
+}

@@ -104,6 +104,7 @@ cd frontend && npm install && npm run dev
 | `OME_ADMISSION_SECRET` | 예 | 16자 이상 임의 값 | 미디어 서버 송출 허락 웹훅 서명 키 |
 | `OME_API_TOKEN`, `OME_API_URL` | 예 | 16자 이상 임의 값 / http://localhost:8081 | 미디어 서버 관리 API |
 | `DEMO_LOGIN` | 아니오 | true | 테스트 계정 버튼 켜기 |
+| `SHARED_DEMO_OFF` | 아니오 | (비움) / true (배포) | 누구나 같은 계정이 되는 공용 데모(`/api/auth/demo/1`, `/2`)만 닫기. 테스트 계정 버튼은 그대로. 배포 compose 기본값은 true |
 | `TOSS_CLIENT_KEY`, `TOSS_SECRET_KEY` | 아니오 | test_gck_… / test_gsk_… | 도네이션(토스 **테스트** 키). 비우면 도네이션이 꺼진다. `test_`로 시작하지 않으면 켜지 않는다 |
 | `RECORDINGS_DIR` | 아니오 | ../recordings (로컬) / /rec (배포) | 녹화 파일 폴더. 미디어 서버와 같은 폴더를 본다. 비우면 녹화가 꺼진다 |
 - 전체 예시와 설명은 `.env.example`(로컬), `deploy/.env.example`(배포)에 있다. 진짜 비밀값은 저장소에 없다.
@@ -168,6 +169,7 @@ docker compose -f deploy/docker-compose.yml --env-file deploy/.env up -d --build
   - "다른 사용자" 권한을 확인하려면 **시크릿 창이나 다른 브라우저**에서 한 번 더 누른다. 그 계정으로 첫 번째 계정의 방송을 수정·종료·삭제하면 거절된다(403).
   - 테스트 계정은 만든 지 24시간이 지나면 방송과 함께 지워진다(지금 송출 중이면 남긴다). 일반 가입에서는 `guest`, `demo`로 시작하는 아이디를 쓸 수 없다.
   - 한 사람이 동시에 가질 수 있는 끝나지 않은 방송은 5개까지다.
+  - 백엔드 시험용 공용 계정(demo1·demo2, `/api/auth/demo/1`·`/2`)은 배포 서버에서 닫혀 있다(`SHARED_DEMO_OFF=true`). 누구나 같은 계정이 되어 남의 시험 방송을 바꿀 수 있기 때문이다.
   - 자동 시험용 공용 계정 API(`POST /auth/demo/1`, `/auth/demo/2`)도 남아 있다. 화면 버튼은 없다.
 
 ### 방송
