@@ -1318,3 +1318,47 @@ async fn reconcile_does_not_undo_changes_made_after_it_listed_streams(db: PgPool
     assert_eq!(status(id(&started)).await, "live");
     assert_eq!(status(id(&old_ready)).await, "live");
 }
+
+/// #110: 맞춰 보기가 방송을 "방송 중"으로 바꿀 때도 처음 시작 시각은 비어 있을 때만 적는다.
+#[sqlx::test]
+async fn reconcile_fills_first_start_time_only_once(db: PgPool) {
+    let (fake, ome) = fake_ome().await;
+    let r = router(db.clone(), ome.clone()).await;
+    let owner = login(&r, 1).await;
+    let fresh = create(&r, &owner, "처음").await;
+    let resumed = create(&r, &owner, "다시").await;
+    sqlx::query("UPDATE broadcasts SET updated_at = now() - interval '1 minute'")
+        .execute(&db)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE broadcasts SET first_started_at = now() - interval '1 hour', started_at = now() - interval '10 minutes' WHERE id = $1")
+        .bind(resumed["id"].as_i64().unwrap())
+        .execute(&db)
+        .await
+        .unwrap();
+    {
+        let mut s = fake.streams.lock().unwrap();
+        s.insert(fresh["stream_name"].as_str().unwrap().to_string());
+        s.insert(resumed["stream_name"].as_str().unwrap().to_string());
+    }
+    onair_backend::ome::reconcile(&db, &ome).await.unwrap();
+    let mins = |b: &Value| {
+        let db = db.clone();
+        let id = b["id"].as_i64().unwrap();
+        async move {
+            sqlx::query_scalar::<_, Option<f64>>(
+                "SELECT EXTRACT(EPOCH FROM now() - first_started_at)::float8 / 60 FROM broadcasts WHERE id = $1 AND status = 'live'",
+            )
+            .bind(id)
+            .fetch_one(&db)
+            .await
+            .unwrap()
+            .expect("방송 중이고 처음 시작 시각이 있어야 한다")
+        }
+    };
+    assert!(mins(&fresh).await < 1.0, "비어 있던 방송은 지금으로 적는다");
+    assert!(
+        mins(&resumed).await > 59.0,
+        "이미 있던 처음 시작 시각은 그대로"
+    );
+}

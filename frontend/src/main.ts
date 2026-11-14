@@ -634,7 +634,6 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
 
 // ---------- 녹화·다시보기(#47) ----------
 
-/** 걸린 시간 "12분 3초" */
 /** 초를 '1시간 2분 3초' 꼴로(#110) */
 function clock(total: number): string {
   const h = Math.floor(total / 3600);
@@ -643,6 +642,7 @@ function clock(total: number): string {
   return [h ? `${h}시간` : '', h || m ? `${m}분` : '', `${s}초`].filter(Boolean).join(' ');
 }
 
+/** 걸린 시간 "12분 3초" */
 function duration(r: Recording): string {
   if (!r.ended_at) return '';
   const s = Math.max(0, Math.round((new Date(r.ended_at).getTime() - new Date(r.started_at).getTime()) / 1000));

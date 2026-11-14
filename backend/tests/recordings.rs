@@ -1635,6 +1635,26 @@ async fn owner_sees_broadcast_summary_with_peak_viewers(db: PgPool) {
         .await
         .3
         .unwrap();
+    // 후원: 적립(paid) 2건만 더하고 대기·실패는 빼야 한다
+    for (i, amount, status) in [
+        (1, 5000, "paid"),
+        (2, 3000, "paid"),
+        (3, 10000, "pending"),
+        (4, 7000, "failed"),
+    ] {
+        sqlx::query(
+            "INSERT INTO donations (order_id, broadcast_id, donor_id, amount, status, payment_key, paid_at)
+             SELECT $1, $2, u.id, $3, $4, CASE WHEN $4 = 'paid' THEN $1 END, CASE WHEN $4 = 'paid' THEN now() END
+               FROM users u WHERE u.username = 'demo2'",
+        )
+        .bind(format!("sum-{bid}-{i}"))
+        .bind(bid)
+        .bind(amount)
+        .bind(status)
+        .execute(&db)
+        .await
+        .unwrap();
+    }
     let sum = format!("/broadcasts/{bid}/summary");
     let (st, s, _, _) = call(&r, "GET", &sum, None, Some(&owner), None).await;
     assert_eq!(st, StatusCode::OK, "{s}");
@@ -1642,7 +1662,8 @@ async fn owner_sees_broadcast_summary_with_peak_viewers(db: PgPool) {
     assert!((89..=92).contains(&secs), "{s}");
     assert_eq!(s["peak_viewers"], 10);
     assert_eq!(s["chat_count"], 0);
-    assert_eq!(s["donation_total"], 0);
+    assert_eq!(s["donation_total"], 8000);
+    assert_eq!(s["donation_count"], 2);
     assert_eq!(
         call(&r, "GET", &sum, None, Some(&other), None).await.0,
         StatusCode::FORBIDDEN
