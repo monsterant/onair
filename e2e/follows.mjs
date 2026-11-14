@@ -1,9 +1,10 @@
 // 방송자 즐겨찾기 시험 (#102): 방송 화면에서 즐겨찾기·해제, 목록 위 "즐겨찾는 방송자" 칸, 주인·비로그인에게는 버튼 없음.
 // node follows.mjs [BASE]
-// 방송 중 표시는 실제 송출 없이 보기 어려워서 로컬(docker 컨테이너 rodlspr-db-1, 다르면 E2E_DB_CONTAINER)에서만 방송 상태를 직접 바꿔 본다.
+// 방송 중 표시는 실제 송출 없이 보기 어려워서 로컬(docker DB 컨테이너, e2e/local-db.mjs)에서만 방송 상태를 직접 바꿔 본다.
 import { execFileSync } from 'child_process';
 import puppeteer from 'puppeteer-core';
 import { CHROME } from './chrome.mjs';
+import { DB_CONTAINER } from './local-db.mjs';
 
 const BASE = (process.argv[2] ?? 'http://localhost:5173/').replace(/\/$/, '');
 const LOCAL = /localhost|127\.0\.0\.1/.test(BASE);
@@ -11,7 +12,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const results = [];
 const check = (name, ok, extra = '') => results.push(`${ok ? 'PASS' : 'FAIL'} ${name} ${ok ? '' : extra}`);
 const browser = await puppeteer.launch({ executablePath: CHROME, headless: true });
-const psql = (sql) => execFileSync('docker', ['exec', process.env.E2E_DB_CONTAINER || 'rodlspr-db-1', 'psql', '-U', 'onair', '-d', 'onair', '-tAc', sql], { encoding: 'utf8' }).trim();
+const psql = (sql) => execFileSync('docker', ['exec', DB_CONTAINER, 'psql', '-U', 'onair', '-d', 'onair', '-tAc', sql], { encoding: 'utf8' }).trim();
 async function waitFor(fn, ms) {
   const end = Date.now() + ms;
   while (Date.now() < end) { if (await fn()) return true; await sleep(200); }

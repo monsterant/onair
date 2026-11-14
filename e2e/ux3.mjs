@@ -1,9 +1,10 @@
 // 화면 다듬기 시험 (#136): 없는 방송 안내, 보는 사이 끝난 방송의 채팅 입력 칸, 잠깐 멈춘 방송 문구, 입력 칸 이름표.
 // node ux3.mjs [BASE]
-// 잠깐 멈춘 방송은 실제 송출 없이 만들기 어려워서, 로컬(docker 컨테이너 rodlspr-db-1, 다르면 E2E_DB_CONTAINER)에서만 DB로 상태를 바꿔 본다.
+// 잠깐 멈춘 방송은 실제 송출 없이 만들기 어려워서, 로컬(docker DB 컨테이너, e2e/local-db.mjs)에서만 DB로 상태를 바꿔 본다.
 import { execFileSync } from 'child_process';
 import puppeteer from 'puppeteer-core';
 import { CHROME } from './chrome.mjs';
+import { DB_CONTAINER } from './local-db.mjs';
 
 const BASE = (process.argv[2] ?? 'http://localhost:5173/').replace(/\/$/, '');
 const LOCAL = /localhost|127\.0\.0\.1/.test(BASE);
@@ -11,7 +12,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const results = [];
 const check = (name, ok, extra = '') => results.push(`${ok ? 'PASS' : 'FAIL'} ${name} ${ok ? '' : extra}`);
 const browser = await puppeteer.launch({ executablePath: CHROME, headless: true });
-const psql = (sql) => execFileSync('docker', ['exec', process.env.E2E_DB_CONTAINER || 'rodlspr-db-1', 'psql', '-U', 'onair', '-d', 'onair', '-tAc', sql], { encoding: 'utf8' }).trim();
+const psql = (sql) => execFileSync('docker', ['exec', DB_CONTAINER, 'psql', '-U', 'onair', '-d', 'onair', '-tAc', sql], { encoding: 'utf8' }).trim();
 const hasText = (page, t) => page.evaluate((t) => document.body.innerText.includes(t), t);
 // 글자가 나타날 때까지 기다린다(고정 시간 기다림은 느린 환경에서 흔들린다)
 const waitText = (page, t, ms = 8000) => page.waitForFunction((t) => document.body.innerText.includes(t), { timeout: ms }, t).then(() => true).catch(() => false);
