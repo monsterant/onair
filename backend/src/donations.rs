@@ -480,17 +480,18 @@ pub async fn list(
     State(state): State<AppState>,
     Path(broadcast_id): Path<i64>,
 ) -> Result<Json<DonationList>, ApiError> {
+    // 방송 확인·합계·내역·순위를 한 시점의 데이터로 읽는다(#136). 따로 읽으면 그 사이에 후원이 적립돼 합계는 3건인데 내역은 4건처럼 어긋날 수 있다.
+    // REPEATABLE READ: 이 트랜잭션 안의 조회는 모두 처음 조회한 순간의 데이터를 본다. 읽기만 하니 READ ONLY(잠금을 잡지 않고 쓰기를 막지 않는다).
+    // BEGIN 문장에 바로 적어서, 앞에 다른 조회가 끼어 격리 수준을 못 바꾸는 실수가 생기지 않게 한다(#136 리뷰).
+    let mut tx = state
+        .db
+        .begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .await?;
     let exists: Option<i64> = sqlx::query_scalar("SELECT id FROM broadcasts WHERE id = $1")
         .bind(broadcast_id)
-        .fetch_optional(&state.db)
+        .fetch_optional(&mut *tx)
         .await?;
     exists.ok_or(ApiError::NotFound)?;
-    // 합계·내역·순위를 한 시점의 데이터로 읽는다(#136). 따로 읽으면 그 사이에 후원이 적립돼 합계는 3건인데 내역은 4건처럼 어긋날 수 있다.
-    // REPEATABLE READ: 이 트랜잭션 안의 조회는 모두 처음 조회한 순간의 데이터를 본다. 읽기만 하니 READ ONLY.
-    let mut tx = state.db.begin().await?;
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
-        .execute(&mut *tx)
-        .await?;
     let (total, count): (i64, i64) = sqlx::query_as(
         "SELECT COALESCE(SUM(amount), 0)::BIGINT, COUNT(*) FROM donations
           WHERE broadcast_id = $1 AND status = 'paid'",
