@@ -543,6 +543,15 @@ pub async fn list_for_broadcast(
     Ok(Json(rows.into_iter().map(Into::into).collect()))
 }
 
+/// 다시보기 가능한 녹화 하나(장면 저장 #111이 쓴다). 없거나 아직 준비 중이면 None.
+pub async fn find_ready(db: &sqlx::PgPool, id: i64) -> Result<Option<RecordingView>, sqlx::Error> {
+    Ok(sqlx::query_as::<_, Recording>(select_ready!("AND id = $1"))
+        .bind(id)
+        .fetch_optional(db)
+        .await?
+        .map(RecordingView::from))
+}
+
 pub async fn get(
     State(state): State<AppState>,
     Path(id): Path<i64>,
