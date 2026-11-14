@@ -404,6 +404,7 @@ flowchart LR
 | Caddy | 배포 서버 HTTPS·프록시 | https://caddyserver.com |
 | puppeteer-core (Apache-2.0) | 브라우저 시험 | https://github.com/puppeteer/puppeteer |
 | argon2, reqwest, rustls | 비밀번호 저장, 토스 API 호출(https) | https://github.com/RustCrypto/password-hashes, https://github.com/seanmonstar/reqwest, https://github.com/rustls/rustls |
+| unicode-normalization (MIT/Apache-2.0) | 금칙어 비교 전 글자 맞추기(NFKC) | https://github.com/unicode-rs/unicode-normalization |
 | 토스페이먼츠 결제위젯 v2 (테스트 모드) | 도네이션 결제 화면 | https://docs.tosspayments.com |
 
 - 위 오픈소스의 코드를 저장소에 복사해 넣지 않았다. 패키지 관리자(cargo, npm)와 Docker 이미지로 받아 쓴다.
