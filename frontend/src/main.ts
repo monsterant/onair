@@ -221,11 +221,13 @@ async function listPage(main: HTMLElement) {
   };
   main.append(favs);
   // 곧 시작(#114): 목록 중 대기 중이고 예정 시각이 있는 방송을 시각 순으로. 지났으면 "늦어지는 중"
+  // 예정이 1시간 넘게 지났는데 시작하지 않은 방송은 칸에서 뺀다(#136). 방송은 아래 목록에 그대로 있다.
   const upcoming = el('section', { className: 'panel upcoming' });
   upcoming.hidden = true;
+  const STALE_MS = 60 * 60 * 1000;
   const showUpcoming = (items: Broadcast[]) => {
     const list = items
-      .filter((b) => b.status === 'ready' && b.scheduled_at)
+      .filter((b) => b.status === 'ready' && b.scheduled_at && Date.parse(b.scheduled_at) > Date.now() - STALE_MS)
       .sort((a, b) => Date.parse(a.scheduled_at!) - Date.parse(b.scheduled_at!));
     upcoming.replaceChildren(
       el('h3', { textContent: '곧 시작' }),

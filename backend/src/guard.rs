@@ -149,6 +149,16 @@ impl RateLimiter {
         entry.1 += 1;
         true
     }
+
+    /// 세지 않고 지금 막혀 있는지만 본다(#136). 실패할 때만 `allow`로 세는 곳에서 쓴다.
+    pub fn blocked(&self, key: &str) -> bool {
+        let Ok(map) = self.counts.lock() else {
+            return false;
+        };
+        map.get(key).is_some_and(|(start, n)| {
+            Instant::now().duration_since(*start) < self.window && *n >= self.max
+        })
+    }
 }
 
 impl Default for RateLimiter {

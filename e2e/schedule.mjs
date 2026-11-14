@@ -1,9 +1,13 @@
 // 방송 예정 시험 (#114): 주인이 시작 예정 시각을 정하면 목록 "곧 시작"과 방송 화면에 보이고, 지우면 사라진다.
 // node schedule.mjs [BASE]
+import { execFileSync } from 'child_process';
 import puppeteer from 'puppeteer-core';
 import { CHROME } from './chrome.mjs';
 
 const BASE = (process.argv[2] ?? 'http://localhost:5173/').replace(/\/$/, '');
+const LOCAL = /localhost|127.0.0.1/.test(BASE);
+// 지난 예정은 API로 만들 수 없어서(앞으로 7일 안만 받음) 로컬에서만 DB로 시각을 바꿔 본다(#136)
+const psql = (sql) => execFileSync('docker', ['exec', process.env.E2E_DB_CONTAINER || 'rodlspr-db-1', 'psql', '-U', 'onair', '-d', 'onair', '-tAc', sql], { encoding: 'utf8' }).trim();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const results = [];
 const check = (name, ok, extra = '') => results.push(`${ok ? 'PASS' : 'FAIL'} ${name} ${ok ? '' : extra}`);
@@ -53,6 +57,16 @@ try {
   await anon.reload({ waitUntil: 'networkidle2' });
   await sleep(800);
   check('list upcoming no longer shows it', !(await text(anon, '.upcoming')).includes(title), await text(anon, '.upcoming'));
+  if (LOCAL) {
+    // 10분 지난 예정은 '늦어지는 중'으로 남고, 1시간 넘게 지난 예정은 칸에서 빠진다(#136)
+    psql(`UPDATE broadcasts SET scheduled_at = now() - interval '10 minutes' WHERE id = ${Number(bid)}`);
+    await anon.reload({ waitUntil: 'networkidle2' });
+    check('10 min late stays as late', await waitFor(async () => (await text(anon, '.upcoming')).includes('늦어지는 중'), 5000), await text(anon, '.upcoming'));
+    psql(`UPDATE broadcasts SET scheduled_at = now() - interval '2 hours' WHERE id = ${Number(bid)}`);
+    await anon.reload({ waitUntil: 'networkidle2' });
+    await sleep(800);
+    check('2 hours late leaves upcoming', !(await text(anon, '.upcoming')).includes(title), await text(anon, '.upcoming'));
+  }
 } catch (e) {
   check('no exception', false, e.stack);
 } finally {
