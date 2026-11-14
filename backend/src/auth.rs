@@ -561,6 +561,7 @@ pub async fn cleanup_sessions(db: &sqlx::PgPool) -> Result<u64, sqlx::Error> {
 
 /// 만든 지 24시간이 지난 테스트 계정을 지운다(#35). 방송·세션은 외래 키(ON DELETE CASCADE)로 함께 지워진다.
 /// 지금 송출 중(live)인 방송이 있는 계정은 남긴다(송출 도중에 끊기지 않게).
+/// 송출이 잠깐 끊겨 대기(ready)가 된 몇 초 사이에 지우지 않게, 시작한 적이 있고 10분 안에 상태가 바뀐 방송이 있는 계정도 남긴다(#136).
 pub async fn cleanup_guests(db: &sqlx::PgPool) -> Result<u64, sqlx::Error> {
     let done = sqlx::query(
         // 이름만 보지 않고, guest_login만 쓰는 비밀번호 표시 값도 함께 본다.
@@ -569,7 +570,10 @@ pub async fn cleanup_guests(db: &sqlx::PgPool) -> Result<u64, sqlx::Error> {
           WHERE u.username LIKE 'guest\_%'
             AND u.password_hash = '!guest-no-password'
             AND u.created_at < now() - make_interval(hours => $1)
-            AND NOT EXISTS (SELECT 1 FROM broadcasts b WHERE b.owner_id = u.id AND b.status = 'live')",
+            AND NOT EXISTS (SELECT 1 FROM broadcasts b WHERE b.owner_id = u.id
+                              AND (b.status = 'live'
+                                   OR (b.status = 'ready' AND b.started_at IS NOT NULL
+                                       AND b.updated_at > now() - interval '10 minutes')))",
     )
     .bind(GUEST_KEEP_HOURS)
     .execute(db)

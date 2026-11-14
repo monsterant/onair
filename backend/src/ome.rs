@@ -240,6 +240,10 @@ pub async fn stop_after_closing(
 /// - OME에 스트림이 있는데 DB에 끝나지 않은 방송이 없으면(종료됨·삭제됨·모르는 이름) 끊는다(#27 V4).
 /// - OME 목록을 받지 못하면(꺼짐, 401, 500 등) 아무것도 바꾸지 않는다.
 pub async fn reconcile(db: &sqlx::PgPool, api: &crate::ome_api::OmeApi) -> Result<(), sqlx::Error> {
+    // 목록을 묻기 직전의 DB 시각. 그 뒤에 바뀐 방송(웹훅이 먼저 반영한 송출 시작·멈춤, 종료 등)은 이번 차례에
+    // 건드리지 않는다(#136). 그러지 않으면 "목록을 받음 → 송출 멈춤(웹훅이 대기로) → 옛 목록대로 다시 방송 중"이 되고,
+    // 시작 시각까지 새로 적혀 20초 유예와 다음 차례(15초)를 기다리는 동안 최대 약 35초 틀린 "방송 중"이 보였다.
+    let seen_at: time::OffsetDateTime = sqlx::query_scalar("SELECT now()").fetch_one(db).await?;
     let Some(present) = api.list_streams().await else {
         return Ok(());
     };
@@ -247,16 +251,18 @@ pub async fn reconcile(db: &sqlx::PgPool, api: &crate::ome_api::OmeApi) -> Resul
     sqlx::query(
         "UPDATE broadcasts SET status = 'ready', updated_at = now()
           WHERE status = 'live' AND started_at < now() - interval '20 seconds'
-            AND NOT (stream_name = ANY($1))",
+            AND NOT (stream_name = ANY($1)) AND updated_at < $2",
     )
     .bind(&present)
+    .bind(seen_at)
     .execute(db)
     .await?;
     sqlx::query(
         "UPDATE broadcasts SET status = 'live', started_at = now(), updated_at = now(), scheduled_at = NULL
-          WHERE status = 'ready' AND stream_name = ANY($1)",
+          WHERE status = 'ready' AND stream_name = ANY($1) AND updated_at < $2",
     )
     .bind(&present)
+    .bind(seen_at)
     .execute(db)
     .await?;
     let orphans: Vec<String> = sqlx::query_scalar(
