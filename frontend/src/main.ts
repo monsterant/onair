@@ -317,8 +317,8 @@ function loginPage(main: HTMLElement) {
     main.append(el('p', { textContent: `${me.username}님, 로그인되어 있습니다.` }));
     return;
   }
-  const username = el('input', { name: 'username', autocomplete: 'username', placeholder: '아이디 (영문·숫자·_ 3~20자)', required: true });
-  const password = el('input', { name: 'password', type: 'password', autocomplete: 'current-password', placeholder: '비밀번호 (8자 이상)', required: true });
+  const username = el('input', { name: 'username', autocomplete: 'username', placeholder: '아이디 (영문·숫자·_ 3~20자)', ariaLabel: '아이디', required: true });
+  const password = el('input', { name: 'password', type: 'password', autocomplete: 'current-password', placeholder: '비밀번호 (8자 이상)', ariaLabel: '비밀번호', required: true });
   const error = el('p', { className: 'error', role: 'alert' });
   const done = (u: User) => {
     me = u;
@@ -367,8 +367,8 @@ function newPage(main: HTMLElement) {
     main.append(el('p', {}, '방송을 만들려면 ', el('a', { href: '#/login', textContent: '로그인' }), '하세요.'));
     return;
   }
-  const title = el('input', { name: 'title', placeholder: '방송 제목 (100자 이하)', maxLength: 100, required: true });
-  const description = el('textarea', { name: 'description', placeholder: '설명 (1000자 이하, 선택)', maxLength: 1000, rows: 4 });
+  const title = el('input', { name: 'title', placeholder: '방송 제목 (100자 이하)', maxLength: 100, ariaLabel: '방송 제목', required: true });
+  const description = el('textarea', { name: 'description', placeholder: '설명 (1000자 이하, 선택)', maxLength: 1000, rows: 4, ariaLabel: '방송 설명' });
   const category = categorySelect('etc');
   const error = el('p', { className: 'error', role: 'alert' });
   const submit = el('button', { type: 'submit', textContent: '만들기' });
@@ -390,7 +390,9 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
   try {
     b = await getBroadcast(id);
   } catch (e) {
-    main.append(el('p', { className: 'error', textContent: message(e) }), el('a', { href: '#/', textContent: '방송 목록으로' }));
+    // 없는 방송이면 서버 문구 대신 무슨 일인지 알려 준다(#136)
+    const text = e instanceof ApiError && e.status === 404 ? '없는 방송입니다. 지워졌거나 주소가 틀렸습니다.' : message(e);
+    main.append(el('p', { className: 'error', textContent: text }), el('a', { href: '#/', textContent: '방송 목록으로' }));
     // 인터넷이 끊긴 채로 열었으면, 다시 연결될 때 이 화면을 다시 연다(#63 공격 사냥)
     if (!(e instanceof ApiError)) {
       const again = () => {
@@ -517,7 +519,9 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
           : ''
         : b.status === 'ended'
           ? '종료된 방송입니다.'
-          : '아직 방송 전입니다. 방송이 시작되면 자동으로 재생됩니다.';
+          : b.started_at
+            ? '방송이 잠시 멈췄습니다. 다시 시작되면 자동으로 재생됩니다.'
+            : '아직 방송 전입니다. 방송이 시작되면 자동으로 재생됩니다.';
     owner?.update(b);
     studio?.update(b);
   };
@@ -795,10 +799,15 @@ function donationsPanel(b: Broadcast, gen: number): HTMLElement {
     start.onclick = action(start, error, async () => {
       const checkout = await createDonation(b.id, Number(amount.value), message.value);
       widgetBox.hidden = false;
-      const w = await mountWidget(checkout, b.id, '#toss-methods', '#toss-agreement').catch((e) => {
-        widgetBox.hidden = true;
-        throw tossError(e);
-      });
+      // 결제위젯이 그려질 때까지 빈 상자로 보이지 않게 안내한다(#136)
+      const loading = el('p', { className: 'hint', textContent: '결제 화면을 불러오는 중...' });
+      widgetBox.before(loading);
+      const w = await mountWidget(checkout, b.id, '#toss-methods', '#toss-agreement')
+        .catch((e) => {
+          widgetBox.hidden = true;
+          throw tossError(e);
+        })
+        .finally(() => loading.remove());
       // 주문(금액·메시지)이 정해졌으므로 다시 고를 수 없게 하고, 결제하기만 남긴다
       amount.disabled = message.disabled = true;
       start.hidden = true;
@@ -1115,6 +1124,14 @@ function chatPanel(broadcastId: number, current: () => Broadcast): HTMLElement {
       })();
     };
     panel.append(form, error);
+    // 보고 있는 사이에 방송이 끝나면 입력 칸을 안내로 바꾼다(#136). 방송 정보는 상세 화면이 5초마다 새로 읽는다.
+    const endWatch = setInterval(() => {
+      if (current().status === 'ended' && form.isConnected) {
+        form.replaceWith(el('p', { className: 'hint', textContent: '종료된 방송이라 채팅을 쓸 수 없습니다.' }));
+        clearInterval(endWatch);
+      }
+    }, 2_000);
+    cleanup.push(() => clearInterval(endWatch));
   } else {
     panel.append(el('p', { className: 'hint' }, el('a', { href: '#/login', textContent: '로그인' }), '하면 채팅할 수 있습니다.'));
   }
