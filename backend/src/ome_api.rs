@@ -4,6 +4,7 @@
 //! - OME API(8081)는 Docker 안쪽에서만 열고 인터넷에는 열지 않는다. 접근 토큰은 OME_API_TOKEN 환경변수로 받는다.
 //! - 주소를 설정하지 않으면(로컬 개발, 시험) 아무 일도 하지 않는다.
 //! - OME가 응답하지 않아도 방송 API는 실패시키지 않는다. 끊기는 웹훅(종료된 방송 거절)과 맞춰 보기가 한 번 더 챙긴다.
+//!   예외: 송출 키 다시 만들기는 옛 송출을 끊지 못하면 502로 알린다(#131).
 
 use std::{
     collections::{HashMap, HashSet},
@@ -78,7 +79,6 @@ impl OmeApi {
         format!("{base}/v1/vhosts/default/apps/app/streams")
     }
 
-    /// 스트림을 끊는다. 실패해도 오류를 돌려주지 않고 기록만 남긴다.
     /// 스트림을 끊는다. 끊었거나 원래 없으면(404) true, OME가 실패하거나 닿지 않으면 false(#131).
     /// OME API가 설정되지 않았으면(로컬 등) 할 일이 없으니 true.
     pub async fn stop_stream(&self, name: &str) -> bool {
