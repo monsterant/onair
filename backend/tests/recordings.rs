@@ -1472,3 +1472,119 @@ async fn one_owner_records_only_one_broadcast_at_a_time(db: PgPool) {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// #132 리뷰: 한 사람의 녹화가 끝나면 그 사람의 다른 방송이 다음 차례에 녹화된다.
+#[sqlx::test]
+async fn owners_next_broadcast_is_recorded_after_the_first_recording_ends(db: PgPool) {
+    let dir = temp_dir();
+    let (fake, api) = fake_ome(dir.clone()).await;
+    let cfg = RecConfig {
+        dir: Some(dir.clone()),
+    };
+    let r = router(db.clone(), api.clone(), Some(dir.clone()));
+    let (first, s1) = live_broadcast(&r, &db, "첫 방송").await;
+    fake.streams.lock().unwrap().insert(s1, "H264".into());
+    sync(&db, &api, &cfg).await.unwrap();
+    let (second, s2) = live_broadcast(&r, &db, "둘째 방송").await;
+    fake.streams.lock().unwrap().insert(s2, "H264".into());
+    sync(&db, &api, &cfg).await.unwrap();
+    let recording = || async {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT broadcast_id FROM recordings WHERE status = 'recording'",
+        )
+        .fetch_all(&db)
+        .await
+        .unwrap()
+    };
+    assert_eq!(recording().await, [first]);
+    sqlx::query("UPDATE broadcasts SET status = 'ended' WHERE id = $1")
+        .bind(first)
+        .execute(&db)
+        .await
+        .unwrap();
+    sync(&db, &api, &cfg).await.unwrap();
+    assert_eq!(recording().await, [second]);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// #132 리뷰: 주인이 이미 녹화 중이면 그 사람의 다른 방송을 위해 start_soon이 헛돌지 않는다(waiting 조건).
+#[sqlx::test]
+async fn start_soon_does_not_wait_for_an_owner_who_is_already_recording(db: PgPool) {
+    use onair_backend::recordings::start_soon;
+    use std::time::Duration;
+    let dir = temp_dir();
+    let (fake, api) = fake_ome(dir.clone()).await;
+    let cfg = RecConfig { dir: Some(dir) };
+    let r = router(db.clone(), api.clone(), cfg.dir.clone());
+    for i in 0..2 {
+        let (_, s) = live_broadcast(&r, &db, &format!("한 사람 {i}")).await;
+        fake.streams.lock().unwrap().insert(s, "H264".into());
+    }
+    sync(&db, &api, &cfg).await.unwrap();
+    assert_eq!(statuses(&db).await, ["recording"]);
+    let calls = *fake.codec_calls.lock().unwrap();
+    let t = std::time::Instant::now();
+    start_soon(&db, &api, &cfg, Duration::from_millis(100), 10)
+        .await
+        .unwrap();
+    assert!(
+        t.elapsed() < Duration::from_millis(500),
+        "{:?}",
+        t.elapsed()
+    );
+    assert_eq!(*fake.codec_calls.lock().unwrap(), calls);
+    assert_eq!(statuses(&db).await, ["recording"]);
+}
+
+/// #132: 다시보기가 3GB를 넘으면 테스트 계정의 다시보기를 먼저 지운다(더 새것이라도). 일반 회원 것은 남는다.
+#[sqlx::test]
+async fn total_size_cap_removes_test_account_replays_first(db: PgPool) {
+    let dir = temp_dir();
+    let (_, api) = fake_ome(dir.clone()).await;
+    let cfg = RecConfig {
+        dir: Some(dir.clone()),
+    };
+    let r = router(db.clone(), api.clone(), Some(dir.clone()));
+    let (member, _) = live_broadcast(&r, &db, "회원").await;
+    let (guest, _) = live_broadcast(&r, &db, "테스트 계정").await;
+    let gid: i64 = sqlx::query_scalar(
+        "INSERT INTO users (username, password_hash) VALUES ('guest_abc123abc123', '!guest-no-password') RETURNING id",
+    )
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE broadcasts SET owner_id = $1 WHERE id = $2")
+        .bind(gid)
+        .bind(guest)
+        .execute(&db)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE broadcasts SET status = 'ended'")
+        .execute(&db)
+        .await
+        .unwrap();
+    // 1.5GB 3개: 회원 30분 전, 회원 20분 전, 테스트 계정 10분 전(가장 새것) → 4.5GB > 3GB → 하나를 지운다
+    for (i, bid, ago) in [(1, member, 30), (2, member, 20), (3, guest, 10)] {
+        let file = format!("rec-{bid}-0000000{i}.mp4");
+        std::fs::write(dir.join(&file), b"x").unwrap();
+        sqlx::query(
+            "INSERT INTO recordings (broadcast_id, record_id, file_name, format, title, owner_username, status, started_at, ended_at, bytes)
+             VALUES ($1, $2, $3, 'mp4', 't', 'x', 'ready', now() - make_interval(mins => $4), now(), 1610612736)",
+        )
+        .bind(bid)
+        .bind(format!("rec-{bid}-0000000{i}"))
+        .bind(&file)
+        .bind(ago)
+        .execute(&db)
+        .await
+        .unwrap();
+    }
+    sync(&db, &api, &cfg).await.unwrap();
+    let left: Vec<i64> = sqlx::query_scalar("SELECT broadcast_id FROM recordings ORDER BY id")
+        .fetch_all(&db)
+        .await
+        .unwrap();
+    assert_eq!(left, [member, member]);
+    assert!(!dir.join(format!("rec-{guest}-00000003.mp4")).exists());
+    let _ = std::fs::remove_dir_all(dir);
+}

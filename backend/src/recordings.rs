@@ -86,6 +86,7 @@ pub async fn start_soon(
 }
 
 /// 방송 중인데 아직 녹화가 없는 방송이 있고, 동시 녹화 자리도 남았는지.
+/// 주인이 이미 다른 방송을 녹화 중이면 그 방송은 기다리지 않는다(start_missing과 같은 조건, #132).
 /// 자리가 없으면 다시 시도해도 시작할 수 없으니 기다리지 않는다(#59 리뷰).
 async fn waiting(db: &sqlx::PgPool) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar(
@@ -255,7 +256,7 @@ async fn stop_all(db: &sqlx::PgPool, api: &OmeApi) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
-/// 1. 방송 중인데 녹화 중이 아닌 방송의 녹화를 시작한다(동시 녹화 수 상한 안에서)
+/// 1. 방송 중인데 녹화 중이 아닌 방송의 녹화를 시작한다(동시 녹화 수 상한 안에서, 주인마다 1개, #132)
 async fn start_missing(db: &sqlx::PgPool, api: &OmeApi) -> Result<(), sqlx::Error> {
     let active: i64 =
         sqlx::query_scalar("SELECT count(*) FROM recordings WHERE status = 'recording'")
@@ -447,10 +448,16 @@ async fn settle_finishing(db: &sqlx::PgPool, dir: &FsPath) -> Result<(), sqlx::E
     Ok(())
 }
 
-/// 4. 다시보기 합계가 몫을 넘으면 오래된 다시보기부터 지운다
+/// 4. 다시보기 합계가 몫을 넘으면 테스트 계정의 다시보기부터, 그다음 오래된 다시보기부터 지운다.
+/// 테스트 계정의 녹화로 3GB를 채워 일반 회원의 다시보기가 밀려 지워지지 않게 한다(#132).
+/// 테스트 계정은 auth::cleanup_guests와 같은 기준(이름 + 비밀번호 표시 값)으로 가린다.
 async fn enforce_cap(db: &sqlx::PgPool, dir: &FsPath) -> Result<(), sqlx::Error> {
     let rows: Vec<(i64, String, i64)> = sqlx::query_as(
-        "SELECT id, file_name, bytes FROM recordings WHERE status = 'ready' ORDER BY started_at ASC, id ASC",
+        r"SELECT r.id, r.file_name, r.bytes FROM recordings r
+            JOIN broadcasts b ON b.id = r.broadcast_id JOIN users u ON u.id = b.owner_id
+          WHERE r.status = 'ready'
+          ORDER BY (u.username LIKE 'guest_%' AND u.password_hash = '!guest-no-password') DESC,
+                   r.started_at ASC, r.id ASC",
     )
     .fetch_all(db)
     .await?;
@@ -462,7 +469,7 @@ async fn enforce_cap(db: &sqlx::PgPool, dir: &FsPath) -> Result<(), sqlx::Error>
         }
         total -= bytes;
         {
-            tracing::info!(%file, "디스크 상한을 넘어 오래된 다시보기를 지움");
+            tracing::info!(%file, "디스크 상한을 넘어 다시보기를 지움");
             sqlx::query("DELETE FROM recordings WHERE id = $1")
                 .bind(id)
                 .execute(db)
