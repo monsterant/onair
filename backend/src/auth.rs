@@ -39,6 +39,10 @@ pub struct AuthConfig {
     pub comment_limiter: crate::guard::RateLimiter,
     /// 채팅 횟수 제한(사용자 하나당, #86). 기본은 1분에 20번(3초에 한 번꼴). 댓글 몫과 따로 센다.
     pub chat_limiter: crate::guard::RateLimiter,
+    /// 채팅·댓글 횟수 제한(보낸 곳 IP 하나당, #126). 사용자 몫과 따로 센다. 테스트 계정을 새로 만들어 사용자 몫을
+    /// 피해도 같은 곳에서 보내는 양은 늘지 않게 한다. None이면 걸지 않는다(시험 기본값). 운영 값은 main.rs.
+    pub chat_ip_limiter: Option<crate::guard::RateLimiter>,
+    pub comment_ip_limiter: Option<crate::guard::RateLimiter>,
     /// 결제 승인 통지 횟수 제한(IP 하나당). 로그인 없이 부르는 길이라 따로 둔다(#41 리뷰).
     pub notify_limiter: crate::guard::RateLimiter,
 }

@@ -78,6 +78,15 @@ async fn main() {
     let auth = onair_backend::auth::AuthConfig {
         demo_login: std::env::var("DEMO_LOGIN").is_ok_and(|v| v.trim() == "true"),
         shared_demo_off: std::env::var("SHARED_DEMO_OFF").is_ok_and(|v| v.trim() == "true"),
+        // 같은 곳(IP)에서 1분에 채팅 60번, 댓글 30번까지(#126). 한 집·교실처럼 IP를 나눠 쓰는 사람들도 넉넉하게.
+        chat_ip_limiter: Some(onair_backend::guard::RateLimiter::new(
+            60,
+            Duration::from_secs(60),
+        )),
+        comment_ip_limiter: Some(onair_backend::guard::RateLimiter::new(
+            30,
+            Duration::from_secs(60),
+        )),
         ..Default::default()
     };
     if auth.demo_login {

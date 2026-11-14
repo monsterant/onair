@@ -142,6 +142,7 @@ pub async fn list(
 pub async fn create(
     State(state): State<AppState>,
     user: CurrentUser,
+    headers: axum::http::HeaderMap,
     Path(broadcast_id): Path<i64>,
     Json(input): Json<CommentInput>,
 ) -> Result<(StatusCode, Json<Comment>), ApiError> {
@@ -156,6 +157,12 @@ pub async fn create(
         .auth
         .comment_limiter
         .allow(&format!("user:{}", user.id))
+    {
+        return Err(ApiError::TooManyRequests);
+    }
+    // 같은 곳(IP)에서 쓰는 양도 센다(#126). 사용자 몫을 먼저 봐서, 자기 몫을 다 쓴 사람이 같은 IP의 다른 사람 몫을 쓰지 않게 한다.
+    if let Some(l) = &state.auth.comment_ip_limiter
+        && !l.allow(&format!("comment:{}", crate::guard::client_key(&headers)))
     {
         return Err(ApiError::TooManyRequests);
     }
