@@ -150,14 +150,24 @@ pub async fn create(
     };
     check_amount(input.amount)?;
     let message = clean_message(&input.message)?;
-    let row: Option<(i64, String)> =
-        sqlx::query_as("SELECT owner_id, title FROM broadcasts WHERE id = $1")
+    let row: Option<(i64, String, Vec<String>)> =
+        sqlx::query_as("SELECT owner_id, title, banned_words FROM broadcasts WHERE id = $1")
             .bind(broadcast_id)
             .fetch_optional(&state.db)
             .await?;
-    let (owner_id, title) = row.ok_or(ApiError::NotFound)?;
+    let (owner_id, title, words) = row.ok_or(ApiError::NotFound)?;
     if owner_id == user.id {
         return Err(ApiError::Forbidden("자기 방송에는 후원할 수 없습니다"));
+    }
+    // 방송 주인이 막은 사람은 후원도 못 한다(#127). 테스트 결제는 공짜라 후원 메시지가 채팅 제한을 피하는 길이 된다.
+    if crate::moderation::banned(&state.db, broadcast_id, user.id).await? {
+        return Err(crate::moderation::BANNED);
+    }
+    // 후원 메시지에도 금칙어를 적용한다(#127). 결제창을 열기 전에 거절한다.
+    if crate::moderation::has_banned_word(&message, &words) {
+        return Err(ApiError::BadRequest(
+            "방송 주인이 막은 단어가 들어 있습니다",
+        ));
     }
     // 대기 주문을 쌓아 DB를 채우는 것을 막는다(사용자 하나당 1분 20번, 댓글과 같은 몫)
     if !state
@@ -290,8 +300,38 @@ async fn announce(state: &AppState, d: &Donation) {
         None => None,
     };
     let name = donor.unwrap_or_else(|| "알 수 없는 사용자".into());
+    // 끝난 방송에는 채팅 안내를 올리지 않는다(#127, 채팅도 끝난 방송에는 쓸 수 없다).
+    // 주문 뒤 결제 사이에 금칙어가 바뀌었을 수 있어 지금 목록으로 한 번 더 본다. 들어 있으면 메시지만 뺀다.
+    let row: Option<(String, Vec<String>)> =
+        match sqlx::query_as("SELECT status, banned_words FROM broadcasts WHERE id = $1")
+            .bind(d.broadcast_id)
+            .fetch_optional(&state.db)
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("후원 안내용 방송 조회 실패, 안내를 건너뜀: {e}");
+                return;
+            }
+        };
+    let Some((status, words)) = row else {
+        return;
+    };
+    if status == "ended" {
+        return;
+    }
+    // 막히기 전에 만든 주문을 막힌 뒤 결제해도 메시지는 채팅에 내보내지 않는다(#127 리뷰). 금액 안내만 남긴다.
+    let donor_banned = match d.donor_id {
+        Some(id) => crate::moderation::banned(&state.db, d.broadcast_id, id)
+            .await
+            .unwrap_or(true),
+        None => false,
+    };
     let mut text = format!("{}원을 후원했습니다", won(d.amount));
-    if !d.message.is_empty() {
+    if !d.message.is_empty()
+        && !donor_banned
+        && !crate::moderation::has_banned_word(&d.message, &words)
+    {
         text.push_str(&format!(" — {}", d.message));
     }
     state

@@ -1202,3 +1202,163 @@ async fn second_payment_for_the_same_order_is_not_credited_again(db: PgPool) {
     assert_eq!(s["total"], 2000);
     assert_eq!(s["count"], 1);
 }
+
+/// #127: 막힌 사람은 후원 주문도 403, 후원 메시지에 금칙어가 있으면 400.
+/// 주문 뒤 금칙어가 생기면 채팅 안내에서 메시지만 빠지고, 끝난 방송에는 안내가 없다.
+#[sqlx::test]
+async fn banned_users_and_banned_words_cannot_use_donations(db: PgPool) {
+    let (fake, toss) = fake_toss().await;
+    let hub = onair_backend::chat::Hub::default();
+    let r = router_with_chat(db, toss, hub.clone());
+    let owner = login(&r, 1).await;
+    let donor = login(&r, 2).await;
+    let b = call(
+        &r,
+        "POST",
+        "/broadcasts",
+        Some(json!({"title": "후원 제한"})),
+        Some(&owner),
+    )
+    .await;
+    let bid = b.json["id"].as_i64().unwrap();
+    let me = call(&r, "GET", "/auth/me", None, Some(&donor)).await;
+    let donor_id = me.json["id"].as_i64().unwrap();
+    let words = format!("/broadcasts/{bid}/banned-words");
+    assert_eq!(
+        call(
+            &r,
+            "PUT",
+            &words,
+            Some(json!({"words": ["광고", "Spam"]})),
+            Some(&owner)
+        )
+        .await
+        .status,
+        StatusCode::OK
+    );
+    let order_with = |msg: &'static str| {
+        let r = r.clone();
+        let donor = donor.clone();
+        async move {
+            call(
+                &r,
+                "POST",
+                &format!("/broadcasts/{bid}/donations"),
+                Some(json!({"amount": 1000, "message": msg})),
+                Some(&donor),
+            )
+            .await
+        }
+    };
+    // 금칙어가 든 메시지는 400(영문은 대소문자 무시). 없는 메시지는 된다.
+    let o = order_with("무료 광고합니다").await;
+    assert_eq!(o.status, StatusCode::BAD_REQUEST);
+    assert!(o.json["error"].as_str().unwrap().contains("막은 단어"));
+    assert_eq!(
+        order_with("no SPAM here").await.status,
+        StatusCode::BAD_REQUEST
+    );
+    // 막히기 전에 만들어 둔 주문(메시지 있음)
+    let early = order_with("미리 쌓은 메시지").await;
+    assert_eq!(early.status, StatusCode::CREATED);
+    let early_oid = early.json["order_id"].as_str().unwrap().to_string();
+    let ok = order_with("응원해요").await;
+    assert_eq!(ok.status, StatusCode::CREATED);
+    let oid = ok.json["order_id"].as_str().unwrap().to_string();
+    // 주문 뒤 "응원"이 금칙어가 되면, 결제가 끝나도 채팅 안내에서 메시지만 빠진다
+    assert_eq!(
+        call(
+            &r,
+            "PUT",
+            &words,
+            Some(json!({"words": ["응원"]})),
+            Some(&owner)
+        )
+        .await
+        .status,
+        StatusCode::OK
+    );
+    fake.pay("pk_127", &oid, 1000);
+    let c = call(
+        &r,
+        "POST",
+        "/donations/confirm",
+        confirm_body("pk_127", &oid, 1000),
+        Some(&donor),
+    )
+    .await;
+    assert_eq!(c.status, StatusCode::OK, "{:?}", c.json);
+    let (recent, _) = hub.subscribe(bid);
+    assert_eq!(recent.len(), 1);
+    assert_eq!(recent[0].text, "1,000원을 후원했습니다");
+    // 막힌 사람은 후원 주문도 403
+    assert_eq!(
+        call(
+            &r,
+            "PUT",
+            &format!("/broadcasts/{bid}/bans/{donor_id}"),
+            Some(json!({"ten_minutes": false})),
+            Some(&owner)
+        )
+        .await
+        .status,
+        StatusCode::NO_CONTENT
+    );
+    let o = order_with("").await;
+    assert_eq!(o.status, StatusCode::FORBIDDEN);
+    assert!(o.json["error"].as_str().unwrap().contains("막았습니다"));
+    // 막히기 전 주문을 막힌 뒤 결제하면 적립은 되지만 채팅 안내에는 메시지가 없다(#127 리뷰)
+    fake.pay("pk_127e", &early_oid, 1000);
+    let c = call(
+        &r,
+        "POST",
+        "/donations/confirm",
+        confirm_body("pk_127e", &early_oid, 1000),
+        Some(&donor),
+    )
+    .await;
+    assert_eq!(c.status, StatusCode::OK, "{:?}", c.json);
+    let (recent, _) = hub.subscribe(bid);
+    assert_eq!(recent.len(), 2);
+    assert_eq!(recent[1].text, "1,000원을 후원했습니다");
+    // 풀면 다시 된다. 방송을 끝낸 뒤 결제가 끝나면 적립은 되지만 채팅 안내는 없다.
+    assert_eq!(
+        call(
+            &r,
+            "DELETE",
+            &format!("/broadcasts/{bid}/bans/{donor_id}"),
+            None,
+            Some(&owner)
+        )
+        .await
+        .status,
+        StatusCode::NO_CONTENT
+    );
+    let o2 = order_with("").await;
+    assert_eq!(o2.status, StatusCode::CREATED);
+    let oid2 = o2.json["order_id"].as_str().unwrap().to_string();
+    assert_eq!(
+        call(
+            &r,
+            "POST",
+            &format!("/broadcasts/{bid}/end"),
+            None,
+            Some(&owner)
+        )
+        .await
+        .status,
+        StatusCode::OK
+    );
+    fake.pay("pk_127b", &oid2, 1000);
+    let c = call(
+        &r,
+        "POST",
+        "/donations/confirm",
+        confirm_body("pk_127b", &oid2, 1000),
+        Some(&donor),
+    )
+    .await;
+    assert_eq!(c.status, StatusCode::OK, "{:?}", c.json);
+    assert_eq!(summary(&r, bid).await["total"], 3000);
+    assert_eq!(hub.subscribe(bid).0.len(), 2);
+}
