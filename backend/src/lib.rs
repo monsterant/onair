@@ -5,6 +5,7 @@
 pub mod auth;
 pub mod broadcasts;
 pub mod chat;
+pub mod clips;
 pub mod comments;
 pub mod donations;
 pub mod follows;
@@ -115,6 +116,12 @@ pub fn app(state: AppState) -> Router {
         .route("/donations/confirm", post(donations::confirm))
         .route("/recordings", get(recordings::list))
         .route("/recordings/{id}", get(recordings::get))
+        // 다시보기 장면 저장(#111): 목록·장면 보기는 누구나, 만들기는 로그인, 지우기는 만든 사람만
+        .route(
+            "/recordings/{id}/clips",
+            get(clips::list).post(clips::create),
+        )
+        .route("/clips/{id}", get(clips::get).delete(clips::delete))
         .route(
             "/broadcasts/{id}/recordings",
             get(recordings::list_for_broadcast),

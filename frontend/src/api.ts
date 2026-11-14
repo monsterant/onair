@@ -183,4 +183,12 @@ export type Recording = {
 
 export const listRecordings = () => api<Recording[]>('GET', '/recordings');
 export const getRecording = (id: number) => api<Recording>('GET', `/recordings/${id}`);
+
+/** 다시보기 장면(#111). 시작·끝은 초 */
+export type Clip = { id: number; recording_id: number; user_id: number; username: string; title: string; start: number; end: number; created_at: string };
+export const listClips = (recordingId: number) => api<Clip[]>('GET', `/recordings/${recordingId}/clips`);
+export const createClip = (recordingId: number, title: string, start: number, end: number) =>
+  api<Clip>('POST', `/recordings/${recordingId}/clips`, { title, start, end });
+export const getClip = (id: number) => api<Clip & { recording: Recording }>('GET', `/clips/${id}`);
+export const deleteClip = (id: number) => api<void>('DELETE', `/clips/${id}`);
 export const listBroadcastRecordings = (broadcastId: number) => api<Recording[]>('GET', `/broadcasts/${broadcastId}/recordings`);

@@ -9,6 +9,11 @@ import {
   ApiError,
   type Broadcast,
   getSummary,
+  type Clip,
+  listClips,
+  createClip,
+  getClip,
+  deleteClip,
   type Comment,
   type Recording,
   getRecording,
@@ -695,8 +700,112 @@ async function replayPage(main: HTMLElement, id: number, gen: number) {
     el('p', { className: 'hint', textContent: `방송자: ${r.owner_username} · ${shortTime(r.started_at)} · ${duration(r)} · ${(r.bytes / 1024 / 1024).toFixed(1)}MB` }),
     fitToVideo(el('div', { className: 'player-box' }, video)),
     el('p', {}, el('a', { href: `#/b/${r.broadcast_id}`, textContent: '방송 화면으로' }), ' · ', el('a', { href: '#/recordings', textContent: '다시보기 목록' })),
+    clipsPanel(r, video),
   );
   // 화면을 떠나면 영상 내려받기를 멈춘다
+  cleanup.push(() => {
+    video.pause();
+    video.removeAttribute('src');
+    video.load();
+  });
+}
+
+/** 초를 "1:05" 꼴로(#111) */
+function mmss(sec: number): string {
+  const s = Math.max(0, Math.floor(sec));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+
+/** 다시보기 화면의 장면 칸(#111): 장면 목록, 로그인했으면 지금 위치로 장면 저장 */
+function clipsPanel(r: Recording, video: HTMLVideoElement): HTMLElement {
+  const list = el('ul', { className: 'clip-list' });
+  const error = el('p', { className: 'error', role: 'alert' });
+  const load = async () => {
+    const clips = await listClips(r.id).catch(() => [] as Clip[]);
+    list.replaceChildren(
+      ...clips.map((c) => {
+        const li = el('li', {}, el('a', { href: `#/c/${c.id}`, textContent: c.title }), el('span', { className: 'hint', textContent: ` ${mmss(c.start)}~${mmss(c.end)} · ${c.username}` }));
+        if (me && me.id === c.user_id) {
+          const del = el('button', { type: 'button', className: 'small ghost', textContent: '지우기' });
+          del.onclick = action(del, error, async () => {
+            await deleteClip(c.id);
+            await load();
+          });
+          li.append(' ', del);
+        }
+        return li;
+      }),
+    );
+    if (clips.length === 0) list.append(el('li', { className: 'hint', textContent: '아직 저장한 장면이 없습니다.' }));
+  };
+  void load();
+  const panel = el('section', { className: 'panel clips' }, el('h3', { textContent: '장면' }), list);
+  if (!me) {
+    panel.append(el('p', { className: 'hint' }, el('a', { href: '#/login', textContent: '로그인' }), '하면 장면을 저장할 수 있습니다.'));
+    return panel;
+  }
+  // 지금 재생 위치를 시작으로, 기본 30초(다시보기 끝을 넘지 않게). 장면은 2분까지.
+  const title = el('input', { type: 'text', placeholder: '장면 제목 (50자 이하)', maxLength: 50, ariaLabel: '장면 제목' });
+  const start = el('input', { type: 'number', min: '0', step: '0.1', ariaLabel: '장면 시작(초)', className: 'clip-start' });
+  const end = el('input', { type: 'number', min: '0', step: '0.1', ariaLabel: '장면 끝(초)', className: 'clip-end' });
+  const fromNow = el('button', { type: 'button', className: 'small', textContent: '지금 위치부터 30초' });
+  fromNow.onclick = () => {
+    const s = video.currentTime || 0;
+    const max = Number.isFinite(video.duration) ? video.duration : s + 30;
+    start.value = s.toFixed(1);
+    end.value = Math.min(s + 30, max).toFixed(1);
+  };
+  const save = el('button', { type: 'button', textContent: '장면 저장' });
+  save.onclick = action(save, error, async () => {
+    await createClip(r.id, title.value, Number(start.value), Number(end.value));
+    title.value = '';
+    await load();
+  });
+  panel.append(
+    el('div', { className: 'row clip-form' }, title, el('span', { className: 'hint', textContent: '시작(초)' }), start, el('span', { className: 'hint', textContent: '끝(초)' }), end, fromNow, save),
+    el('p', { className: 'hint', textContent: '장면은 2분까지입니다. 영상을 자르지 않고 재생 위치만 저장합니다.' }),
+    error,
+  );
+  return panel;
+}
+
+/** 장면 화면(#/c/{id}, #111): 그 구간만 재생하고 끝에서 멈춘다 */
+async function clipPage(main: HTMLElement, id: number, gen: number) {
+  let c: Awaited<ReturnType<typeof getClip>>;
+  try {
+    c = await getClip(id);
+  } catch (e) {
+    if (gen !== routeGen) return;
+    const text = e instanceof ApiError && e.status === 404 ? '없는 장면입니다. 지워졌거나 주소가 틀렸습니다.' : message(e);
+    main.append(el('p', { className: 'error', textContent: text }), el('a', { href: '#/recordings', textContent: '다시보기 목록으로' }));
+    return;
+  }
+  if (gen !== routeGen) return;
+  const video = el('video', { controls: true, preload: 'metadata', playsInline: true, className: 'replay clip-video' });
+  // 브라우저의 구간 재생 문법(#t=시작,끝)도 함께 써서 처음부터 그 위치를 받게 한다
+  video.src = `/api${c.recording.url}#t=${c.start},${c.end}`;
+  const toStart = () => {
+    video.currentTime = c.start;
+  };
+  video.addEventListener('loadedmetadata', toStart, { once: true });
+  // 끝에 닿으면 멈춘다(사용자가 끝 뒤로 넘긴 경우도)
+  video.addEventListener('timeupdate', () => {
+    if (video.currentTime >= c.end && !video.paused) {
+      video.pause();
+      video.currentTime = c.end;
+    }
+  });
+  const again = el('button', { type: 'button', className: 'small', textContent: '장면 다시 보기' });
+  again.onclick = () => {
+    toStart();
+    void video.play().catch(() => {});
+  };
+  main.append(
+    el('div', { className: 'detail-head' }, el('span', { className: 'badge ended', textContent: '장면' }), el('h2', { textContent: c.title })),
+    el('p', { className: 'hint', textContent: `${c.recording.title} · ${mmss(c.start)}~${mmss(c.end)} · 저장한 사람 ${c.username}` }),
+    fitToVideo(el('div', { className: 'player-box' }, video)),
+    el('p', {}, again, ' ', el('a', { href: `#/r/${c.recording_id}`, textContent: '전체 다시보기' })),
+  );
   cleanup.push(() => {
     video.pause();
     video.removeAttribute('src');
@@ -1880,11 +1989,13 @@ async function route() {
   if (hash !== '#/login') backAfterLogin = hash;
   const detail = /^#\/b\/(\d+)$/.exec(hash);
   const replay = /^#\/r\/(\d+)$/.exec(hash);
+  const clip = /^#\/c\/(\d+)$/.exec(hash);
   if (hash === '#/login') loginPage(main);
   else if (hash === '#/new') newPage(main);
   else if (detail) await detailPage(main, Number(detail[1]), gen);
   else if (hash === '#/recordings') await recordingsPage(main, gen);
   else if (replay) await replayPage(main, Number(replay[1]), gen);
+  else if (clip) await clipPage(main, Number(clip[1]), gen);
   else await listPage(main);
 }
 
