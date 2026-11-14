@@ -65,6 +65,10 @@ export async function api<T>(method: string, path: string, body?: unknown): Prom
   return data as T;
 }
 
+/** 방송 기록 요약(#110). 방송 주인만 */
+export type BroadcastSummary = { duration_secs: number | null; peak_viewers: number; chat_count: number; donation_total: number; donation_count: number };
+export const getSummary = (id: number) => api<BroadcastSummary>('GET', `/broadcasts/${id}/summary`);
+
 /** 지금 로그인한 사용자. 로그인하지 않았으면 null.
  *  /auth/session은 로그인하지 않아도 200이라 개발자 도구에 401 오류가 찍히지 않는다(#134). */
 export async function currentUser(): Promise<User | null> {

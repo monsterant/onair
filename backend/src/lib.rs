@@ -66,6 +66,8 @@ pub fn app(state: AppState) -> Router {
                 .delete(broadcasts::delete),
         )
         .route("/broadcasts/{id}/publish", get(broadcasts::publish_info))
+        // 방송 기록 요약(#110). 방송 주인만.
+        .route("/broadcasts/{id}/summary", get(broadcasts::summary))
         // 실시간 채팅(#86): 받기는 SSE, 보내기는 POST
         .route("/broadcasts/{id}/chat/stream", get(chat::stream))
         .route("/broadcasts/{id}/chat", axum::routing::post(chat::send))

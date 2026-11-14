@@ -8,6 +8,7 @@ import './style.css';
 import {
   ApiError,
   type Broadcast,
+  getSummary,
   type Comment,
   type Recording,
   getRecording,
@@ -632,6 +633,14 @@ async function detailPage(main: HTMLElement, id: number, gen: number) {
 }
 
 // ---------- 녹화·다시보기(#47) ----------
+
+/** 초를 '1시간 2분 3초' 꼴로(#110) */
+function clock(total: number): string {
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  return [h ? `${h}시간` : '', h || m ? `${m}분` : '', `${s}초`].filter(Boolean).join(' ');
+}
 
 /** 걸린 시간 "12분 3초" */
 function duration(r: Recording): string {
@@ -1790,6 +1799,25 @@ function ownerPanel(b: Broadcast, onChange: (b: Broadcast) => void, publisher: P
 
   // 종료된 방송은 다시 송출할 수 없으니 송출 주소·종료 버튼을 숨기고 안내한다(#27 V15)
   const endedNote = el('p', { className: 'hint', textContent: '종료된 방송은 다시 송출할 수 없습니다. 새로 방송하려면 방송을 새로 만드세요.' });
+  // 방송 기록 요약(#110): 방송이 끝나면 한 번 불러와 보여 준다
+  const summaryBox = el('p', { className: 'broadcast-summary', hidden: true });
+  let summaryLoaded = false;
+  const loadSummary = () => {
+    if (summaryLoaded) return;
+    summaryLoaded = true;
+    getSummary(b.id)
+      .then((s) => {
+        const parts = [
+          `방송 시간 ${s.duration_secs === null ? '-' : clock(s.duration_secs)}`,
+          `최고 시청자 ${s.peak_viewers}명`,
+          `채팅 ${s.chat_count}개`,
+          `후원 ${s.donation_count}건 ${won(s.donation_total)}`,
+        ];
+        summaryBox.textContent = `방송 기록: ${parts.join(' · ')}`;
+        summaryBox.hidden = false;
+      })
+      .catch(() => (summaryLoaded = false));
+  };
   const update = (nb: Broadcast) => {
     b = nb;
     // 예정 시각은 대기 중일 때만 정한다(#114)
@@ -1799,6 +1827,7 @@ function ownerPanel(b: Broadcast, onChange: (b: Broadcast) => void, publisher: P
     end.hidden = ended;
     endedNote.hidden = !ended;
     if (ended) publishBox.replaceChildren();
+    if (ended) loadSummary();
   };
   const panel = el(
     'section',
@@ -1810,6 +1839,7 @@ function ownerPanel(b: Broadcast, onChange: (b: Broadcast) => void, publisher: P
     el('div', { className: 'row' }, save, saved, showPublish, end, del),
     scheduleRow,
     endedNote,
+    summaryBox,
     publishBox,
     error,
   );

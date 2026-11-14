@@ -436,3 +436,38 @@ async fn allowed_publish_kicks_recording_but_rejected_or_viewing_does_not(db: Pg
     assert_eq!(v["allowed"], true);
     assert!(!kicked(&kick).await);
 }
+
+/// #110: 처음 송출을 허락할 때 처음 시작 시각을 적고, 멈췄다(닫힘 알림) 다시 시작해도 바꾸지 않는다.
+#[sqlx::test]
+async fn first_start_time_is_kept_when_publishing_again(db: PgPool) {
+    seed(&db, "ready").await;
+    let r = router(db.clone());
+    let first = || async {
+        sqlx::query_scalar::<_, Option<time::OffsetDateTime>>(
+            "SELECT first_started_at FROM broadcasts WHERE stream_name = $1",
+        )
+        .bind(NAME)
+        .fetch_one(&db)
+        .await
+        .unwrap()
+    };
+    assert!(first().await.is_none());
+    assert_eq!(
+        signed(&r, "incoming", "opening", &publish_url(NAME, SKEY))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let t1 = first().await.expect("처음 시작 시각");
+    signed(&r, "incoming", "closing", &publish_url(NAME, SKEY)).await;
+    assert_eq!(status_of(&db).await, "ready");
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert_eq!(
+        signed(&r, "incoming", "opening", &publish_url(NAME, SKEY))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(status_of(&db).await, "live");
+    assert_eq!(first().await, Some(t1));
+}

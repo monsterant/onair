@@ -1588,3 +1588,89 @@ async fn total_size_cap_removes_test_account_replays_first(db: PgPool) {
     assert!(!dir.join(format!("rec-{guest}-00000003.mp4")).exists());
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// #110: 방송 주인은 방송 기록 요약(방송 시간·최고 시청자·채팅·후원)을 본다. 다른 사람은 403, 로그인 안 하면 401.
+/// 최고 시청자 수는 화면이 방송을 불러올 때 받은 시청자 수로 갱신하고, 커질 때만 바뀐다.
+#[sqlx::test]
+async fn owner_sees_broadcast_summary_with_peak_viewers(db: PgPool) {
+    let dir = temp_dir();
+    let (fake, api) = fake_ome(dir.clone()).await;
+    let r = router(db.clone(), api, None);
+    let (bid, stream) = live_broadcast(&r, &db, "요약 시험").await;
+    fake.viewers.lock().unwrap().insert(stream, 3);
+    let path = format!("/broadcasts/{bid}");
+    assert_eq!(
+        call(&r, "GET", &path, None, None, None).await.1["viewers"],
+        3
+    );
+    let peak = || async {
+        sqlx::query_scalar::<_, i32>("SELECT peak_viewers FROM broadcasts WHERE id = $1")
+            .bind(bid)
+            .fetch_one(&db)
+            .await
+            .unwrap()
+    };
+    assert_eq!(peak().await, 3);
+    // 이미 더 큰 기록이 있으면 작은 값으로 줄이지 않는다
+    sqlx::query("UPDATE broadcasts SET peak_viewers = 10 WHERE id = $1")
+        .bind(bid)
+        .execute(&db)
+        .await
+        .unwrap();
+    call(&r, "GET", &path, None, None, None).await;
+    assert_eq!(peak().await, 10);
+    // 90초 전에 처음 시작해서 지금 끝난 방송
+    sqlx::query(
+        "UPDATE broadcasts SET status = 'ended', ended_at = now(), first_started_at = now() - interval '90 seconds' WHERE id = $1",
+    )
+    .bind(bid)
+    .execute(&db)
+    .await
+    .unwrap();
+    let owner = call(&r, "POST", "/auth/demo/1", None, None, None)
+        .await
+        .3
+        .unwrap();
+    let other = call(&r, "POST", "/auth/demo/2", None, None, None)
+        .await
+        .3
+        .unwrap();
+    // 후원: 적립(paid) 2건만 더하고 대기·실패는 빼야 한다
+    for (i, amount, status) in [
+        (1, 5000, "paid"),
+        (2, 3000, "paid"),
+        (3, 10000, "pending"),
+        (4, 7000, "failed"),
+    ] {
+        sqlx::query(
+            "INSERT INTO donations (order_id, broadcast_id, donor_id, amount, status, payment_key, paid_at)
+             SELECT $1, $2, u.id, $3, $4, CASE WHEN $4 = 'paid' THEN $1 END, CASE WHEN $4 = 'paid' THEN now() END
+               FROM users u WHERE u.username = 'demo2'",
+        )
+        .bind(format!("sum-{bid}-{i}"))
+        .bind(bid)
+        .bind(amount)
+        .bind(status)
+        .execute(&db)
+        .await
+        .unwrap();
+    }
+    let sum = format!("/broadcasts/{bid}/summary");
+    let (st, s, _, _) = call(&r, "GET", &sum, None, Some(&owner), None).await;
+    assert_eq!(st, StatusCode::OK, "{s}");
+    let secs = s["duration_secs"].as_i64().unwrap();
+    assert!((89..=92).contains(&secs), "{s}");
+    assert_eq!(s["peak_viewers"], 10);
+    assert_eq!(s["chat_count"], 0);
+    assert_eq!(s["donation_total"], 8000);
+    assert_eq!(s["donation_count"], 2);
+    assert_eq!(
+        call(&r, "GET", &sum, None, Some(&other), None).await.0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        call(&r, "GET", &sum, None, None, None).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
