@@ -151,18 +151,18 @@ pub async fn create(
     if crate::moderation::banned(&state.db, broadcast_id, user.id).await? {
         return Err(crate::moderation::BANNED);
     }
-    // 같은 곳(IP)에서 쓰는 양도 센다(#126). 테스트 계정을 새로 만들어 사용자 몫을 피하는 도배를 막는다.
-    if let Some(l) = &state.auth.comment_ip_limiter
-        && !l.allow(&format!("comment:{}", crate::guard::client_key(&headers)))
-    {
-        return Err(ApiError::TooManyRequests);
-    }
     // 도배를 막으려고 사용자 하나당 1분 횟수 제한을 건다. 로그인 몫과는 따로 센다(#37 리뷰).
     // 내용 검사를 먼저 해서, 거절된 글은 횟수에 넣지 않는다.
     if !state
         .auth
         .comment_limiter
         .allow(&format!("user:{}", user.id))
+    {
+        return Err(ApiError::TooManyRequests);
+    }
+    // 같은 곳(IP)에서 쓰는 양도 센다(#126). 사용자 몫을 먼저 봐서, 자기 몫을 다 쓴 사람이 같은 IP의 다른 사람 몫을 쓰지 않게 한다.
+    if let Some(l) = &state.auth.comment_ip_limiter
+        && !l.allow(&format!("comment:{}", crate::guard::client_key(&headers)))
     {
         return Err(ApiError::TooManyRequests);
     }

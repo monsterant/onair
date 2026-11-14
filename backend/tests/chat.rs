@@ -501,3 +501,57 @@ async fn chat_and_comments_are_limited_per_client_across_accounts(db: PgPool) {
     assert_eq!(comment(owner.clone()).await, StatusCode::CREATED);
     assert_eq!(comment(a.clone()).await, StatusCode::TOO_MANY_REQUESTS);
 }
+
+/// #126 리뷰: 자기 몫(사용자 1분 횟수)을 다 쓴 사람이 계속 보내도 같은 곳의 다른 사람 몫을 쓰지 않는다.
+/// 내용이 틀려 거절된 글도 같은 곳의 몫을 쓰지 않는다.
+#[sqlx::test]
+async fn one_user_over_their_limit_does_not_use_up_the_shared_ip_limit(db: PgPool) {
+    let r = app(AppState {
+        chat: Hub::default(),
+        rec: Default::default(),
+        toss: Default::default(),
+        ome: Default::default(),
+        db,
+        auth: AuthConfig {
+            demo_login: true,
+            chat_limiter: RateLimiter::new(2, Duration::from_secs(60)),
+            chat_ip_limiter: Some(RateLimiter::new(4, Duration::from_secs(60))),
+            ..Default::default()
+        },
+    });
+    let (bid, owner) = broadcast(&r).await;
+    let a = login(&r, 2).await;
+    let send = |text: &'static str, who: String| {
+        let r = r.clone();
+        async move {
+            r.oneshot(
+                Request::post(format!("/broadcasts/{bid}/chat"))
+                    .header(header::COOKIE, format!("onair_session={who}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("x-forwarded-for", "5.5.5.5")
+                    .body(Body::from(json!({ "text": text }).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+        }
+    };
+    // 빈 글은 400이고 몫을 쓰지 않는다
+    for _ in 0..5 {
+        assert_eq!(send("   ", a.clone()).await, StatusCode::BAD_REQUEST);
+    }
+    // a는 자기 몫 2번을 쓰고, 그 뒤 10번은 자기 몫에서 429
+    assert_eq!(send("a1", a.clone()).await, StatusCode::NO_CONTENT);
+    assert_eq!(send("a2", a.clone()).await, StatusCode::NO_CONTENT);
+    for _ in 0..10 {
+        assert_eq!(send("a3", a.clone()).await, StatusCode::TOO_MANY_REQUESTS);
+    }
+    // 같은 곳의 다른 사람은 남은 몫(4-2=2번)을 쓸 수 있다
+    assert_eq!(send("o1", owner.clone()).await, StatusCode::NO_CONTENT);
+    assert_eq!(send("o2", owner.clone()).await, StatusCode::NO_CONTENT);
+    assert_eq!(
+        send("o3", owner.clone()).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+}
