@@ -1291,7 +1291,19 @@ async fn banned_users_and_banned_words_cannot_use_donations(db: PgPool) {
     let (recent, _) = hub.subscribe(bid);
     assert_eq!(recent.len(), 1);
     assert_eq!(recent[0].text, "1,000원을 후원했습니다");
-    // 막힌 사람은 후원 주문도 403
+    // 막힌 사람은 후원 주문도 403. 막으려면 그 방송에 글을 쓴 적이 있어야 한다(#125)
+    assert_eq!(
+        call(
+            &r,
+            "POST",
+            &format!("/broadcasts/{bid}/comments"),
+            Some(json!({"body": "댓글"})),
+            Some(&donor)
+        )
+        .await
+        .status,
+        StatusCode::CREATED
+    );
     assert_eq!(
         call(
             &r,

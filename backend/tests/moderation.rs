@@ -869,3 +869,81 @@ async fn banned_words_block_chat(db: PgPool) {
         StatusCode::NOT_FOUND
     );
 }
+
+/// #125: 그 방송에서 채팅·댓글을 쓴 사람만 막을 수 있다. 없는 사용자와 관계없는 사용자는 같은 404라
+/// 번호를 차례로 막아 회원 아이디를 모을 수 없다.
+#[sqlx::test]
+async fn only_people_active_in_the_broadcast_can_be_banned(db: PgPool) {
+    let r = router(db.clone(), Hub::default());
+    let (bid, owner, _, other, other_id) = setup(&r).await;
+    let stranger: i64 = sqlx::query_scalar(
+        "INSERT INTO users (username, password_hash) VALUES ('stranger', 'x') RETURNING id",
+    )
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    let ten = Some(json!({"ten_minutes": true}));
+    let ban = |uid: i64| format!("/broadcasts/{bid}/bans/{uid}");
+    // 쓴 적 없는 회원, 없는 번호: 같은 404와 같은 문구, 목록은 비어 있다
+    let (st1, j1, _) = call(&r, "PUT", &ban(stranger), ten.clone(), Some(&owner)).await;
+    let (st2, j2, _) = call(&r, "PUT", &ban(999_999), ten.clone(), Some(&owner)).await;
+    assert_eq!(st1, StatusCode::NOT_FOUND);
+    assert_eq!(st2, StatusCode::NOT_FOUND);
+    assert_eq!(j1, j2);
+    let (_, list, _) = call(
+        &r,
+        "GET",
+        &format!("/broadcasts/{bid}/bans"),
+        None,
+        Some(&owner),
+    )
+    .await;
+    assert_eq!(list, json!([]));
+    // 채팅을 쓰면 막을 수 있다
+    assert_eq!(
+        chat(&r, bid, "안녕하세요", &other).await.0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        call(&r, "PUT", &ban(other_id), ten.clone(), Some(&owner))
+            .await
+            .0,
+        StatusCode::NO_CONTENT
+    );
+    // 다른 방송에서 쓴 것은 상관없다: 주인의 두 번째 방송에서는 아직 막을 수 없다
+    let (_, b2, _) = call(
+        &r,
+        "POST",
+        "/broadcasts",
+        Some(json!({"title": "둘"})),
+        Some(&owner),
+    )
+    .await;
+    let bid2 = b2["id"].as_i64().unwrap();
+    assert_eq!(
+        call(
+            &r,
+            "PUT",
+            &format!("/broadcasts/{bid2}/bans/{other_id}"),
+            ten.clone(),
+            Some(&owner)
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    // 댓글을 쓴 사람도 막을 수 있다
+    assert_eq!(comment(&r, bid2, "댓글", &other).await, StatusCode::CREATED);
+    assert_eq!(
+        call(
+            &r,
+            "PUT",
+            &format!("/broadcasts/{bid2}/bans/{other_id}"),
+            ten,
+            Some(&owner)
+        )
+        .await
+        .0,
+        StatusCode::NO_CONTENT
+    );
+}

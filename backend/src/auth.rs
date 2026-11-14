@@ -56,6 +56,8 @@ pub enum ApiError {
     Forbidden(&'static str),
     Conflict(&'static str),
     NotFound,
+    /// 404에 이유를 붙일 때(#125)
+    NotFoundBecause(&'static str),
     TooManyRequests,
     /// 429에 이유를 붙일 때(천천히 모드 등, #87)
     TooManyRequestsBecause(&'static str),
@@ -74,6 +76,7 @@ impl IntoResponse for ApiError {
             ApiError::Forbidden(m) => (StatusCode::FORBIDDEN, m),
             ApiError::Conflict(m) => (StatusCode::CONFLICT, m),
             ApiError::NotFound => (StatusCode::NOT_FOUND, "찾을 수 없습니다"),
+            ApiError::NotFoundBecause(m) => (StatusCode::NOT_FOUND, m),
             ApiError::TooManyRequests => (
                 StatusCode::TOO_MANY_REQUESTS,
                 "요청이 너무 많습니다. 잠시 뒤에 다시 시도하세요",
