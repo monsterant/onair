@@ -18,8 +18,8 @@ try {
   await p.click('.demo .row button');
   await sleep(1500);
   bid = (await p.evaluate(async () => (await fetch('/api/broadcasts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: '배치 시험' }) })).json())).id;
-  // 버튼의 아래 끝이 창 높이 안이면 스크롤 없이 보인다
-  const bottom = (sel) => p.$eval(sel, (e) => { const r = e.getBoundingClientRect(); return Math.round(r.bottom); }).catch(() => null);
+  // 버튼의 아래 끝이 창 높이 안이면 스크롤 없이 보인다. 숨겨져 크기가 0이면 실패로 본다
+  const bottom = (sel) => p.$eval(sel, (e) => { const r = e.getBoundingClientRect(); return r.height > 0 && r.top >= 0 ? Math.round(r.bottom) : null; }).catch(() => null);
   for (const [name, vp, sel] of [
     ['pc 1280x800', { width: 1280, height: 800 }, '.start-screen'],
     ['phone 375x740', { width: 375, height: 740, isMobile: true, hasTouch: true, deviceScaleFactor: 2 }, '.start-camera'],
