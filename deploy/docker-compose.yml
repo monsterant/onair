@@ -6,11 +6,20 @@
 #   - 비밀값(DB 비밀번호, 서명 키)은 기본값 없이 deploy/.env에서만 받는다.
 name: onair
 
+# 컨테이너 로그 상한(#123). 서비스마다 10MB 파일 3개까지만 남기고 오래된 것부터 지운다.
+# 상한이 없으면 오래 켜 둘수록 로그가 디스크를 채워 DB 쓰기·녹화·인증서 저장이 멈출 수 있다.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   db:
     image: postgres:17-alpine
     restart: unless-stopped
     # 컨테이너 안의 프로그램이 실행 중에 더 높은 권한을 얻지 못하게 한다(#21 S4)
+    logging: *logging
     security_opt: ["no-new-privileges:true"]
     environment:
       POSTGRES_USER: onair
@@ -27,6 +36,7 @@ services:
     build: ../backend
     restart: unless-stopped
     # 컨테이너 안의 프로그램이 실행 중에 더 높은 권한을 얻지 못하게 한다(#21 S4)
+    logging: *logging
     security_opt: ["no-new-privileges:true"]
     environment:
       DATABASE_URL: postgres://onair:${POSTGRES_PASSWORD}@db:5432/onair
@@ -57,6 +67,7 @@ services:
     image: airensoft/ovenmediaengine:v0.21.0
     restart: unless-stopped
     # 컨테이너 안의 프로그램이 실행 중에 더 높은 권한을 얻지 못하게 한다(#21 S4)
+    logging: *logging
     security_opt: ["no-new-privileges:true"]
     environment:
       # 브라우저가 영상 통로로 붙을 주소 = 서버의 공인 IP(고정 IP)
@@ -77,6 +88,7 @@ services:
   # 한 번 실행하고 끝난다. 파일 내용은 그대로 OME 소유(읽기 전용)다.
   rec-init:
     image: busybox:1.36
+    logging: *logging
     security_opt: ["no-new-privileges:true"]
     command: ["sh", "-c", "chmod 0777 /rec"]
     volumes:
@@ -88,6 +100,7 @@ services:
       dockerfile: deploy/web.Dockerfile
     restart: unless-stopped
     # 컨테이너 안의 프로그램이 실행 중에 더 높은 권한을 얻지 못하게 한다(#21 S4)
+    logging: *logging
     security_opt: ["no-new-privileges:true"]
     environment:
       DOMAIN: ${DOMAIN:?deploy/.env에 DOMAIN을 넣으세요}

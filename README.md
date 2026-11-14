@@ -166,6 +166,15 @@ node run-all.mjs https://<배포 주소>/ --gap 60   # 실제 서버. 같은 IP 
 docker compose -f deploy/docker-compose.yml --env-file deploy/.env up -d --build
 ```
 - 열어야 하는 포트: 80·443(TCP), 443(UDP, HTTP/3 선택), 10000~10003(UDP, 영상), 10000·3478(TCP, 영상 우회).
+- 디스크 지키기(#123). 서버 디스크는 19GB라, 차면 DB 쓰기·녹화·인증서 저장이 멈춘다.
+  - 컨테이너 로그는 서비스마다 10MB × 3개까지만 남긴다(`deploy/docker-compose.yml`의 `x-logging`).
+  - 서버에서 빌드하면 빌드 캐시가 한 번에 3~4GB씩 쌓인다(2026-11-14 확인: 한 번 빌드 뒤 3.66GB). 배포가 끝나면 지운다. 서비스·DB·볼륨은 건드리지 않는다.
+  - 배포 전 DB 백업(`~/db-backup-*.sql.gz`)은 14일이 지나면 지운다.
+```bash
+docker builder prune -af
+find ~ -maxdepth 1 -name 'db-backup-*.sql.gz' -mtime +14 -delete
+```
+  - 녹화는 다시보기 3GB(넘으면 테스트 계정 것부터, 그다음 오래된 것부터 지움), 녹화 중인 파일까지 합쳐 비상 한도 4.5GB다. 빌드 캐시를 지우면 남는 공간이 약 12GB라 이 상한으로 둔다.
 
 ## 기능
 
