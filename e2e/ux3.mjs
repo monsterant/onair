@@ -13,6 +13,8 @@ const check = (name, ok, extra = '') => results.push(`${ok ? 'PASS' : 'FAIL'} ${
 const browser = await puppeteer.launch({ executablePath: CHROME, headless: true });
 const psql = (sql) => execFileSync('docker', ['exec', process.env.E2E_DB_CONTAINER || 'rodlspr-db-1', 'psql', '-U', 'onair', '-d', 'onair', '-tAc', sql], { encoding: 'utf8' }).trim();
 const hasText = (page, t) => page.evaluate((t) => document.body.innerText.includes(t), t);
+// 글자가 나타날 때까지 기다린다(고정 시간 기다림은 느린 환경에서 흔들린다)
+const waitText = (page, t, ms = 8000) => page.waitForFunction((t) => document.body.innerText.includes(t), { timeout: ms }, t).then(() => true).catch(() => false);
 
 const guest = async () => {
   const p = await (await browser.createBrowserContext()).newPage();
@@ -34,8 +36,7 @@ try {
 
   // 2. 없는 방송
   await anon.goto(`${BASE}/#/b/999999999`, { waitUntil: 'networkidle2' });
-  await sleep(500);
-  check('missing broadcast message', await hasText(anon, '없는 방송입니다'));
+  check('missing broadcast message', await waitText(anon, '없는 방송입니다'));
 
   // 3. 방송 만들기 화면 이름표
   owner = await guest();
@@ -47,15 +48,14 @@ try {
 
   // 4. 잠깐 멈춘 방송 문구(로컬만): 시작한 적이 있는 대기 방송
   const viewer = await guest();
+  // 시작한 적 없는 방송은 '아직 방송 전'
+  await viewer.goto(`${BASE}/#/b/${bid}`, { waitUntil: 'networkidle2' });
+  check('fresh broadcast says before start', await waitText(viewer, '아직 방송 전입니다'));
   if (LOCAL) {
-    psql(`UPDATE broadcasts SET started_at = now() - interval '1 minute' WHERE id = ${bid}`);
-    await viewer.goto(`${BASE}/#/b/${bid}`, { waitUntil: 'networkidle2' });
-    await sleep(800);
-    check('paused broadcast message', await hasText(viewer, '잠시 멈췄습니다'));
+    psql(`UPDATE broadcasts SET started_at = now() - interval '1 minute' WHERE id = ${Number(bid)}`);
+    await viewer.reload({ waitUntil: 'networkidle2' });
+    check('paused broadcast message', await waitText(viewer, '잠시 멈췄습니다'));
     check('paused broadcast is not "before start"', !(await hasText(viewer, '아직 방송 전입니다')));
-  } else {
-    await viewer.goto(`${BASE}/#/b/${bid}`, { waitUntil: 'networkidle2' });
-    check('fresh broadcast says before start', await hasText(viewer, '아직 방송 전입니다'));
   }
 
   // 5. 보는 사이에 방송이 끝나면 채팅 입력 칸이 안내로 바뀐다
