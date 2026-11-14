@@ -418,3 +418,86 @@ fn chatters_are_capped_per_broadcast_and_pruned() {
     assert!(hub.subscribe(1).0.is_empty());
     assert!(hub.chatted(2, 7));
 }
+
+/// #126: 같은 곳(IP)에서 보내는 채팅·댓글 양은 사용자를 바꿔도 늘지 않는다. 다른 곳은 따로 센다.
+#[sqlx::test]
+async fn chat_and_comments_are_limited_per_client_across_accounts(db: PgPool) {
+    let r = app(AppState {
+        chat: Hub::default(),
+        rec: Default::default(),
+        toss: Default::default(),
+        ome: Default::default(),
+        db,
+        auth: AuthConfig {
+            demo_login: true,
+            chat_ip_limiter: Some(RateLimiter::new(3, Duration::from_secs(60))),
+            comment_ip_limiter: Some(RateLimiter::new(2, Duration::from_secs(60))),
+            ..Default::default()
+        },
+    });
+    let (bid, owner) = broadcast(&r).await;
+    let a = login(&r, 2).await;
+    let send = |text: &'static str, who: String, ip: &'static str| {
+        let r = r.clone();
+        async move {
+            r.oneshot(
+                Request::post(format!("/broadcasts/{bid}/chat"))
+                    .header(header::COOKIE, format!("onair_session={who}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("x-forwarded-for", ip)
+                    .body(Body::from(json!({ "text": text }).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+        }
+    };
+    // 같은 곳에서 두 사람이 합쳐 3번까지, 4번째는 사람을 바꿔도 429
+    assert_eq!(
+        send("1", a.clone(), "1.1.1.1").await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        send("2", owner.clone(), "1.1.1.1").await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        send("3", a.clone(), "1.1.1.1").await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        send("4", owner.clone(), "1.1.1.1").await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    // 다른 곳은 따로 센다
+    assert_eq!(
+        send("5", a.clone(), "2.2.2.2").await,
+        StatusCode::NO_CONTENT
+    );
+    // 내용이 틀린 글은 횟수를 쓰지 않는다(빈 글 400)
+    assert_eq!(
+        send("   ", a.clone(), "3.3.3.3").await,
+        StatusCode::BAD_REQUEST
+    );
+    // 댓글도 같다(2번까지)
+    let comment = |who: String| {
+        let r = r.clone();
+        async move {
+            r.oneshot(
+                Request::post(format!("/broadcasts/{bid}/comments"))
+                    .header(header::COOKIE, format!("onair_session={who}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("x-forwarded-for", "4.4.4.4")
+                    .body(Body::from(json!({ "body": "댓글" }).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+        }
+    };
+    assert_eq!(comment(a.clone()).await, StatusCode::CREATED);
+    assert_eq!(comment(owner.clone()).await, StatusCode::CREATED);
+    assert_eq!(comment(a.clone()).await, StatusCode::TOO_MANY_REQUESTS);
+}

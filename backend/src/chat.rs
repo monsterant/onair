@@ -327,6 +327,7 @@ pub struct ChatInput {
 pub async fn send(
     State(state): State<AppState>,
     user: CurrentUser,
+    headers: HeaderMap,
     Path(id): Path<i64>,
     Json(input): Json<ChatInput>,
 ) -> Result<StatusCode, ApiError> {
@@ -358,6 +359,12 @@ pub async fn send(
         return Err(ApiError::TooManyRequestsBecause(
             "천천히 모드가 켜져 있습니다. 잠시 뒤에 다시 쓰세요",
         ));
+    }
+    // 같은 곳(IP)에서 보내는 양도 센다(#126). 테스트 계정을 새로 만들어 사용자 몫을 피하는 도배를 막는다.
+    if let Some(l) = &state.auth.chat_ip_limiter
+        && !l.allow(&format!("chat:{}", crate::guard::client_key(&headers)))
+    {
+        return Err(ApiError::TooManyRequests);
     }
     // 도배를 막는다. 내용 검사를 먼저 해서 거절된 글은 횟수에 넣지 않는다(댓글과 같음).
     if !state.auth.chat_limiter.allow(&format!("user:{}", user.id)) {

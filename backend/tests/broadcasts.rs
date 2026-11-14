@@ -765,6 +765,8 @@ async fn create_is_rate_limited_per_client(db: PgPool) {
             notify_limiter: Default::default(),
             chat_limiter: Default::default(),
             shared_demo_off: false,
+            chat_ip_limiter: None,
+            comment_ip_limiter: None,
         },
         ome: OmeApi::default(),
     });

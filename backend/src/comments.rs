@@ -142,6 +142,7 @@ pub async fn list(
 pub async fn create(
     State(state): State<AppState>,
     user: CurrentUser,
+    headers: axum::http::HeaderMap,
     Path(broadcast_id): Path<i64>,
     Json(input): Json<CommentInput>,
 ) -> Result<(StatusCode, Json<Comment>), ApiError> {
@@ -149,6 +150,12 @@ pub async fn create(
     // 방송 주인이 막은 사람은 댓글도 쓸 수 없다(#87)
     if crate::moderation::banned(&state.db, broadcast_id, user.id).await? {
         return Err(crate::moderation::BANNED);
+    }
+    // 같은 곳(IP)에서 쓰는 양도 센다(#126). 테스트 계정을 새로 만들어 사용자 몫을 피하는 도배를 막는다.
+    if let Some(l) = &state.auth.comment_ip_limiter
+        && !l.allow(&format!("comment:{}", crate::guard::client_key(&headers)))
+    {
+        return Err(ApiError::TooManyRequests);
     }
     // 도배를 막으려고 사용자 하나당 1분 횟수 제한을 건다. 로그인 몫과는 따로 센다(#37 리뷰).
     // 내용 검사를 먼저 해서, 거절된 글은 횟수에 넣지 않는다.
