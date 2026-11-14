@@ -241,27 +241,35 @@ async fn settle(state: &AppState, d: &Donation, p: &Payment) -> Result<Donation,
         mark_failed(state, d.id).await?;
         return Err(ApiError::BadRequest("결제 정보가 주문과 맞지 않습니다"));
     }
-    // 적립한 결제가 나중에 전액 취소(환불)됐으면 합계에서 뺀다(같은 결제 키일 때만, #41 리뷰).
-    // 부분 취소(PARTIAL_CANCELED)는 전액을 빼면 틀리므로 그대로 둔다. 부분 환불은 이 서비스에서 일어나지 않는다.
-    if p.status == "CANCELED"
-        && d.status == "paid"
-        && d.payment_key.as_deref() == Some(p.payment_key.as_str())
-    {
+    // 전액 취소(환불)된 결제는 주문을 '취소'로 바꾼다(#41 리뷰, #136).
+    // - 이미 이 결제 키로 적립했으면 합계에서 뺀다.
+    // - 아직 대기·실패면 '실패'가 아니라 '취소'로 둔다. 적립은 대기·실패에서만 되므로, 취소를 본 뒤 늦게 도착한
+    //   "결제 완료" 확인(취소 전에 토스에 물어본 요청)이 이 주문을 다시 적립하지 못한다(#136 경쟁).
+    // - 판단은 이 한 문장의 조건으로 DB가 한다. 앞에서 읽은 주문 상태(d.status)가 옛 값이어도, 그 사이 다른 요청이
+    //   적립했으면 같은 결제 키일 때 함께 취소된다.
+    // 부분 취소(PARTIAL_CANCELED)는 전액을 빼면 틀리므로 여기서 다루지 않는다. 부분 환불은 이 서비스에서 일어나지 않는다.
+    if p.status == "CANCELED" {
         sqlx::query(
             "UPDATE donations SET status = 'canceled'
-              WHERE id = $1 AND status = 'paid' AND payment_key = $2",
+              WHERE id = $1 AND (status IN ('pending', 'failed') OR (status = 'paid' AND payment_key = $2))",
         )
         .bind(d.id)
         .bind(&p.payment_key)
         .execute(&state.db)
         .await?;
-        return find(state, &d.order_id).await?.ok_or(ApiError::NotFound);
+        let now = find(state, &d.order_id).await?.ok_or(ApiError::NotFound)?;
+        // 적립했다가 취소된 것은 지금 상태를 돌려준다(예전과 같음). 적립 전에 취소된 것은 결제가 완료되지 않은 것이다.
+        return if d.status == "paid" && now.status == "canceled" {
+            Ok(now)
+        } else {
+            Err(ApiError::Conflict("결제가 완료되지 않았습니다"))
+        };
     }
     if p.status != "DONE" {
-        // 아직 승인 전(READY 등)이면 대기로 두고, 취소·만료면 실패로 둔다
+        // 아직 승인 전(READY 등)이면 대기로 두고, 부분 취소·중단·만료면 실패로 둔다
         if matches!(
             p.status.as_str(),
-            "CANCELED" | "PARTIAL_CANCELED" | "ABORTED" | "EXPIRED"
+            "PARTIAL_CANCELED" | "ABORTED" | "EXPIRED"
         ) {
             mark_failed(state, d.id).await?;
         }
