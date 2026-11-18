@@ -68,6 +68,28 @@
 | 방송 기록 요약 | 방송이 끝나면 주인에게 방송 시간·최고 시청자 수·채팅 수·후원 합계 |
 | 다시보기 장면 저장 | 다시보기의 한 구간(최대 2분)을 장면 링크로 저장, 링크를 열면 그 구간만 재생 |
 
+### 요구사항별 소스 위치
+송출(화면 공유·카메라·마이크·소리 섞기)은 **브라우저 코드**(`frontend/src/`)가 하고, 서버(`backend/src/`)는 송출 허락·방송 상태·권한을 맡는다. 줄 번호를 누르면 그 코드로 간다.
+
+| 요구사항 | 브라우저 코드 (`frontend/src/`) | 서버 코드 (`backend/src/`) |
+|---|---|---|
+| PC 화면을 캡처해 실시간 송출 | [`publisher.ts` `screenAndMic()` L352-387](frontend/src/publisher.ts#L352-L387): `getDisplayMedia`로 화면 캡처 → [`start()` L125-254](frontend/src/publisher.ts#L125-L254): `RTCPeerConnection`에 실어 WHIP으로 미디어 서버에 송출 / 버튼 [`main.ts` L1605-1615](frontend/src/main.ts#L1605-L1615) | [`ome.rs` L122-173](backend/src/ome.rs#L122-L173): 송출 키 확인 후 "방송 중" |
+| 탭·시스템 소리와 마이크를 함께 송출 | [`publisher.ts` L359-363](frontend/src/publisher.ts#L359-L363): 공유 창에서 탭·시스템 오디오 받기(`audio: true`, `systemAudio: 'include'`) → [`mix()` L312-321](frontend/src/publisher.ts#L312-L321): `AudioContext`로 마이크와 한 트랙으로 섞기 → [L153-161](frontend/src/publisher.ts#L153-L161): 섞은 소리를 송출 / 보내는 소리 막대 [`main.ts` L1462-1465](frontend/src/main.ts#L1462-L1465) | — |
+| PC 마이크 음성 송출 | [`publisher.ts` L374-387](frontend/src/publisher.ts#L374-L387): `getUserMedia({audio})`로 마이크를 받아 화면 소리와 섞음. 마이크가 없으면 경고 후 화면만 송출 | — |
+| 방송 시작·종료 시 송출 연결 생성·종료 | [`start()` L125-254](frontend/src/publisher.ts#L125-L254): 연결 생성(WHIP POST) / [`stop()` L299-308](frontend/src/publisher.ts#L299-L308): 연결 닫기(WHIP DELETE) / 버튼 [`main.ts` L1759](frontend/src/main.ts#L1759) | [`ome.rs` L177-204](backend/src/ome.rs#L177-L204): 송출이 닫히면 "대기" / [`broadcasts.rs` `end` L474-491](backend/src/broadcasts.rs#L474-L491): 종료하면 송출을 끊음 |
+| 휴대폰 카메라 영상과 마이크 음성을 함께 송출 | [`publisher.ts` `cameraAndMic()` L473-519](frontend/src/publisher.ts#L473-L519): `getUserMedia({video, audio})`로 앞·뒤 카메라와 마이크 → [`start()`](frontend/src/publisher.ts#L125-L254)로 송출 / 버튼 [`main.ts` L1640-1648](frontend/src/main.ts#L1640-L1648) | [`ome.rs` L122-173](backend/src/ome.rs#L122-L173) |
+| 휴대폰 마이크 음성 송출 | [`publisher.ts` L473-519](frontend/src/publisher.ts#L473-L519): 카메라와 함께 마이크 요청, 안 되면 마이크만 다시 요청 | — |
+| 모바일에서 방송 시작·종료 | 시작 [`main.ts` L1640-1648](frontend/src/main.ts#L1640-L1648), 멈춤 [`main.ts` L1759](frontend/src/main.ts#L1759) → [`stop()` L299-308](frontend/src/publisher.ts#L299-L308), 송출 중 카메라 전환 [`switchVideo()` L262](frontend/src/publisher.ts#L262) | [`broadcasts.rs` `end` L474-491](backend/src/broadcasts.rs#L474-L491) |
+| 다른 기기에서 수신·재생 | [`player.ts` `startPlayer()` L13-30](frontend/src/player.ts#L13-L30): WebRTC로 받고, 안 되면 LL-HLS | [`broadcasts.rs` `list`·`get` L240-283](backend/src/broadcasts.rs#L240-L283) |
+| 방송 정보 등록·조회·수정·삭제 | 만들기 화면 [`main.ts` L373](frontend/src/main.ts#L373), 관리 칸 [`main.ts` L1829](frontend/src/main.ts#L1829) | [`broadcasts.rs` `create` L305-355](backend/src/broadcasts.rs#L305-L355), [`update` L365-397](backend/src/broadcasts.rs#L365-L397), [`delete` L443-470](backend/src/broadcasts.rs#L443-L470) |
+| 방송 중·종료 상태, 종료 시 송출 중단 | — | [`broadcasts.rs` `end` L474-491](backend/src/broadcasts.rs#L474-L491), [`ome.rs` `reconcile` L243-281](backend/src/ome.rs#L243-L281) |
+| 재시작 후에도 조회(방송·녹화) | — | [`migrations/0002_broadcasts.sql`](backend/migrations/0002_broadcasts.sql), [`migrations/0005_recordings.sql`](backend/migrations/0005_recordings.sql), DB 볼륨 [`deploy/docker-compose.yml` L35](deploy/docker-compose.yml#L35) |
+| 회원가입·로그인·로그아웃·인증 상태 | 로그인 화면 [`main.ts` L323](frontend/src/main.ts#L323) | [`auth.rs` L345-447](backend/src/auth.rs#L345-L447), 세션 쿠키 [L270-329](backend/src/auth.rs#L270-L329) |
+| 등록·송출은 로그인 사용자만, 소유자 권한 검증 | — | [`broadcasts.rs` `owned` L286-292](backend/src/broadcasts.rs#L286-L292): 주인이 아니면 403 |
+| 댓글 작성·조회·수정·삭제, 작성자 검증 | 댓글 칸 [`main.ts` L1304](frontend/src/main.ts#L1304) | [`comments.rs` L117-220](backend/src/comments.rs#L117-L220) |
+| 도네이션 요청·서버 승인 검증·중복 적립 방지·합계 | 후원 칸 [`main.ts` L882](frontend/src/main.ts#L882) | [`donations.rs` 주문 L143-216](backend/src/donations.rs#L143-L216), [확인·적립 L239-307](backend/src/donations.rs#L239-L307), [승인 L386-438](backend/src/donations.rs#L386-L438), [통지 L454-486](backend/src/donations.rs#L454-L486), [내역·합계 L490-543](backend/src/donations.rs#L490-L543) |
+| 녹화 저장·목록·상세·재생 | 다시보기 화면 [`main.ts` L668](frontend/src/main.ts#L668), [L685](frontend/src/main.ts#L685) | [`recordings.rs` 녹화 L186-403](backend/src/recordings.rs#L186-L403), [목록·재생 L523-606](backend/src/recordings.rs#L523-L606) |
+
 ## 지원 환경
 
 ### 지원 환경 (PC 방송)
